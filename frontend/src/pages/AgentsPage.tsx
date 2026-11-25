@@ -1,0 +1,2319 @@
+import {
+  type CSSProperties,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import {
+  AlertTriangle,
+  Bot,
+  ChevronRight,
+  ListFilter,
+  PanelLeftClose,
+  PanelLeftOpen,
+  RefreshCw,
+  Settings,
+  X,
+} from "lucide-react";
+import {
+  DropdownSelect,
+  type DropdownSelectOption,
+} from "@/components/DropdownSelect";
+import { ConfirmationDialog } from "@/components/ConfirmationDialog";
+import { useWorkspace } from "@/context/WorkspaceContext";
+import {
+  useCommandHandler,
+  useShortcutScope,
+} from "@/shortcuts/ShortcutProvider";
+import { agentRuntimeApi } from "@/lib/api";
+import type {
+  AcpCapabilityProbe,
+  AgentRuntimeDiagnostics,
+  AgentRuntimeStatus,
+  BaseCodingAgent,
+  JsonValue,
+  PiModelsSyncDiagnostic,
+} from "@/types";
+import {
+  envSummaryToText,
+  filterRuntimeRunners,
+  getRunnerLabel,
+  getRuntimeDisplayState,
+  parseEnvText,
+  parseRuntimeErrorDetails,
+  RUNTIME_TOOL_LABELS,
+  type AgentRuntimeFilter,
+  type RuntimeDisplayState,
+} from "./agent-runtime/agentRuntimeViewModel";
+import { getMissingRuntimeTools } from "./agent-runtime/installGuidance";
+import { AgentInstallGuide } from "./agent-runtime/AgentInstallGuide";
+import {
+  acpCapabilityGates,
+  findAcpSelectConfigOption,
+} from "./team/teamUtils";
+import ampSchema from "../../../shared/schemas/amp.json";
+import claudeCodeSchema from "../../../shared/schemas/claude_code.json";
+import codexSchema from "../../../shared/schemas/codex.json";
+import copilotSchema from "../../../shared/schemas/copilot.json";
+import cursorAgentSchema from "../../../shared/schemas/cursor_agent.json";
+import deepseekHarnessSchema from "../../../shared/schemas/deepseek_harness.json";
+import droidSchema from "../../../shared/schemas/droid.json";
+import geminiSchema from "../../../shared/schemas/gemini.json";
+import hermesSchema from "../../../shared/schemas/hermes.json";
+import kimiCodeSchema from "../../../shared/schemas/kimi_code.json";
+import kiroCliSchema from "../../../shared/schemas/kiro_cli.json";
+import openTeamsCliSchema from "../../../shared/schemas/open_teams_cli.json";
+import opencodeSchema from "../../../shared/schemas/opencode.json";
+import piSchema from "../../../shared/schemas/pi.json";
+import qoderCliSchema from "../../../shared/schemas/qoder_cli.json";
+import qwenCodeSchema from "../../../shared/schemas/qwen_code.json";
+
+type TranslateFn = (
+  key: string,
+  replacements?: Record<string, string | number>,
+) => string;
+
+const cx = (...classes: Array<string | false | null | undefined>) =>
+  classes.filter(Boolean).join(" ");
+
+const brandIconPaths = {
+  alibabaCloud:
+    "M3.996 4.517h5.291L8.01 6.324 4.153 7.506a1.668 1.668 0 0 0-1.165 1.601v5.786a1.668 1.668 0 0 0 1.165 1.6l3.857 1.183 1.277 1.807H3.996A3.996 3.996 0 0 1 0 15.487V8.513a3.996 3.996 0 0 1 3.996-3.996m16.008 0h-5.291l1.277 1.807 3.857 1.182c.715.227 1.17.889 1.165 1.601v5.786a1.668 1.668 0 0 1-1.165 1.6l-3.857 1.183-1.277 1.807h5.291A3.996 3.996 0 0 0 24 15.487V8.513a3.996 3.996 0 0 0-3.996-3.996m-4.007 8.345H8.002v-1.804h7.995Z",
+  amp: "M12 0c6.628 0 12 5.373 12 12s-5.372 12-12 12C5.373 24 0 18.627 0 12S5.373 0 12 0zm-.92 19.278l5.034-8.377a.444.444 0 00.097-.268.455.455 0 00-.455-.455l-2.851.004.924-5.468-.927-.003-5.018 8.367s-.1.183-.1.291c0 .251.204.455.455.455l2.831-.004-.901 5.458z",
+  android:
+    "M18.4395 5.5586c-.675 1.1664-1.352 2.3318-2.0274 3.498-.0366-.0155-.0742-.0286-.1113-.043-1.8249-.6957-3.484-.8-4.42-.787-1.8551.0185-3.3544.4643-4.2597.8203-.084-.1494-1.7526-3.021-2.0215-3.4864a1.1451 1.1451 0 0 0-.1406-.1914c-.3312-.364-.9054-.4859-1.379-.203-.475.282-.7136.9361-.3886 1.5019 1.9466 3.3696-.0966-.2158 1.9473 3.3593.0172.031-.4946.2642-1.3926 1.0177C2.8987 12.176.452 14.772 0 18.9902h24c-.119-1.1108-.3686-2.099-.7461-3.0683-.7438-1.9118-1.8435-3.2928-2.7402-4.1836a12.1048 12.1048 0 0 0-2.1309-1.6875c.6594-1.122 1.312-2.2559 1.9649-3.3848.2077-.3615.1886-.7956-.0079-1.1191a1.1001 1.1001 0 0 0-.8515-.5332c-.5225-.0536-.9392.3128-1.0488.5449zm-.0391 8.461c.3944.5926.324 1.3306-.1563 1.6503-.4799.3197-1.188.0985-1.582-.4941-.3944-.5927-.324-1.3307.1563-1.6504.4727-.315 1.1812-.1086 1.582.4941zM7.207 13.5273c.4803.3197.5506 1.0577.1563 1.6504-.394.5926-1.1038.8138-1.584.4941-.48-.3197-.5503-1.0577-.1563-1.6504.4008-.6021 1.1087-.8106 1.584-.4941z",
+  anthropic:
+    "M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z",
+  claude:
+    "m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z",
+  copilot:
+    "M23.922 16.997C23.061 18.492 18.063 22.02 12 22.02 5.937 22.02.939 18.492.078 16.997A.641.641 0 0 1 0 16.741v-2.869a.883.883 0 0 1 .053-.22c.372-.935 1.347-2.292 2.605-2.656.167-.429.414-1.055.644-1.517a10.098 10.098 0 0 1-.052-1.086c0-1.331.282-2.499 1.132-3.368.397-.406.89-.717 1.474-.952C7.255 2.937 9.248 1.98 11.978 1.98c2.731 0 4.767.957 6.166 2.093.584.235 1.077.546 1.474.952.85.869 1.132 2.037 1.132 3.368 0 .368-.014.733-.052 1.086.23.462.477 1.088.644 1.517 1.258.364 2.233 1.721 2.605 2.656a.841.841 0 0 1 .053.22v2.869a.641.641 0 0 1-.078.256Zm-11.75-5.992h-.344a4.359 4.359 0 0 1-.355.508c-.77.947-1.918 1.492-3.508 1.492-1.725 0-2.989-.359-3.782-1.259a2.137 2.137 0 0 1-.085-.104L4 11.746v6.585c1.435.779 4.514 2.179 8 2.179 3.486 0 6.565-1.4 8-2.179v-6.585l-.098-.104s-.033.045-.085.104c-.793.9-2.057 1.259-3.782 1.259-1.59 0-2.738-.545-3.508-1.492a4.359 4.359 0 0 1-.355-.508Zm2.328 3.25c.549 0 1 .451 1 1v2c0 .549-.451 1-1 1-.549 0-1-.451-1-1v-2c0-.549.451-1 1-1Zm-5 0c.549 0 1 .451 1 1v2c0 .549-.451 1-1 1-.549 0-1-.451-1-1v-2c0-.549.451-1 1-1Zm3.313-6.185c.136 1.057.403 1.913.878 2.497.442.544 1.134.938 2.344.938 1.573 0 2.292-.337 2.657-.751.384-.435.558-1.15.558-2.361 0-1.14-.243-1.847-.705-2.319-.477-.488-1.319-.862-2.824-1.025-1.487-.161-2.192.138-2.533.529-.269.307-.437.808-.438 1.578v.021c0 .265.021.562.063.893Zm-1.626 0c.042-.331.063-.628.063-.894v-.02c-.001-.77-.169-1.271-.438-1.578-.341-.391-1.046-.69-2.533-.529-1.505.163-2.347.537-2.824 1.025-.462.472-.705 1.179-.705 2.319 0 1.211.175 1.926.558 2.361.365.414 1.084.751 2.657.751 1.21 0 1.902-.394 2.344-.938.475-.584.742-1.44.878-2.497Z",
+  gemini:
+    "M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81",
+  openai:
+    "M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z",
+} as const;
+
+type AgentBrandMark = {
+  title: string;
+  path?: string;
+  text?: string;
+  logoSrc?: string;
+  logoMode?: "image" | "mask";
+  logoClassName?: string;
+};
+
+const agentBrandMarks: Record<BaseCodingAgent, AgentBrandMark> = {
+  AMP: {
+    title: "Amp",
+    path: brandIconPaths.amp,
+    logoClassName: "h-6 w-6",
+  },
+  CLAUDE_CODE: { title: "Claude", path: brandIconPaths.claude },
+  CODEX: { title: "OpenAI Codex", path: brandIconPaths.openai },
+  COPILOT: {
+    title: "GitHub Copilot",
+    logoSrc: "/logos/github-copilot-logo.svg",
+    logoMode: "mask",
+    logoClassName: "h-[21px] w-[21px]",
+  },
+  CURSOR_AGENT: {
+    title: "Cursor",
+    logoSrc: "/logos/cursor-logo.svg",
+    logoMode: "mask",
+    logoClassName: "h-[22px] w-[22px]",
+  },
+  DEEPSEEK_HARNESS: {
+    title: "DeepSeek Harness",
+    logoSrc: "/logos/deepseek-logo.svg",
+    logoMode: "mask",
+    logoClassName: "h-[22px] w-[22px]",
+  },
+  DROID: {
+    title: "Droid",
+    logoSrc: "/logos/droid-light.svg",
+    logoClassName: "h-8 w-8",
+  },
+  GEMINI: { title: "Google Gemini", path: brandIconPaths.gemini },
+  HERMES: {
+    title: "Hermes",
+    logoSrc: "/logos/hermes-logo.png",
+    logoClassName: "h-[22px] w-[22px]",
+  },
+  KIMI_CODE: { title: "Kimi", logoSrc: "/logos/kimi-logo.svg" },
+  KIRO_CLI: { title: "Kiro CLI", logoSrc: "/logos/kiro-logo.svg" },
+  OPENCODE: {
+    title: "OpenCode",
+    logoSrc: "/logos/opencode.svg",
+    logoMode: "mask",
+    logoClassName: "h-8 w-8",
+  },
+  OPEN_TEAMS_CLI: {
+    title: "OpenTeams CLI",
+    logoSrc: "/logos/openteams-logo.svg",
+  },
+  PI: {
+    title: "Pi",
+    logoSrc: "/logos/pi-logo.svg",
+    logoMode: "mask",
+    logoClassName: "h-[20px] w-[20px]",
+  },
+  QODER_CLI: {
+    title: "Qoder",
+    logoSrc: "/logos/qoder-logo.svg",
+    logoMode: "mask",
+    logoClassName: "h-[20px] w-[20px]",
+  },
+  QWEN_CODE: {
+    title: "Qwen",
+    logoSrc: "/logos/qwen-dark.svg",
+    logoMode: "mask",
+    logoClassName: "h-8 w-8",
+  },
+};
+
+type JsonSchemaProperty = {
+  title?: string;
+  description?: string;
+  type?: string | string[];
+  enum?: Array<string | number | boolean | null>;
+  format?: string;
+  items?: { type?: string | string[] };
+  additionalProperties?: unknown;
+};
+
+type AgentJsonSchema = {
+  properties?: Record<string, JsonSchemaProperty>;
+};
+
+const agentConfigSchemas: Record<BaseCodingAgent, AgentJsonSchema> = {
+  AMP: ampSchema,
+  CLAUDE_CODE: claudeCodeSchema,
+  CODEX: codexSchema,
+  COPILOT: copilotSchema,
+  CURSOR_AGENT: cursorAgentSchema,
+  DEEPSEEK_HARNESS: deepseekHarnessSchema,
+  DROID: droidSchema,
+  GEMINI: geminiSchema,
+  HERMES: hermesSchema,
+  KIMI_CODE: kimiCodeSchema,
+  KIRO_CLI: kiroCliSchema,
+  OPENCODE: opencodeSchema,
+  OPEN_TEAMS_CLI: openTeamsCliSchema,
+  PI: piSchema,
+  QODER_CLI: qoderCliSchema,
+  QWEN_CODE: qwenCodeSchema,
+};
+
+const hiddenConfigFields = new Set([
+  "env",
+  "run_mode",
+  "mode",
+  "model",
+  "model_provider",
+  "model_reasoning_effort",
+  "model_reasoning_summary",
+  "model_reasoning_summary_format",
+  "reasoning_effort",
+  "thinking_effort",
+  "variant",
+  "effort",
+  "profile",
+]);
+const nullOptionId = "__openteams_null__";
+
+const isHiddenConfigField = (
+  runner: BaseCodingAgent,
+  fieldKey: string,
+): boolean =>
+  hiddenConfigFields.has(fieldKey) ||
+  (runner === "OPEN_TEAMS_CLI" &&
+    (fieldKey === "variant" || fieldKey === "agent"));
+
+const isAcpRunner = (runner: BaseCodingAgent): boolean =>
+  runner === "DEEPSEEK_HARNESS" ||
+  runner === "HERMES" ||
+  runner === "GEMINI" ||
+  runner === "QWEN_CODE" ||
+  runner === "KIMI_CODE" ||
+  runner === "QODER_CLI" ||
+  runner === "PI" ||
+  runner === "KIRO_CLI";
+
+const formatRunnerKey = (runner: BaseCodingAgent): string =>
+  runner.toLowerCase().replaceAll("_", " ");
+
+const getSchemaValueType = (property: JsonSchemaProperty): string => {
+  const rawType = Array.isArray(property.type)
+    ? property.type.find((item) => item !== "null")
+    : property.type;
+  return rawType ?? "string";
+};
+
+const toFieldLabel = (key: string, property?: JsonSchemaProperty): string =>
+  property?.title ??
+  key
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+
+const translateWithFallback = (
+  t: TranslateFn,
+  key: string,
+  fallback: string,
+): string => {
+  const translated = t(key);
+  return translated === key ? fallback : translated;
+};
+
+type RuntimeRunnerUpdateOptions = {
+  notifyErrors?: boolean;
+};
+
+const runtimeSnapshotTime = (value: string | null | undefined) => {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+};
+
+const shouldApplyRuntimeSnapshot = (
+  current: Pick<AgentRuntimeStatus, "last_checked_at">,
+  next: Pick<AgentRuntimeStatus, "last_checked_at">,
+): boolean => {
+  const currentTime = runtimeSnapshotTime(current.last_checked_at);
+  const nextTime = runtimeSnapshotTime(next.last_checked_at);
+  if (currentTime !== null && nextTime === null) return false;
+  if (currentTime === null || nextTime === null) return true;
+  return nextTime >= currentTime;
+};
+
+const getRuntimeErrorMessage = (
+  runner: AgentRuntimeStatus,
+  t: TranslateFn,
+): string => {
+  const lastError = runner.last_error?.trim();
+  if (lastError) return lastError;
+  if (runner.installed && !runner.executable) {
+    const missingTools = getMissingRuntimeTools(runner);
+    if (missingTools.length > 0) {
+      return t("agents.status.missingDependencies", {
+        tools: missingTools
+          .map((tool) => RUNTIME_TOOL_LABELS[tool])
+          .join(", "),
+      });
+    }
+    return t("agents.status.error");
+  }
+  return "";
+};
+
+const getErrorStageLabel = (stage: string, t: TranslateFn): string =>
+  translateWithFallback(t, `agents.error.stage.${stage}`, stage);
+
+const translateConfigFieldText = (
+  t: TranslateFn,
+  runner: BaseCodingAgent,
+  fieldKey: string,
+  kind: "label" | "description",
+  fallback: string,
+): string => {
+  const runnerKey = `agents.config.schema.${runner.toLowerCase()}.${fieldKey}.${kind}`;
+  const runnerText = t(runnerKey);
+  if (runnerText !== runnerKey) return runnerText;
+
+  return translateWithFallback(
+    t,
+    `agents.config.schema.common.${fieldKey}.${kind}`,
+    fallback,
+  );
+};
+
+const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === "object" && !Array.isArray(value);
+
+const getRuntimeExecutorOptions = (
+  runner: AgentRuntimeStatus,
+): Record<string, JsonValue | undefined> => {
+  const options = runner.executor_options;
+  return isObjectRecord(options)
+    ? { ...(options as Record<string, JsonValue>) }
+    : {};
+};
+
+const getModelSourceLabel = (
+  source: AgentRuntimeStatus["model_source"],
+  t: TranslateFn,
+): string => {
+  switch (source) {
+    case "runner":
+      return t("agents.model.source.runner");
+    case "profile_fallback":
+      return t("agents.model.source.profileFallback");
+    case "none":
+    default:
+      return t("agents.model.source.none");
+  }
+};
+
+const getCommandSourceLabel = (source: string, t: TranslateFn): string => {
+  switch (source) {
+    case "override":
+      return t("agents.details.commandSourceOverride");
+    case "native":
+      return t("agents.details.commandSourceNative");
+    case "default":
+      return t("agents.details.commandSourceDefault");
+    default:
+      return source;
+  }
+};
+
+const createStatusFilterOptions = (t: TranslateFn): DropdownSelectOption[] =>
+  [
+    { key: "all", label: t("agents.filter.all") },
+    { key: "available", label: t("agents.filter.available") },
+    { key: "error", label: t("agents.filter.error") },
+    { key: "not_installed", label: t("agents.filter.notInstalled") },
+  ].map((item) => ({
+    id: item.key,
+    label: item.label,
+  }));
+
+/* ---------- Status helpers ---------- */
+
+function StatusDot({ state }: { state: RuntimeDisplayState }) {
+  return (
+    <span
+      className={cx(
+        "inline-block h-1.5 w-1.5 shrink-0 rounded-full",
+        state === "available" && "bg-[var(--success)]",
+        state === "error" && "bg-red-500",
+        state === "not_installed" && "bg-[var(--ink-tertiary)]",
+      )}
+    />
+  );
+}
+
+function StatusBadge({
+  runner,
+  t,
+  size = "compact",
+}: {
+  runner: AgentRuntimeStatus;
+  t: TranslateFn;
+  size?: "compact" | "normal";
+}) {
+  const state = getRuntimeDisplayState(runner);
+  const label =
+    state === "available"
+      ? t("agents.status.available")
+      : state === "error"
+        ? t("agents.status.error")
+        : t("agents.status.notInstalled");
+  return (
+    <span
+      className={cx(
+        "inline-flex items-center gap-1.5 whitespace-nowrap font-medium",
+        size === "normal" ? "text-[13px]" : "text-[11px]",
+        state === "available" && "text-[var(--success)]",
+        state === "error" && "text-red-400",
+        state === "not_installed" && "text-[var(--ink-subtle)]",
+      )}
+    >
+      <StatusDot state={state} />
+      {label}
+    </span>
+  );
+}
+
+function AgentNavStatusDot({
+  state,
+  overlay = false,
+}: {
+  state: RuntimeDisplayState;
+  overlay?: boolean;
+}) {
+  return (
+    <span
+      className={cx(
+        "h-1.5 w-1.5 shrink-0 rounded-full",
+        overlay &&
+          "absolute -right-0.5 -top-0.5 ring-2 ring-[var(--surface-2)]",
+        state === "available" && "bg-[var(--success)]",
+        state === "error" && "bg-red-500",
+        state === "not_installed" &&
+          "border border-[var(--ink-tertiary)] bg-[var(--surface-2)]",
+      )}
+    />
+  );
+}
+
+function AgentBrandAvatar({
+  runner,
+  framed = true,
+}: {
+  runner: BaseCodingAgent;
+  framed?: boolean;
+}) {
+  const brand = agentBrandMarks[runner];
+  const maskStyle =
+    brand.logoSrc && brand.logoMode === "mask"
+      ? ({
+          WebkitMaskImage: `url(${brand.logoSrc})`,
+          WebkitMaskPosition: "center",
+          WebkitMaskRepeat: "no-repeat",
+          WebkitMaskSize: "contain",
+          maskImage: `url(${brand.logoSrc})`,
+          maskPosition: "center",
+          maskRepeat: "no-repeat",
+          maskSize: "contain",
+        } satisfies CSSProperties)
+      : undefined;
+
+  return (
+    <span
+      className={cx(
+        "flex h-8 w-8 shrink-0 items-center justify-center text-[var(--ink-muted)]",
+        framed &&
+          "rounded-full border border-[var(--mono-border)] bg-[var(--mono-bg)]",
+      )}
+      title={brand.title}
+      aria-label={brand.title}
+    >
+      {brand.logoSrc && brand.logoMode === "mask" ? (
+        <span
+          aria-hidden="true"
+          className={cx(
+            "block shrink-0 bg-current",
+            brand.logoClassName ?? "h-5 w-5",
+          )}
+          style={maskStyle}
+        />
+      ) : brand.logoSrc ? (
+        <img
+          src={brand.logoSrc}
+          alt=""
+          aria-hidden="true"
+          className={cx("h-5 w-5 object-contain", brand.logoClassName)}
+        />
+      ) : (
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          className={cx("h-[18px] w-[18px]", brand.logoClassName)}
+          focusable="false"
+        >
+          {brand.path ? (
+            <path fill="currentColor" d={brand.path} />
+          ) : (
+            <text
+              x="12"
+              y="15"
+              textAnchor="middle"
+              className="fill-current font-mono text-[9px] font-semibold"
+            >
+              {brand.text}
+            </text>
+          )}
+        </svg>
+      )}
+    </span>
+  );
+}
+
+/* ---------- Sort priority: available first, then error, then not_installed ---------- */
+
+const statePriority: Record<RuntimeDisplayState, number> = {
+  available: 0,
+  error: 1,
+  not_installed: 2,
+};
+
+function sortRunnersByAvailability(
+  runners: AgentRuntimeStatus[],
+): AgentRuntimeStatus[] {
+  return [...runners].sort(
+    (a, b) =>
+      statePriority[getRuntimeDisplayState(a)] -
+      statePriority[getRuntimeDisplayState(b)],
+  );
+}
+
+/* ---------- Agent row item ---------- */
+
+function AgentRow({
+  runner,
+  selected,
+  collapsed,
+  onOpenConfig,
+}: {
+  runner: AgentRuntimeStatus;
+  selected: boolean;
+  collapsed: boolean;
+  onOpenConfig: () => void;
+}) {
+  const state = getRuntimeDisplayState(runner);
+  const runnerLabel = getRunnerLabel(runner.runner_type);
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onOpenConfig}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpenConfig();
+        }
+      }}
+      className={cx(
+        "group cursor-pointer px-2 py-0.5 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--primary)]/40",
+        collapsed ? "flex justify-center" : "block",
+      )}
+      title={runnerLabel}
+    >
+      <div
+        className={cx(
+          "flex min-w-0 items-center gap-3 rounded-[7px] transition-colors",
+          collapsed ? "h-10 w-10 justify-center" : "px-2.5 py-2",
+          selected
+            ? "bg-[var(--surface-3)] text-[var(--ink)]"
+            : cx(
+                "group-hover:bg-[var(--surface-3)]/60",
+                state === "available" && "text-[var(--ink)]",
+                state === "error" && "text-red-400",
+                state === "not_installed" && "text-[var(--ink-tertiary)]",
+              ),
+        )}
+      >
+        <span className="relative shrink-0">
+          <AgentBrandAvatar runner={runner.runner_type} framed={false} />
+          {collapsed && <AgentNavStatusDot state={state} overlay />}
+        </span>
+        {!collapsed && (
+          <>
+            <p className="min-w-0 flex-1 truncate text-[14px] font-medium leading-[1.35]">
+              {runnerLabel}
+            </p>
+            <AgentNavStatusDot state={state} />
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DetailRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid grid-cols-[128px_minmax(0,1fr)] items-baseline gap-3 py-1.5">
+      <p className="truncate text-[12px] font-medium leading-[1.4] text-[var(--ink-subtle)]">
+        {label}
+      </p>
+      <p className="break-all font-mono text-[12px] leading-[1.55] text-[var(--ink-muted)]">
+        {value}
+      </p>
+    </div>
+  );
+}
+
+export function AcpRuntimeConfigField({
+  runner,
+  acpProbe,
+  value,
+  onChange,
+  onCommit,
+  t,
+}: {
+  runner: BaseCodingAgent;
+  acpProbe: AcpCapabilityProbe | null;
+  value: JsonValue | undefined;
+  onChange: (key: string, value: JsonValue | undefined) => void;
+  onCommit: () => void | Promise<void>;
+  t: TranslateFn;
+}) {
+  const isHermes = runner === "HERMES";
+  const isDeepseekHarness = runner === "DEEPSEEK_HARNESS";
+  // Capability limits come from the backend ACP probe. A missing probe means
+  // the backend could not confirm support, so gated controls stay hidden.
+  const gates = acpCapabilityGates(acpProbe);
+  const showAuthMethodId = !isDeepseekHarness && gates.authMethodSelection;
+  const [pendingRiskyChange, setPendingRiskyChange] = useState<
+    "full_access" | "auto_allow" | null
+  >(null);
+  const config = isObjectRecord(value) ? value : {};
+  const accessMode =
+    typeof config.access_mode === "string"
+      ? config.access_mode
+      : "full_access";
+  const approvalMode =
+    typeof config.approval_mode === "string" ? config.approval_mode : "ask";
+  const auth = isObjectRecord(config.auth) ? config.auth : {};
+  const authMode = typeof auth.type === "string" ? auth.type : "auto";
+  const authMethodId =
+    typeof auth.method_id === "string" ? auth.method_id : "";
+  const directories = Array.isArray(config.additional_directories)
+    ? config.additional_directories.map(String)
+    : [];
+
+  const merge = (patch: Record<string, JsonValue>) => {
+    const next: Record<string, JsonValue> = {};
+    for (const [key, entry] of Object.entries(config)) {
+      if (entry !== undefined) next[key] = entry;
+    }
+    Object.assign(next, patch);
+    return next;
+  };
+  const update = (patch: Record<string, JsonValue>) => {
+    onChange("acp", merge(patch));
+    window.setTimeout(() => void onCommit(), 0);
+  };
+  const inputClass =
+    "h-8 w-full rounded-[6px] border border-[var(--hairline-strong)] bg-[var(--surface-3)] px-2 font-mono text-[12px] text-[var(--ink)] outline-none transition-colors placeholder:text-[var(--ink-tertiary)] hover:border-[var(--hairline-tertiary)] focus:border-[var(--primary-focus)] focus:ring-1 focus:ring-[var(--primary-focus)]/40";
+  const labelClass =
+    "block truncate text-[12px] font-medium leading-[1.35] text-[var(--ink-subtle)]";
+  const dropdownClass =
+    "w-full min-w-0 hover:[&>button]:!border-[var(--hairline-strong)] hover:[&>button]:!bg-[var(--surface-3)]/50 focus-within:[&>button]:!border-[var(--primary)]/50 focus-within:[&>button]:!bg-[var(--surface-3)]/50 [&>button]:h-8 [&>button]:!rounded-none [&>button]:!border-x-0 [&>button]:!border-b [&>button]:!border-t-0 [&>button]:!border-transparent [&>button]:!bg-transparent [&>button]:px-0 [&>button]:py-0 [&>button]:font-mono [&>button]:text-[12px]";
+
+  return (
+    <div className="space-y-1">
+      <div className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 py-1.5">
+        <span className={labelClass}>{t("agents.acp.accessMode.label")}</span>
+        <DropdownSelect
+          value={accessMode}
+          options={
+            isHermes
+              ? [
+                  {
+                    id: "full_access",
+                    label: t("permissions.fullAccessHighRisk"),
+                  },
+                ]
+              : [
+                  {
+                    id: "workspace_only",
+                    label: t("agents.acp.accessMode.workspaceOnly"),
+                  },
+                  {
+                    id: "full_access",
+                    label: t("permissions.fullAccessHighRisk"),
+                  },
+                ]
+          }
+          showSearch={false}
+          className={dropdownClass}
+          onChange={(next) => {
+            if (next === "full_access") {
+              setPendingRiskyChange("full_access");
+              return;
+            }
+            update({ access_mode: next });
+          }}
+        />
+      </div>
+      <div className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 py-1.5">
+        <span className={labelClass}>{t("agents.acp.approval.label")}</span>
+        <DropdownSelect
+          value={approvalMode}
+          options={[
+            { id: "ask", label: t("agents.acp.approval.ask") },
+            { id: "auto_allow", label: t("agents.acp.approval.autoAllow") },
+            { id: "auto_reject", label: t("agents.acp.approval.autoReject") },
+          ]}
+          showSearch={false}
+          className={dropdownClass}
+          onChange={(next) => {
+            if (next === "auto_allow") {
+              setPendingRiskyChange("auto_allow");
+              return;
+            }
+            update({ approval_mode: next });
+          }}
+        />
+      </div>
+      <div className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 py-1.5">
+        <span className={labelClass}>{t("agents.acp.auth.label")}</span>
+        <DropdownSelect
+          value={authMode}
+          options={[
+            { id: "auto", label: t("agents.acp.auth.auto") },
+            ...(showAuthMethodId
+              ? [
+                  {
+                    id: "method_id",
+                    label: t("agents.acp.auth.methodId"),
+                  },
+                ]
+              : []),
+          ]}
+          showSearch={false}
+          className={dropdownClass}
+          onChange={(next) =>
+            update({
+              auth:
+                next === "auto"
+                  ? { type: "auto" }
+                  : { type: "method_id", method_id: authMethodId },
+            })
+          }
+        />
+      </div>
+      {showAuthMethodId && authMode === "method_id" && (
+        <label className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 py-1.5">
+          <span className={labelClass}>
+            {t("agents.acp.auth.methodIdLabel")}
+          </span>
+          <input
+            value={authMethodId}
+            className={inputClass}
+            placeholder="auth_method_id"
+            onChange={(event) =>
+              onChange(
+                "acp",
+                merge({
+                  auth: {
+                    type: "method_id",
+                    method_id: event.target.value,
+                  },
+                }),
+              )
+            }
+            onBlur={() => void onCommit()}
+          />
+        </label>
+      )}
+      {!isHermes && !isDeepseekHarness && gates.additionalDirectories && (
+        <label className="grid grid-cols-[128px_minmax(0,1fr)] items-start gap-3 py-1.5">
+          <span className={`${labelClass} pt-1`}>
+            {t("agents.acp.directories.label")}
+          </span>
+          <textarea
+            value={directories.join("\n")}
+            rows={3}
+            className={`${inputClass} h-auto resize-y py-1.5`}
+            placeholder={t("agents.acp.directories.placeholder")}
+            onChange={(event) =>
+              onChange(
+                "acp",
+                merge({
+                  additional_directories: event.target.value
+                    .split(/\r?\n/u)
+                    .map((path) => path.trim())
+                    .filter(Boolean),
+                }),
+              )
+            }
+            onBlur={() => void onCommit()}
+          />
+        </label>
+      )}
+      <div className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 py-1.5">
+        <span className={labelClass}>{t("agents.acp.sessionResume.label")}</span>
+        <span className="font-mono text-[12px] leading-[1.55] text-[var(--ink-muted)]">
+          {acpProbe === null
+            ? t("agents.acp.sessionResume.unknown")
+            : gates.sessionLoad
+              ? t("agents.acp.sessionResume.supported")
+              : t("agents.acp.sessionResume.unsupported")}
+        </span>
+      </div>
+      {pendingRiskyChange && (
+        <ConfirmationDialog
+          idPrefix="agent-acp-permission-confirmation"
+          title={
+            pendingRiskyChange === "full_access"
+              ? t("permissions.fullAccessAgentConfirmTitle")
+              : t("agents.acp.confirm.autoAllowTitle")
+          }
+          description={
+            pendingRiskyChange === "full_access"
+              ? t("permissions.fullAccessAgentConfirmDescription")
+              : t("agents.acp.confirm.autoAllowDescription")
+          }
+          confirmLabel={t("agents.acp.confirm.confirm")}
+          cancelLabel={t("agents.acp.confirm.cancel")}
+          escLabel={t("agents.acp.confirm.esc")}
+          tone="warning"
+          onCancel={() => setPendingRiskyChange(null)}
+          onConfirm={() => {
+            const next = pendingRiskyChange;
+            setPendingRiskyChange(null);
+            update(
+              next === "full_access"
+                ? { access_mode: next }
+                : { approval_mode: next },
+            );
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function ConfigSchemaField({
+  runner,
+  fieldKey,
+  property,
+  value,
+  onChange,
+  onCommit,
+  t,
+}: {
+  runner: BaseCodingAgent;
+  fieldKey: string;
+  property: JsonSchemaProperty;
+  value: JsonValue | undefined;
+  onChange: (key: string, value: JsonValue | undefined) => void;
+  onCommit?: () => void | Promise<void>;
+  t: TranslateFn;
+}) {
+  const [jsonDraft, setJsonDraft] = useState(() =>
+    value === undefined || value === null ? "" : JSON.stringify(value, null, 2),
+  );
+  const [jsonError, setJsonError] = useState<string | null>(null);
+  const valueType = getSchemaValueType(property);
+  const label = translateConfigFieldText(
+    t,
+    runner,
+    fieldKey,
+    "label",
+    toFieldLabel(fieldKey, property),
+  );
+  const description = translateConfigFieldText(
+    t,
+    runner,
+    fieldKey,
+    "description",
+    property.description ?? "",
+  );
+
+  useEffect(() => {
+    if (valueType !== "object") return;
+    setJsonDraft(
+      value === undefined || value === null
+        ? ""
+        : JSON.stringify(value, null, 2),
+    );
+    setJsonError(null);
+  }, [value, valueType]);
+
+  const labelNode = (
+    <div className="w-32 shrink-0 pt-1" title={description || undefined}>
+      <label className="block truncate text-[12px] font-medium leading-[1.35] text-[var(--ink-subtle)]">
+        {label}
+      </label>
+    </div>
+  );
+
+  const inputBaseClass =
+    "w-full rounded-none border-x-0 border-b border-t-0 border-transparent bg-transparent px-0 py-1.5 font-mono text-[12px] leading-[1.55] text-[var(--ink)] outline-none transition-all placeholder:text-[var(--ink-tertiary)] hover:border-[var(--hairline-strong)] hover:bg-[var(--surface-3)]/50 focus:border-[var(--primary)]/50 focus:bg-[var(--surface-3)]/50";
+
+  if (property.enum) {
+    const hasNullOption = property.enum.some((item) => item === null);
+    const options: DropdownSelectOption[] = [
+      ...(hasNullOption
+        ? [{ id: nullOptionId, label: t("agents.config.default") }]
+        : []),
+      ...property.enum
+        .filter((item) => item !== null)
+        .map((item) => ({
+          id: String(item),
+          label: String(item),
+        })),
+    ];
+    const selectedValue =
+      value === null || value === undefined ? nullOptionId : String(value);
+
+    return (
+      <div className="flex items-start gap-3 py-1.5">
+        {labelNode}
+        <DropdownSelect
+          value={selectedValue}
+          options={options}
+          showSearch={options.length > 8}
+          className="min-w-0 flex-1 hover:[&>button]:!border-[var(--hairline-strong)] hover:[&>button]:!bg-[var(--surface-3)]/50 focus-within:[&>button]:!border-[var(--primary)]/50 focus-within:[&>button]:!bg-[var(--surface-3)]/50 [&>button]:h-8 [&>button]:!rounded-none [&>button]:!border-x-0 [&>button]:!border-b [&>button]:!border-t-0 [&>button]:!border-transparent [&>button]:!bg-transparent [&>button]:px-0 [&>button]:py-0 [&>button]:font-mono [&>button]:text-[12px]"
+          panelClassName="max-w-none"
+          onChange={(nextValue) =>
+            onChange(fieldKey, nextValue === nullOptionId ? null : nextValue)
+          }
+        />
+      </div>
+    );
+  }
+
+  if (valueType === "boolean") {
+    const checked = value === true;
+    return (
+      <div className="flex items-center gap-3 py-1.5">
+        {labelNode}
+        <div className="flex h-8 min-w-0 flex-1 items-center">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={checked}
+            aria-label={label}
+            onClick={() => {
+              onChange(fieldKey, !checked);
+              window.setTimeout(() => {
+                void onCommit?.();
+              }, 0);
+            }}
+            onBlur={() => {
+              void onCommit?.();
+            }}
+            className={cx(
+              "relative h-5 w-9 rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--primary)]/40",
+              checked
+                ? "border-transparent bg-[var(--primary)]/80"
+                : "border-[var(--hairline-strong)] bg-[var(--surface-4)] hover:bg-[var(--hairline)]",
+            )}
+          >
+            <span
+              className={cx(
+                "absolute top-1/2 h-3.5 w-3.5 -translate-y-1/2 rounded-full transition-all",
+                checked
+                  ? "left-[18px] bg-white shadow-[0_0_10px_rgba(255,255,255,0.18)]"
+                  : "left-1 bg-[var(--ink-tertiary)]",
+              )}
+            />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (valueType === "array") {
+    const arrayValue = Array.isArray(value) ? value : [];
+    return (
+      <div className="flex items-start gap-3 py-1.5">
+        {labelNode}
+        <textarea
+          value={arrayValue.map(String).join("\n")}
+          onChange={(event) => {
+            const items = event.target.value
+              .split(/\r?\n/u)
+              .map((item) => item.trim())
+              .filter(Boolean);
+            onChange(fieldKey, items.length > 0 ? items : null);
+          }}
+          onBlur={() => {
+            void onCommit?.();
+          }}
+          rows={3}
+          spellCheck={false}
+          placeholder={t("agents.config.placeholder.array")}
+          className={cx(inputBaseClass, "min-w-0 flex-1 resize-none")}
+        />
+      </div>
+    );
+  }
+
+  if (valueType === "object") {
+    return (
+      <div className="flex items-start gap-3 py-1.5">
+        {labelNode}
+        <div className="min-w-0 flex-1">
+          <textarea
+            value={jsonDraft}
+            onChange={(event) => {
+              const nextDraft = event.target.value;
+              setJsonDraft(nextDraft);
+              if (!nextDraft.trim()) {
+                setJsonError(null);
+                onChange(fieldKey, null);
+                return;
+              }
+              try {
+                const parsed = JSON.parse(nextDraft) as JsonValue;
+                setJsonError(null);
+                onChange(fieldKey, parsed);
+              } catch (error) {
+                setJsonError(
+                  error instanceof Error
+                    ? error.message
+                    : t("agents.config.invalidJson"),
+                );
+              }
+            }}
+            onBlur={() => {
+              void onCommit?.();
+            }}
+            rows={5}
+            spellCheck={false}
+            placeholder={t("agents.config.placeholder.object")}
+            className={cx(inputBaseClass, "resize-none")}
+          />
+          {jsonError && (
+            <p className="mt-1.5 font-mono text-[14px] text-amber-400">
+              {jsonError}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  const stringValue =
+    typeof value === "string" || typeof value === "number" ? String(value) : "";
+  const InputElement = property.format === "textarea" ? "textarea" : "input";
+
+  return (
+    <div className="flex items-start gap-3 py-1.5">
+      {labelNode}
+      <InputElement
+        value={stringValue}
+        onChange={(event) => {
+          const nextValue = event.target.value;
+          onChange(fieldKey, nextValue.trim() ? nextValue : null);
+        }}
+        onBlur={() => {
+          void onCommit?.();
+        }}
+        rows={
+          property.format === "textarea"
+            ? fieldKey === "append_prompt"
+              ? 1
+              : 2
+            : undefined
+        }
+        spellCheck={property.format === "textarea"}
+        placeholder={t("agents.config.placeholder.value")}
+        className={cx(
+          inputBaseClass,
+          "min-w-0 flex-1",
+          property.format === "textarea" && "resize-y",
+        )}
+      />
+    </div>
+  );
+}
+
+function ModelConfigField({
+  options,
+  modelSource,
+  value,
+  onChange,
+  t,
+}: {
+  options: DropdownSelectOption[];
+  modelSource: AgentRuntimeStatus["model_source"];
+  value: JsonValue | undefined;
+  onChange: (key: string, value: JsonValue | undefined) => void;
+  t: TranslateFn;
+}) {
+  const selectedModel = typeof value === "string" ? value : "";
+  const sourceLabel = getModelSourceLabel(modelSource, t);
+
+  return (
+    <div className="flex items-center gap-3 py-1.5">
+      <div
+        className="w-32 shrink-0 pt-1"
+        title={
+          options.length > 0
+            ? t("agents.model.field.description", { source: sourceLabel })
+            : t("agents.model.field.emptyDescription")
+        }
+      >
+        <label className="block truncate text-[12px] font-medium leading-[1.35] text-[var(--ink-subtle)]">
+          {t("agents.model.field.label")}
+        </label>
+      </div>
+      <div className="flex min-w-0 flex-1 items-center gap-1.5">
+        <DropdownSelect
+          value={selectedModel}
+          options={options}
+          placeholder={t("agents.model.field.placeholder")}
+          searchPlaceholder={t("agents.model.field.searchPlaceholder")}
+          emptyLabel={t("agents.model.field.noMatch")}
+          className="min-w-0 flex-1 hover:[&>button]:!border-[var(--hairline-strong)] hover:[&>button]:!bg-[var(--surface-3)]/50 focus-within:[&>button]:!border-[var(--primary)]/50 focus-within:[&>button]:!bg-[var(--surface-3)]/50 [&>button]:h-8 [&>button]:!rounded-none [&>button]:!border-x-0 [&>button]:!border-b [&>button]:!border-t-0 [&>button]:!border-transparent [&>button]:!bg-transparent [&>button]:px-0 [&>button]:py-0 [&>button]:font-mono [&>button]:text-[12px]"
+          maxPanelHeightClassName="max-h-[280px]"
+          onChange={(nextValue) => {
+            const trimmed = nextValue.trim();
+            onChange("model", trimmed ? trimmed : null);
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Embedded agent configuration sidebar ---------- */
+
+// Sidebar diagnostics are probed once per runner and then reused for the rest
+// of the session; only an explicit refresh or a config save invalidates the
+// stored snapshot and allows a new probe. Applies uniformly to every CLI
+// runner, independent of protocol.
+const sidebarDiagnosticsStore = new Map<string, AgentRuntimeDiagnostics>();
+
+const sidebarDiagnosticsKey = (
+  runner: BaseCodingAgent,
+  workspacePath?: string,
+) => `${runner}\u0000${workspacePath ?? ""}`;
+
+const invalidateSidebarDiagnostics = (runner?: BaseCodingAgent) => {
+  if (runner) {
+    const prefix = `${runner}\u0000`;
+    for (const key of sidebarDiagnosticsStore.keys()) {
+      if (key.startsWith(prefix)) sidebarDiagnosticsStore.delete(key);
+    }
+  } else {
+    sidebarDiagnosticsStore.clear();
+  }
+};
+
+function AgentConfigSidebar({
+  runner,
+  saveError,
+  onClose,
+  onSave,
+  onDiagnosticsLoaded,
+  workspacePath,
+  refreshRevision,
+  rechecking,
+  onRecheck,
+  t,
+}: {
+  runner: AgentRuntimeStatus;
+  saveError: string | null;
+  onClose: () => void;
+  onSave: (
+    runner: BaseCodingAgent,
+    formData: Record<string, JsonValue | undefined>,
+    envJson: Record<string, string> | null,
+  ) => Promise<void>;
+  onDiagnosticsLoaded: (diagnostics: AgentRuntimeDiagnostics) => void;
+  workspacePath?: string;
+  refreshRevision: number;
+  rechecking: boolean;
+  onRecheck: () => void;
+  t: TranslateFn;
+}) {
+  const [formData, setFormData] = useState<
+    Record<string, JsonValue | undefined>
+  >(() => getRuntimeExecutorOptions(runner));
+  const [initialFormData, setInitialFormData] = useState<
+    Record<string, JsonValue | undefined>
+  >(() => getRuntimeExecutorOptions(runner));
+  const [envText, setEnvText] = useState(() =>
+    envSummaryToText(runner.env_summary),
+  );
+  const [envDirty, setEnvDirty] = useState(false);
+  const [envInputFocused, setEnvInputFocused] = useState(false);
+  const [diagnostics, setDiagnostics] =
+    useState<AgentRuntimeDiagnostics | null>(null);
+  const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
+  const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
+  const [autoSaveStatus, setAutoSaveStatus] = useState<
+    "idle" | "saving" | "saved"
+  >("idle");
+  const autoSaveTimerRef = useRef<number | null>(null);
+  const savedStatusTimerRef = useRef<number | null>(null);
+  const draftRevisionRef = useRef(0);
+  const saveInFlightRef = useRef(false);
+  const savePendingRef = useRef(false);
+  const runAutoSaveRef = useRef<() => Promise<void>>(async () => {});
+  const schema = agentConfigSchemas[runner.runner_type];
+  const diagnosticsFailedLabel = t("agents.diagnostics.failed");
+  const diagnosticsFailedLabelRef = useRef(diagnosticsFailedLabel);
+  diagnosticsFailedLabelRef.current = diagnosticsFailedLabel;
+  const onDiagnosticsLoadedRef = useRef(onDiagnosticsLoaded);
+  onDiagnosticsLoadedRef.current = onDiagnosticsLoaded;
+  const schemaFields = Object.entries(schema.properties ?? {}).filter(
+    ([fieldKey]) =>
+      !isHiddenConfigField(runner.runner_type, fieldKey) &&
+      !(fieldKey === "acp" && isAcpRunner(runner.runner_type)),
+  );
+  const currentDiagnostics =
+    diagnostics?.runner_type === runner.runner_type ? diagnostics : null;
+  const envSummary = runner.env_summary;
+  const runtimeErrorDetails = parseRuntimeErrorDetails(runner.last_error);
+  const configPath =
+    currentDiagnostics?.config_path ??
+    (diagnosticsLoading
+      ? t("agents.details.loading")
+      : t("agents.details.notReported"));
+  const discoveredCliVersion = currentDiagnostics?.version;
+  const cliVersion = diagnosticsLoading
+    ? t("agents.details.checking")
+    : (discoveredCliVersion?.trim() || t("agents.details.notReported"));
+  const acpVersion = diagnosticsLoading
+    ? t("agents.details.checking")
+    : (currentDiagnostics?.acp_probe?.agent_version?.trim() ||
+      t("agents.details.notReported"));
+  const commandSource = diagnosticsLoading
+    ? t("agents.details.loading")
+    : currentDiagnostics?.command_source
+      ? getCommandSourceLabel(currentDiagnostics.command_source, t)
+      : t("agents.details.notReported");
+  const baseCommand = diagnosticsLoading
+    ? t("agents.details.loading")
+    : (currentDiagnostics?.resolved_command?.trim() ||
+      t("agents.details.notReported"));
+  const acpModelOption = isAcpRunner(runner.runner_type)
+    ? findAcpSelectConfigOption(
+        currentDiagnostics?.acp_probe?.config_options ?? [],
+        "model",
+      )
+    : null;
+  const discoveredModels =
+    currentDiagnostics?.discovered_models ?? runner.discovered_models;
+  const modelOptions = useMemo<DropdownSelectOption[]>(
+    () =>
+      acpModelOption
+        ? acpModelOption.options.map((choice) => ({
+            id: choice.value,
+            label: choice.name,
+            description: choice.description ?? undefined,
+          }))
+        : discoveredModels.map((model) => ({ id: model, label: model })),
+    [acpModelOption, discoveredModels],
+  );
+  const configuredModel =
+    typeof formData.model === "string" ? formData.model.trim() : "";
+  const modelValue =
+    configuredModel &&
+    modelOptions.some((option) => option.id === configuredModel)
+      ? configuredModel
+      : (acpModelOption?.current_value ?? configuredModel);
+  const modelSource = acpModelOption
+    ? "runner"
+    : (currentDiagnostics?.model_source ?? runner.model_source);
+  const isDirty =
+    envDirty || JSON.stringify(formData) !== JSON.stringify(initialFormData);
+  const envSummaryText = useMemo(
+    () => envSummaryToText(envSummary),
+    [envSummary],
+  );
+  const envParseResult = useMemo(() => parseEnvText(envText), [envText]);
+  const envValidationError =
+    envDirty && !envParseResult.ok
+      ? t(
+          envParseResult.error.code === "missing_equals"
+            ? "agents.env.error.missingEquals"
+            : "agents.env.error.invalidKey",
+          { line: envParseResult.error.line },
+        )
+      : null;
+  const latestDraftRef = useRef({
+    formData,
+    envText,
+    envDirty,
+    isDirty,
+  });
+  latestDraftRef.current = {
+    formData,
+    envText,
+    envDirty,
+    isDirty,
+  };
+
+  const clearSavedStatusTimer = useCallback(() => {
+    if (savedStatusTimerRef.current !== null) {
+      window.clearTimeout(savedStatusTimerRef.current);
+      savedStatusTimerRef.current = null;
+    }
+  }, []);
+
+  const runAutoSave = useCallback(async () => {
+    const draft = latestDraftRef.current;
+    if (!draft.isDirty) return;
+    if (autoSaveTimerRef.current !== null) {
+      window.clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    const parsedEnv = draft.envDirty ? parseEnvText(draft.envText) : null;
+    if (parsedEnv && !parsedEnv.ok) {
+      setAutoSaveStatus("idle");
+      return;
+    }
+    if (saveInFlightRef.current) {
+      savePendingRef.current = true;
+      return;
+    }
+
+    const savedRevision = draftRevisionRef.current;
+    saveInFlightRef.current = true;
+    savePendingRef.current = false;
+    clearSavedStatusTimer();
+    setAutoSaveStatus("saving");
+    try {
+      await onSave(
+        runner.runner_type,
+        draft.formData,
+        parsedEnv?.value ?? null,
+      );
+      if (savedRevision === draftRevisionRef.current) {
+        setInitialFormData(draft.formData);
+        if (draft.envDirty) setEnvDirty(false);
+        setAutoSaveStatus("saved");
+        savedStatusTimerRef.current = window.setTimeout(() => {
+          setAutoSaveStatus("idle");
+          savedStatusTimerRef.current = null;
+        }, 1500);
+      } else {
+        savePendingRef.current = true;
+      }
+    } catch {
+      setAutoSaveStatus("idle");
+    } finally {
+      saveInFlightRef.current = false;
+      if (savePendingRef.current) {
+        savePendingRef.current = false;
+        window.setTimeout(() => {
+          void runAutoSaveRef.current();
+        }, 0);
+      }
+    }
+  }, [clearSavedStatusTimer, onSave, runner.runner_type]);
+  runAutoSaveRef.current = runAutoSave;
+
+  useEffect(() => {
+    if (autoSaveTimerRef.current !== null) {
+      window.clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    clearSavedStatusTimer();
+    draftRevisionRef.current += 1;
+    savePendingRef.current = false;
+    setAutoSaveStatus("idle");
+    const nextFormData = getRuntimeExecutorOptions(runner);
+    setFormData(nextFormData);
+    setInitialFormData(nextFormData);
+    setEnvText(envSummaryToText(runner.env_summary));
+    setEnvDirty(false);
+  }, [clearSavedStatusTimer, runner.runner_type]);
+
+  useEffect(() => {
+    setDiagnostics((current) =>
+      current?.runner_type === runner.runner_type
+        ? {
+            ...current,
+            installed: runner.installed,
+            executable: runner.executable,
+            availability: runner.availability,
+            auth_state: runner.auth_state,
+            node_available: runner.node_available,
+            npm_available: runner.npm_available,
+            npx_available: runner.npx_available,
+            discovered_models: runner.discovered_models,
+            model_source: runner.model_source,
+            last_checked_at: runner.last_checked_at,
+            last_error: runner.last_error,
+            run_mode: runner.run_mode,
+            env_summary: runner.env_summary,
+            executor_options: runner.executor_options,
+          }
+        : current,
+    );
+  }, [runner]);
+
+  useEffect(() => {
+    return () => {
+      if (autoSaveTimerRef.current !== null) {
+        window.clearTimeout(autoSaveTimerRef.current);
+      }
+      clearSavedStatusTimer();
+    };
+  }, [clearSavedStatusTimer]);
+
+  useEffect(() => {
+    if (envDirty || envInputFocused) return;
+    setEnvText(envSummaryText);
+  }, [envDirty, envInputFocused, envSummaryText]);
+
+  useEffect(() => {
+    if (!isDirty) return;
+    if (autoSaveTimerRef.current !== null) {
+      window.clearTimeout(autoSaveTimerRef.current);
+    }
+    autoSaveTimerRef.current = window.setTimeout(() => {
+      void runAutoSave();
+    }, 500);
+
+    return () => {
+      if (autoSaveTimerRef.current !== null) {
+        window.clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
+    };
+  }, [formData, envText, envDirty, isDirty, runAutoSave]);
+
+  useEffect(() => {
+    const diagnosticsKey = sidebarDiagnosticsKey(runner.runner_type, workspacePath);
+    const cached = sidebarDiagnosticsStore.get(diagnosticsKey);
+    if (cached) {
+      setDiagnostics(cached);
+      setDiagnosticsError(null);
+      setDiagnosticsLoading(false);
+      return;
+    }
+    let active = true;
+    setDiagnostics(null);
+    setDiagnosticsError(null);
+    setDiagnosticsLoading(true);
+
+    agentRuntimeApi
+      .getDiagnostics(runner.runner_type, { workspacePath })
+      .then((result) => {
+        sidebarDiagnosticsStore.set(diagnosticsKey, result);
+        if (active) {
+          setDiagnostics(result);
+          onDiagnosticsLoadedRef.current(result);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          setDiagnosticsError(
+            error instanceof Error
+              ? error.message
+              : diagnosticsFailedLabelRef.current,
+          );
+        }
+      })
+      .finally(() => {
+        if (active) setDiagnosticsLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [refreshRevision, runner.runner_type, workspacePath]);
+
+  const handleConfigFieldChange = (
+    key: string,
+    value: JsonValue | undefined,
+  ) => {
+    draftRevisionRef.current += 1;
+    setFormData((current) => {
+      const next = { ...current };
+      if (value === undefined || value === null) {
+        delete next[key];
+      } else {
+        next[key] = value;
+      }
+      return next;
+    });
+  };
+
+  return (
+    <aside
+      className={cx(
+        "relative flex h-full min-h-0 flex-col overflow-hidden bg-[var(--surface-2)]",
+      )}
+    >
+      <header className="shrink-0 border-b border-[var(--hairline)] px-5 py-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-4">
+            <AgentBrandAvatar runner={runner.runner_type} />
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <h2 className="truncate text-[18px] font-semibold leading-[1.2] tracking-[-0.2px] text-[var(--ink)]">
+                  {getRunnerLabel(runner.runner_type)}
+                </h2>
+                <StatusBadge runner={runner} t={t} size="normal" />
+              </div>
+              <p className="mt-0.5 truncate font-mono text-[12px] leading-[1.45] text-[var(--ink-tertiary)]">
+                {cliVersion}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="min-w-[74px]">
+              {autoSaveStatus !== "idle" && (
+                <div className="flex items-center justify-end gap-1.5 font-mono text-[11px] text-[var(--ink-tertiary)] transition-opacity">
+                  {autoSaveStatus === "saving" && (
+                    <RefreshCw className="h-2.5 w-2.5 animate-spin" />
+                  )}
+                  <span>
+                    {autoSaveStatus === "saving"
+                      ? t("agents.save.saving")
+                      : t("agents.save.saved")}
+                  </span>
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="-mr-1 rounded-[6px] p-1.5 text-[var(--ink-tertiary)] transition-colors hover:bg-[var(--surface-3)] hover:text-[var(--ink)]"
+              aria-label={t("agents.sidebar.close")}
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <div
+        className={cx(
+          "min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-5 ot-scroll-area-styled",
+        )}
+      >
+        {runtimeErrorDetails.length > 0 && (
+          <section
+            role="alert"
+            className="rounded-[8px] border border-red-500/30 bg-red-500/5 p-4"
+          >
+            <h3 className="mb-3 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-red-400">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              {t("agents.error.title")}
+            </h3>
+            <div className="space-y-2">
+              {runtimeErrorDetails.map((detail, index) => (
+                <div key={index} className="flex items-start gap-2">
+                  {detail.stage && (
+                    <span className="mt-px shrink-0 rounded-[4px] border border-red-500/20 bg-red-500/10 px-1.5 py-0.5 font-mono text-[10px] leading-[1.4] text-red-300">
+                      {getErrorStageLabel(detail.stage, t)}
+                    </span>
+                  )}
+                  <p className="min-w-0 break-words font-mono text-[12px] leading-[1.55] text-red-300/90">
+                    {detail.message}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <AgentInstallGuide
+          runner={runner}
+          rechecking={rechecking}
+          onRecheck={onRecheck}
+          t={t}
+        />
+
+        <section className="rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] p-4">
+          <h3 className="mb-3 text-[11px] font-semibold tracking-[0.12em] text-[var(--ink-subtle)] uppercase">
+            {t("agents.details.runtime")}
+          </h3>
+          <div className="grid gap-1">
+            <DetailRow
+              label={t("agents.details.configFile")}
+              value={configPath}
+            />
+            <DetailRow
+              label={t("agents.details.cliVersion")}
+              value={cliVersion}
+            />
+            {isAcpRunner(runner.runner_type) && (
+              <DetailRow
+                label={t("agents.details.acpVersion")}
+                value={acpVersion}
+              />
+            )}
+            <DetailRow
+              label={t("agents.details.commandSource")}
+              value={commandSource}
+            />
+            <DetailRow
+              label={t("agents.details.baseCommand")}
+              value={baseCommand}
+            />
+          </div>
+          {diagnosticsError && (
+            <div className="mt-3 flex items-start gap-2 rounded-[8px] border border-amber-500/20 bg-amber-500/5 p-3 text-[14px] leading-relaxed text-amber-400">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              {diagnosticsError}
+            </div>
+          )}
+        </section>
+
+        <section className="rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] p-4">
+          <h3 className="mb-3 text-[11px] font-semibold tracking-[0.12em] text-[var(--ink-subtle)] uppercase">
+            {t("agents.env.title")}
+          </h3>
+          <div>
+            <textarea
+              value={envText}
+              onFocus={() => {
+                setEnvInputFocused(true);
+              }}
+              onChange={(event) => {
+                draftRevisionRef.current += 1;
+                setEnvText(event.target.value);
+                setEnvDirty(true);
+              }}
+              onBlur={() => {
+                setEnvInputFocused(false);
+                void runAutoSave();
+              }}
+              rows={Math.max(4, Math.min(10, envText.split(/\r?\n/u).length))}
+              spellCheck={false}
+              aria-invalid={envValidationError ? true : undefined}
+              aria-describedby={
+                envValidationError ? "agent-runtime-env-error" : undefined
+              }
+              placeholder={t("agents.env.placeholder")}
+              className={cx(
+                "block w-full resize-y rounded-[6px] border bg-transparent px-2.5 py-2 font-mono text-[12px] leading-[1.55] text-[var(--ink)] outline-none transition-all placeholder:text-[var(--ink-tertiary)] hover:bg-[var(--surface-3)]/50 focus:bg-transparent focus:ring-1",
+                envValidationError
+                  ? "border-red-400/50 focus:border-red-400/70 focus:ring-red-400/20"
+                  : "border-transparent hover:border-[var(--hairline-strong)] focus:border-[var(--primary)]/50 focus:ring-[var(--primary)]/15",
+              )}
+            />
+            {envValidationError && (
+              <p
+                id="agent-runtime-env-error"
+                role="alert"
+                className="mt-2 px-2.5 text-[12px] leading-relaxed text-red-400"
+              >
+                {envValidationError}
+              </p>
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] p-4">
+          <h3 className="mb-3 text-[11px] font-semibold tracking-[0.12em] text-[var(--ink-subtle)] uppercase">
+            {t("agents.config.title")}
+          </h3>
+
+          <div>
+            {schemaFields.length === 0 ? (
+              <ModelConfigField
+                options={modelOptions}
+                modelSource={modelSource}
+                value={modelValue}
+                onChange={handleConfigFieldChange}
+                t={t}
+              />
+            ) : (
+              <div className="space-y-1">
+                <ModelConfigField
+                  options={modelOptions}
+                  modelSource={modelSource}
+                  value={modelValue}
+                  onChange={handleConfigFieldChange}
+                  t={t}
+                />
+                {isAcpRunner(runner.runner_type) && (
+                  <AcpRuntimeConfigField
+                    runner={runner.runner_type}
+                    acpProbe={currentDiagnostics?.acp_probe ?? null}
+                    value={formData.acp}
+                    onChange={handleConfigFieldChange}
+                    onCommit={runAutoSave}
+                    t={t}
+                  />
+                )}
+                {schemaFields.map(([fieldKey, property]) => (
+                  <ConfigSchemaField
+                    key={fieldKey}
+                    runner={runner.runner_type}
+                    fieldKey={fieldKey}
+                    property={property}
+                    value={formData[fieldKey]}
+                    onChange={handleConfigFieldChange}
+                    onCommit={runAutoSave}
+                    t={t}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+
+          {saveError && (
+            <div className="mt-4 flex items-start gap-2 rounded-[8px] border border-red-500/20 bg-red-500/5 p-3 text-[14px] leading-relaxed text-red-400">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              {saveError}
+            </div>
+          )}
+        </section>
+      </div>
+
+    </aside>
+  );
+}
+
+function AgentConfigEmptyState({ t }: { t: TranslateFn }) {
+  return (
+    <aside
+      className={cx(
+        "flex h-full min-h-0 flex-col bg-[var(--surface-2)]",
+      )}
+    >
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 text-center">
+        <span className="flex h-10 w-10 items-center justify-center rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] text-[var(--ink-tertiary)]">
+          <Settings className="h-5 w-5" />
+        </span>
+        <h3 className="mt-3 text-[14px] font-medium text-[var(--ink)]">
+          {t("agents.sidebar.selectTitle")}
+        </h3>
+        <p className="mt-1 max-w-[260px] text-[14px] leading-[1.5] text-[var(--ink-tertiary)]">
+          {t("agents.sidebar.selectDesc")}
+        </p>
+      </div>
+    </aside>
+  );
+}
+
+/* ========== Main page ========== */
+
+const FOCUS_RECHECK_INTERVAL_MS = 30_000;
+
+export function AgentsPage() {
+  const { t, showToast, projects, selectedProjectId } = useWorkspace();
+  const [runners, setRunners] = useState<AgentRuntimeStatus[]>([]);
+  const runnersRef = useRef<AgentRuntimeStatus[]>([]);
+  const lastFocusRecheckRef = useRef(0);
+  const agentsPageRef = useRef<HTMLDivElement>(null);
+  const [filter, setFilter] = useState<AgentRuntimeFilter>("all");
+  const [loading, setLoading] = useState(true);
+  const [runtimeLoaded, setRuntimeLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [refreshingConfig, setRefreshingConfig] = useState(false);
+  const [refreshRevision, setRefreshRevision] = useState(0);
+  const [piModelsSync, setPiModelsSync] =
+    useState<PiModelsSyncDiagnostic | null>(null);
+  const [piModelsSyncRetrying, setPiModelsSyncRetrying] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [selectedRunner, setSelectedRunner] =
+    useState<AgentRuntimeStatus | null>(null);
+  const [agentNavCollapsed, setAgentNavCollapsed] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const configRefreshedNotice = t("agents.notice.configRefreshed");
+  const configSavedNotice = t("agents.notice.configSaved");
+  const activeWorkspacePath = useMemo(
+    () =>
+      selectedProjectId
+        ? projects
+            .find((project) => project.id === selectedProjectId)
+            ?.default_workspace_path?.trim() || undefined
+        : undefined,
+    [projects, selectedProjectId],
+  );
+
+  const statusFilterOptions = useMemo(() => createStatusFilterOptions(t), [t]);
+  const toggleAgentNavCollapsed = useCallback(() => {
+    setAgentNavCollapsed((current) => !current);
+  }, []);
+  const autoDismissNotices = useMemo(
+    () =>
+      new Set([
+        configRefreshedNotice,
+        configSavedNotice,
+      ]),
+    [configRefreshedNotice, configSavedNotice],
+  );
+
+  useShortcutScope('agent-runtime', {
+    active: true,
+    rootRef: agentsPageRef,
+  });
+  useCommandHandler('agent-runtime.sidebar.toggle', {
+    scope: 'page',
+    enabled: true,
+    execute: toggleAgentNavCollapsed,
+  });
+
+  const notifyRuntimeErrors = useCallback(
+    (next: AgentRuntimeStatus[], previous: AgentRuntimeStatus[]) => {
+      for (const runner of next) {
+        if (getRuntimeDisplayState(runner) !== "error") continue;
+        const previousRunner = previous.find(
+          (item) => item.runner_type === runner.runner_type,
+        );
+        if (!previousRunner) continue;
+
+        const message = getRuntimeErrorMessage(runner, t);
+        if (!message) continue;
+
+        const previousMessage = getRuntimeErrorMessage(previousRunner, t);
+        if (
+          getRuntimeDisplayState(previousRunner) !== "error" ||
+          previousMessage !== message
+        ) {
+          showToast(`${getRunnerLabel(runner.runner_type)}: ${message}`);
+          return;
+        }
+      }
+    },
+    [showToast, t],
+  );
+
+  const updateRuntimeRunners = useCallback(
+    (next: AgentRuntimeStatus[], options?: RuntimeRunnerUpdateOptions) => {
+      const previous = runnersRef.current;
+      if (options?.notifyErrors) {
+        notifyRuntimeErrors(next, previous);
+      }
+      runnersRef.current = next;
+      setRunners(next);
+    },
+    [notifyRuntimeErrors],
+  );
+
+  const updateRuntimeRunnersWith = useCallback(
+    (
+      updater: (current: AgentRuntimeStatus[]) => AgentRuntimeStatus[],
+      options?: RuntimeRunnerUpdateOptions,
+    ) => {
+      const previous = runnersRef.current;
+      const next = updater(previous);
+      if (options?.notifyErrors) {
+        notifyRuntimeErrors(next, previous);
+      }
+      runnersRef.current = next;
+      setRunners(next);
+    },
+    [notifyRuntimeErrors],
+  );
+
+  const replaceRuntimeRunner = useCallback(
+    (updated: AgentRuntimeStatus, options?: RuntimeRunnerUpdateOptions) => {
+      updateRuntimeRunnersWith(
+        (current) =>
+          current.map((item) =>
+            item.runner_type === updated.runner_type ? updated : item,
+          ),
+        options,
+      );
+    },
+    [updateRuntimeRunnersWith],
+  );
+
+  const filteredRunners = useMemo(
+    () =>
+      sortRunnersByAvailability(filterRuntimeRunners(runners, "", filter)),
+    [filter, runners],
+  );
+  const runnerGroups = useMemo(() => {
+    const groups: Array<{
+      state: RuntimeDisplayState;
+      label: string;
+      items: AgentRuntimeStatus[];
+    }> = [];
+    for (const runner of filteredRunners) {
+      const state = getRuntimeDisplayState(runner);
+      const last = groups[groups.length - 1];
+      if (last && last.state === state) {
+        last.items.push(runner);
+        continue;
+      }
+      groups.push({
+        state,
+        label:
+          state === "available"
+            ? t("agents.filter.available")
+            : state === "error"
+              ? t("agents.filter.error")
+              : t("agents.filter.notInstalled"),
+        items: [runner],
+      });
+    }
+    return groups;
+  }, [filteredRunners, t]);
+  const suppressRuntimePlaceholder =
+    !runtimeLoaded || (loading && runners.length === 0);
+
+  const loadRuntime = useCallback(
+    async (options?: { showLoading?: boolean }) => {
+      const showLoading = options?.showLoading ?? true;
+      if (showLoading) setLoading(true);
+      if (showLoading) setLoadError(null);
+      try {
+        const response = await agentRuntimeApi.list();
+        setPiModelsSync(response.pi_models_sync);
+        updateRuntimeRunners(response.runners);
+        setRuntimeLoaded(true);
+        setLoadError(null);
+      } catch (error) {
+        if (showLoading) {
+          setRuntimeLoaded(true);
+          setLoadError(
+            error instanceof Error ? error.message : t("agents.load.failed"),
+          );
+        }
+      } finally {
+        if (showLoading) setLoading(false);
+      }
+    },
+    [t, updateRuntimeRunners],
+  );
+
+  useEffect(() => {
+    void loadRuntime();
+  }, [loadRuntime]);
+
+  // Re-check cached agent runtime status when the app regains focus. This
+  // lightweight refresh never spawns CLI processes and must not bump
+  // refreshRevision, so an open sidebar keeps its cached diagnostics.
+  useEffect(() => {
+    const handleWindowFocus = () => {
+      const now = Date.now();
+      if (now - lastFocusRecheckRef.current < FOCUS_RECHECK_INTERVAL_MS) return;
+      const needsAttention = runnersRef.current.some(
+        (runner) =>
+          getRuntimeDisplayState(runner) !== "available" ||
+          (runner.installed && runner.auth_state !== "authenticated"),
+      );
+      if (!needsAttention) return;
+      lastFocusRecheckRef.current = now;
+      void (async () => {
+        try {
+          const response = await agentRuntimeApi.refreshLight();
+          setPiModelsSync(response.pi_models_sync);
+          updateRuntimeRunners(response.runners);
+        } catch {
+          // Silent background recheck; explicit refresh surfaces errors.
+        }
+      })();
+    };
+    window.addEventListener("focus", handleWindowFocus);
+    return () => window.removeEventListener("focus", handleWindowFocus);
+  }, [updateRuntimeRunners]);
+
+  useEffect(() => {
+    setSelectedRunner((current) => {
+      if (!current) return current;
+      return (
+        runners.find((runner) => runner.runner_type === current.runner_type) ??
+        current
+      );
+    });
+  }, [runners]);
+
+  useEffect(() => {
+    if (!notice) return;
+    if (!autoDismissNotices.has(notice)) return;
+
+    const timeoutId = window.setTimeout(() => {
+      setNotice(null);
+    }, 3500);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [autoDismissNotices, notice]);
+
+  const handleRefreshConfig = async () => {
+    setRefreshingConfig(true);
+    setNotice(null);
+    try {
+      const response = await agentRuntimeApi.refresh(activeWorkspacePath);
+      setPiModelsSync(response.pi_models_sync);
+      updateRuntimeRunners(response.runners, { notifyErrors: true });
+      setRuntimeLoaded(true);
+      setLoadError(null);
+      invalidateSidebarDiagnostics();
+      setRefreshRevision((current) => current + 1);
+      setNotice(
+        response.errors.length > 0
+          ? t("agents.notice.refreshFailedCount", {
+              count: response.errors.length,
+            })
+          : configRefreshedNotice,
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : t("agents.refreshConfig.failed");
+      setNotice(message);
+      showToast(message);
+    } finally {
+      setRefreshingConfig(false);
+    }
+  };
+
+  const handleRetryPiModelsSync = async () => {
+    const retryPath = piModelsSync?.retry_path;
+    if (!retryPath || piModelsSyncRetrying) return;
+    setPiModelsSyncRetrying(true);
+    try {
+      await agentRuntimeApi.retryPiModelsSync(retryPath);
+      setPiModelsSync(null);
+      setNotice(t("agents.piSync.retrySucceeded"));
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : t("agents.piSync.retryFailed");
+      showToast(message);
+    } finally {
+      setPiModelsSyncRetrying(false);
+    }
+  };
+
+  const handleDiagnosticsLoaded = useCallback(
+    (diagnostics: AgentRuntimeDiagnostics) => {
+      updateRuntimeRunnersWith(
+        (current) =>
+          current.map((item) => {
+            if (item.runner_type !== diagnostics.runner_type) return item;
+            const next = {
+              ...item,
+              installed: diagnostics.installed,
+              executable: diagnostics.executable,
+              availability: diagnostics.availability,
+              auth_state: diagnostics.auth_state,
+              node_available: diagnostics.node_available,
+              npm_available: diagnostics.npm_available,
+              npx_available: diagnostics.npx_available,
+              discovered_models: diagnostics.discovered_models,
+              model_source: diagnostics.model_source,
+              version: diagnostics.version,
+              last_checked_at: diagnostics.last_checked_at,
+              last_error: diagnostics.last_error,
+            };
+            return shouldApplyRuntimeSnapshot(item, next) ? next : item;
+          }),
+        { notifyErrors: true },
+      );
+    },
+    [updateRuntimeRunnersWith],
+  );
+
+  const handleSave = async (
+    runner: BaseCodingAgent,
+    formData: Record<string, JsonValue | undefined>,
+    envJson: Record<string, string> | null,
+  ) => {
+    setSaveError(null);
+    try {
+      const updated = await agentRuntimeApi.updateConfig(runner, {
+        run_mode: null,
+        env_json: envJson,
+        executor_options: formData as JsonValue,
+      });
+      invalidateSidebarDiagnostics(runner);
+      replaceRuntimeRunner(updated);
+      setSelectedRunner((current) =>
+        current?.runner_type === updated.runner_type ? updated : current,
+      );
+    } catch (error) {
+      setSaveError(
+        error instanceof Error ? error.message : t("agents.save.failed"),
+      );
+      throw error;
+    }
+  };
+
+  const handleOpenConfig = useCallback(
+    (runner: AgentRuntimeStatus) => {
+      setSelectedRunner(runner);
+      setSaveError(null);
+    },
+    [],
+  );
+  const piModelsSyncWarning =
+    piModelsSync && !piModelsSync.synchronized ? piModelsSync : null;
+  const piDownloadInProgress =
+    refreshingConfig &&
+    runners.some((runner) => runner.runner_type === "PI");
+  const systemBreadcrumbLabel = t("agents.breadcrumb.system");
+  const agentNavToggleLabel = agentNavCollapsed
+    ? "Expand agent list (Ctrl/Cmd+B)"
+    : "Collapse agent list (Ctrl/Cmd+B)";
+
+  return (
+    <div ref={agentsPageRef} className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--surface-2)] text-[var(--ink)]">
+      <header className="flex h-[49px] shrink-0 items-center justify-between border-b border-[var(--hairline)] bg-[var(--surface-2)] px-[29px]">
+        <nav
+          aria-label="Breadcrumb"
+          className="flex min-w-0 items-center gap-[7px]"
+        >
+          <span
+            role="img"
+            aria-label={systemBreadcrumbLabel}
+            title={systemBreadcrumbLabel}
+            className="flex h-[19px] w-[19px] shrink-0 items-center justify-center text-[var(--primary)]"
+          >
+            <Settings aria-hidden="true" className="h-[17px] w-[17px]" />
+          </span>
+          <ChevronRight
+            aria-hidden="true"
+            className="h-[15px] w-[15px] shrink-0 text-[#8f9298]"
+            strokeWidth={2.4}
+          />
+          <h1 className="truncate text-[16px] font-semibold leading-[1.25] text-[var(--ink)]">
+            {t("agents.page.title")}
+          </h1>
+        </nav>
+
+        <div className="flex min-w-0 items-center gap-2">
+          <button
+            type="button"
+            data-command-id="agent-runtime.sidebar.toggle"
+            onClick={toggleAgentNavCollapsed}
+            className="flex h-7 w-7 items-center justify-center rounded-full border border-[var(--hairline)] bg-[var(--surface-2)] text-[var(--ink-tertiary)] transition hover:bg-[var(--surface-3)] hover:text-[var(--ink)]"
+            aria-label={agentNavToggleLabel}
+            title={agentNavToggleLabel}
+          >
+            {agentNavCollapsed ? (
+              <PanelLeftOpen className="h-3.5 w-3.5" />
+            ) : (
+              <PanelLeftClose className="h-3.5 w-3.5" />
+            )}
+          </button>
+          <DropdownSelect
+            value={filter}
+            options={statusFilterOptions}
+            showSearch={false}
+            triggerIcon={
+              <ListFilter className="h-3.5 w-3.5 shrink-0 text-[var(--ink-tertiary)]" />
+            }
+            className="w-7 [&>button]:h-7 [&>button]:w-7 [&>button]:justify-center [&>button]:gap-0 [&>button]:rounded-full [&>button]:border-[var(--hairline)] [&>button]:bg-[var(--surface-2)] [&>button]:p-0 [&>button>span]:hidden [&>button>svg:last-child]:hidden"
+            panelClassName="max-w-none"
+            panelMinWidth={180}
+            maxPanelHeightClassName="max-h-[220px]"
+            onChange={(value) => setFilter(value as AgentRuntimeFilter)}
+          />
+          <button
+            type="button"
+            onClick={() => void handleRefreshConfig()}
+            disabled={refreshingConfig}
+            className="flex h-7 w-7 items-center justify-center rounded-full border border-[var(--hairline)] bg-[var(--surface-2)] text-[var(--ink-tertiary)] transition hover:bg-[var(--surface-3)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-60"
+            aria-label={
+              refreshingConfig
+                ? t("agents.refreshConfig.refreshing")
+                : t("agents.refreshConfig")
+            }
+            title={
+              refreshingConfig
+                ? t("agents.refreshConfig.refreshing")
+                : t("agents.refreshConfig")
+            }
+            data-tooltip-nowrap
+          >
+            <RefreshCw
+              className={`h-3.5 w-3.5 ${refreshingConfig ? "animate-spin" : ""}`}
+            />
+          </button>
+        </div>
+      </header>
+
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[var(--surface-2)]">
+        {(loadError || notice || piModelsSyncWarning || piDownloadInProgress) && (
+          <div className="shrink-0 space-y-2 border-b border-[var(--hairline)] p-3">
+            {loadError && (
+              <div className="rounded-[8px] border border-red-500/30 bg-red-500/10 p-3 text-[14px] text-red-400">
+                <span className="inline-flex items-center gap-2 font-medium">
+                  <AlertTriangle className="h-4 w-4" />
+                  {t("agents.load.failedTitle")}
+                </span>
+                <p className="mt-1 text-red-400/80">{loadError}</p>
+              </div>
+            )}
+            {notice && (
+              <div className="rounded-[8px] border border-[var(--primary)]/30 bg-[var(--primary-tint)] p-3 text-[14px] text-[var(--primary)]">
+                {notice}
+              </div>
+            )}
+            {piModelsSyncWarning && (
+              <div className="rounded-[8px] border border-amber-500/30 bg-amber-500/5 p-3 text-[14px] text-amber-400">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-2 font-medium">
+                    <AlertTriangle className="h-4 w-4" />
+                    {t("agents.piSync.failedTitle")}
+                  </span>
+                  {piModelsSyncWarning.retry_available && (
+                    <button
+                      type="button"
+                      onClick={() => void handleRetryPiModelsSync()}
+                      disabled={piModelsSyncRetrying}
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-amber-500/30 px-3 py-1 text-[12px] font-medium transition hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <RefreshCw
+                        className={`h-3 w-3 ${piModelsSyncRetrying ? "animate-spin" : ""}`}
+                      />
+                      {piModelsSyncRetrying
+                        ? t("agents.piSync.retrying")
+                        : t("agents.piSync.retry")}
+                    </button>
+                  )}
+                </div>
+                {piModelsSyncWarning.error && (
+                  <p className="mt-1 break-words text-amber-400/80">
+                    {piModelsSyncWarning.error}
+                  </p>
+                )}
+              </div>
+            )}
+            {piDownloadInProgress && (
+              <div className="rounded-[8px] border border-[var(--primary)]/30 bg-[var(--primary-tint)] p-3 text-[14px] text-[var(--primary)]">
+                {t("agents.refreshConfig.piDownloadInProgress")}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div
+          className={cx(
+            "flex min-h-0 flex-1 flex-col overflow-hidden lg:grid",
+            agentNavCollapsed
+              ? "lg:grid-cols-[64px_minmax(0,1fr)]"
+              : "lg:grid-cols-[256px_minmax(0,1fr)]",
+          )}
+        >
+          <div
+            className={cx(
+              "min-h-0 flex-1 overflow-y-auto border-r border-[var(--hairline)] py-3 ot-scroll-area-styled",
+              agentNavCollapsed ? "px-1.5" : "px-2",
+            )}
+          >
+            {suppressRuntimePlaceholder ? (
+              null
+            ) : filteredRunners.length === 0 ? (
+              <div className="flex min-h-[240px] flex-col items-center justify-center text-center">
+                <Bot className="h-8 w-8 text-[var(--ink-tertiary)]" />
+                <h3 className="mt-3 text-[14px] font-medium text-[var(--ink)]">
+                  {t("agents.empty.title")}
+                </h3>
+                <p className="mt-1 max-w-sm text-[14px] leading-[1.5] text-[var(--ink-subtle)]">
+                  {t("agents.empty.desc")}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-0.5">
+                {runnerGroups.map((group, groupIndex) => (
+                  <div key={group.state}>
+                    {!agentNavCollapsed && runnerGroups.length > 1 && (
+                      <p
+                        className={cx(
+                          "px-2.5 pb-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-tertiary)]",
+                          groupIndex === 0 ? "pt-1" : "pt-4",
+                        )}
+                      >
+                        {group.label}
+                      </p>
+                    )}
+                    {group.items.map((runner) => (
+                      <AgentRow
+                        key={runner.runner_type}
+                        runner={runner}
+                        selected={
+                          selectedRunner?.runner_type === runner.runner_type
+                        }
+                        collapsed={agentNavCollapsed}
+                        onOpenConfig={() => handleOpenConfig(runner)}
+                      />
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="min-h-[360px] overflow-hidden border-t border-[var(--hairline)] lg:min-h-0 lg:border-t-0">
+            {!runtimeLoaded ? (
+              null
+            ) : selectedRunner ? (
+              <AgentConfigSidebar
+                runner={selectedRunner}
+                saveError={saveError}
+                onClose={() => setSelectedRunner(null)}
+                onSave={handleSave}
+                onDiagnosticsLoaded={handleDiagnosticsLoaded}
+                workspacePath={activeWorkspacePath}
+                refreshRevision={refreshRevision}
+                rechecking={refreshingConfig}
+                onRecheck={() => void handleRefreshConfig()}
+                t={t}
+              />
+            ) : (
+              <AgentConfigEmptyState t={t} />
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

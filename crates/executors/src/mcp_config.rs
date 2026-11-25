@@ -1,0 +1,887 @@
+//! Utilities for reading and writing external agent config files (not the server's own config).
+//!
+//! These helpers abstract over JSON vs TOML vs JSONC formats used by different agents.
+//! JSONC (JSON with Comments) is supported with comment preservation using jsonc-parser's CST.
+
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+    path::Path,
+    sync::LazyLock,
+};
+
+use jsonc_parser::{
+    ParseOptions,
+    cst::{CstObject, CstRootNode},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use tokio::fs;
+use ts_rs::TS;
+
+use crate::executors::{CodingAgent, ExecutorError};
+
+fn is_jsonc_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("jsonc"))
+}
+
+fn is_yaml_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("yaml") || e.eq_ignore_ascii_case("yml"))
+}
+
+static DEFAULT_MCP_JSON: &str = include_str!("../default_mcp.json");
+pub static PRECONFIGURED_MCP_SERVERS: LazyLock<Value> = LazyLock::new(|| {
+    serde_json::from_str::<Value>(DEFAULT_MCP_JSON).expect("Failed to parse default MCP JSON")
+});
+
+/// Adapter-neutral MCP definitions persisted for one project member.
+///
+/// `BTreeMap` makes serialization deterministic without assigning runtime
+/// meaning to server order.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export)]
+pub struct MemberMcpConfig {
+    #[serde(default, rename = "mcpServers")]
+    #[ts(type = "Record<string, unknown>")]
+    pub mcp_servers: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberMcpConfigValidationError {
+    pub member: String,
+    pub server: String,
+    pub field_path: String,
+}
+
+impl fmt::Display for MemberMcpConfigValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "invalid member MCP config: member `{}`, server `{}`, field `{}`",
+            self.member, self.server, self.field_path
+        )
+    }
+}
+
+impl std::error::Error for MemberMcpConfigValidationError {}
+
+impl MemberMcpConfig {
+    pub fn validate(&self, member: &str) -> Result<(), MemberMcpConfigValidationError> {
+        for (server_name, definition) in &self.mcp_servers {
+            if server_name.trim().is_empty() {
+                return Err(member_mcp_validation_error(
+                    member,
+                    server_name,
+                    "mcpServers".to_string(),
+                ));
+            }
+
+            let Some(server) = definition.as_object() else {
+                return Err(member_mcp_validation_error(
+                    member,
+                    server_name,
+                    member_mcp_field_path(server_name, None),
+                ));
+            };
+
+            for field in ["enabled", "disabled"] {
+                if server.get(field).is_some_and(|value| !value.is_boolean()) {
+                    return Err(member_mcp_validation_error(
+                        member,
+                        server_name,
+                        member_mcp_field_path(server_name, Some(field)),
+                    ));
+                }
+            }
+
+            let remote_transport = server.contains_key("url")
+                || server.contains_key("httpUrl")
+                || matches!(
+                    server.get("type").and_then(Value::as_str),
+                    Some("http" | "sse")
+                );
+            if remote_transport {
+                let mut has_url = false;
+                for field in ["url", "httpUrl"] {
+                    if let Some(value) = server.get(field) {
+                        has_url = true;
+                        if !value.is_string() {
+                            return Err(member_mcp_validation_error(
+                                member,
+                                server_name,
+                                member_mcp_field_path(server_name, Some(field)),
+                            ));
+                        }
+                    }
+                }
+                if !has_url {
+                    return Err(member_mcp_validation_error(
+                        member,
+                        server_name,
+                        member_mcp_field_path(server_name, Some("url")),
+                    ));
+                }
+                validate_member_mcp_string_map(
+                    member,
+                    server_name,
+                    server.get("headers"),
+                    "headers",
+                )?;
+            } else {
+                if server.get("command").is_none_or(|value| !value.is_string()) {
+                    return Err(member_mcp_validation_error(
+                        member,
+                        server_name,
+                        member_mcp_field_path(server_name, Some("command")),
+                    ));
+                }
+                if let Some(args) = server.get("args") {
+                    let Some(args) = args.as_array() else {
+                        return Err(member_mcp_validation_error(
+                            member,
+                            server_name,
+                            member_mcp_field_path(server_name, Some("args")),
+                        ));
+                    };
+                    if let Some((index, _)) = args
+                        .iter()
+                        .enumerate()
+                        .find(|(_, value)| !value.is_string())
+                    {
+                        return Err(member_mcp_validation_error(
+                            member,
+                            server_name,
+                            format!(
+                                "{}[{index}]",
+                                member_mcp_field_path(server_name, Some("args"))
+                            ),
+                        ));
+                    }
+                }
+                validate_member_mcp_string_map(member, server_name, server.get("env"), "env")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn validate_member_mcp_string_map(
+    member: &str,
+    server_name: &str,
+    value: Option<&Value>,
+    field: &str,
+) -> Result<(), MemberMcpConfigValidationError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let Some(values) = value.as_object() else {
+        return Err(member_mcp_validation_error(
+            member,
+            server_name,
+            member_mcp_field_path(server_name, Some(field)),
+        ));
+    };
+    if let Some((key, _)) = values.iter().find(|(_, value)| !value.is_string()) {
+        return Err(member_mcp_validation_error(
+            member,
+            server_name,
+            format!(
+                "{}.{}",
+                member_mcp_field_path(server_name, Some(field)),
+                key
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn member_mcp_field_path(server_name: &str, field: Option<&str>) -> String {
+    match field {
+        Some(field) => format!("mcpServers.{server_name}.{field}"),
+        None => format!("mcpServers.{server_name}"),
+    }
+}
+
+fn member_mcp_validation_error(
+    member: &str,
+    server: &str,
+    field_path: String,
+) -> MemberMcpConfigValidationError {
+    MemberMcpConfigValidationError {
+        member: member.to_string(),
+        server: server.to_string(),
+        field_path,
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct McpConfig {
+    servers: HashMap<String, serde_json::Value>,
+    pub servers_path: Vec<String>,
+    pub template: serde_json::Value,
+    pub preconfigured: serde_json::Value,
+    pub is_toml_config: bool,
+}
+
+impl McpConfig {
+    pub fn new(
+        servers_path: Vec<String>,
+        template: serde_json::Value,
+        preconfigured: serde_json::Value,
+        is_toml_config: bool,
+    ) -> Self {
+        Self {
+            servers: HashMap::new(),
+            servers_path,
+            template,
+            preconfigured,
+            is_toml_config,
+        }
+    }
+    pub fn set_servers(&mut self, servers: HashMap<String, serde_json::Value>) {
+        self.servers = servers;
+    }
+
+    pub fn canonical_acp() -> Self {
+        Self::new(
+            vec!["mcpServers".to_string()],
+            serde_json::json!({ "mcpServers": {} }),
+            serde_json::json!({}),
+            false,
+        )
+    }
+
+    /// Hermes stores MCP servers under `mcp_servers` in `~/.hermes/config.yaml`.
+    pub fn hermes() -> Self {
+        Self::new(
+            vec!["mcp_servers".to_string()],
+            serde_json::json!({ "mcp_servers": {} }),
+            serde_json::json!({}),
+            false,
+        )
+    }
+}
+
+/// Read an Agent configuration through the shared config layer and return only
+/// canonical MCP definitions. ACP adapters consume this value instead of
+/// parsing vendor files themselves.
+pub async fn read_canonical_mcp_config(
+    config_path: &Path,
+    mcp_config: &McpConfig,
+) -> Result<Value, ExecutorError> {
+    let raw = read_agent_config(config_path, mcp_config).await?;
+    canonical_mcp_config_from_raw(&raw, mcp_config)
+}
+
+/// Strict variant used by one-time application data migrations.
+///
+/// A missing file is distinct from a file that exists but cannot be read or
+/// parsed. This also keeps the migration's content read to one per runner.
+pub async fn read_canonical_mcp_config_if_exists(
+    config_path: &Path,
+    mcp_config: &McpConfig,
+) -> Result<Option<Value>, ExecutorError> {
+    let file_content = match fs::read_to_string(config_path).await {
+        Ok(file_content) => file_content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(ExecutorError::Io(error)),
+    };
+    let raw = parse_agent_config_content(config_path, mcp_config, &file_content)?;
+    canonical_mcp_config_from_raw(&raw, mcp_config).map(Some)
+}
+
+fn canonical_mcp_config_from_raw(
+    raw: &Value,
+    mcp_config: &McpConfig,
+) -> Result<Value, ExecutorError> {
+    let mut current = raw;
+    for part in &mcp_config.servers_path {
+        let Some(next) = current.get(part) else {
+            return Ok(serde_json::json!({ "mcpServers": {} }));
+        };
+        current = next;
+    }
+    let Some(servers) = current.as_object() else {
+        return Err(ExecutorError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid MCP config: server definitions must be an object",
+        )));
+    };
+    Ok(serde_json::json!({ "mcpServers": servers }))
+}
+
+pub async fn read_agent_config(
+    config_path: &std::path::Path,
+    mcp_config: &McpConfig,
+) -> Result<Value, ExecutorError> {
+    if let Ok(file_content) = fs::read_to_string(config_path).await {
+        parse_agent_config_content(config_path, mcp_config, &file_content)
+    } else {
+        Ok(mcp_config.template.clone())
+    }
+}
+
+fn parse_agent_config_content(
+    config_path: &Path,
+    mcp_config: &McpConfig,
+    file_content: &str,
+) -> Result<Value, ExecutorError> {
+    if mcp_config.is_toml_config {
+        if file_content.trim().is_empty() {
+            return Ok(serde_json::json!({}));
+        }
+        let toml_val: toml::Value = toml::from_str(file_content)?;
+        let json_string = serde_json::to_string(&toml_val)?;
+        Ok(serde_json::from_str(&json_string)?)
+    } else if is_jsonc_file(config_path) {
+        if file_content.trim().is_empty() {
+            return Ok(serde_json::json!({}));
+        }
+        match jsonc_parser::parse_to_serde_value(file_content, &ParseOptions::default()) {
+            Ok(Some(value)) => Ok(value),
+            Ok(None) => Ok(serde_json::json!({})),
+            Err(_) => Ok(serde_json::from_str(file_content)?),
+        }
+    } else if is_yaml_file(config_path) {
+        if file_content.trim().is_empty() {
+            return Ok(serde_json::json!({}));
+        }
+        let yaml_val: serde_yaml::Value = serde_yaml::from_str(file_content)?;
+        Ok(serde_json::to_value(yaml_val)?)
+    } else {
+        Ok(serde_json::from_str(file_content)?)
+    }
+}
+
+pub async fn write_agent_config(
+    config_path: &std::path::Path,
+    mcp_config: &McpConfig,
+    config: &Value,
+) -> Result<(), ExecutorError> {
+    if mcp_config.is_toml_config {
+        let toml_value: toml::Value = serde_json::from_str(&serde_json::to_string(config)?)?;
+        let toml_content = toml::to_string_pretty(&toml_value)?;
+        fs::write(config_path, toml_content).await?;
+    } else if is_jsonc_file(config_path) {
+        write_jsonc_preserving_comments(config_path, config).await?;
+    } else if is_yaml_file(config_path) {
+        let yaml_value: serde_yaml::Value = serde_json::from_value(config.clone())?;
+        let yaml_content = serde_yaml::to_string(&yaml_value)?;
+        fs::write(config_path, yaml_content).await?;
+    } else {
+        let json_content = serde_json::to_string_pretty(config)?;
+        fs::write(config_path, json_content).await?;
+    }
+    Ok(())
+}
+
+async fn write_jsonc_preserving_comments(
+    config_path: &std::path::Path,
+    new_config: &Value,
+) -> Result<(), ExecutorError> {
+    let current_content = fs::read_to_string(config_path)
+        .await
+        .unwrap_or_else(|_| "{}".to_string());
+
+    let output = update_jsonc_content(&current_content, new_config);
+
+    fs::write(config_path, output).await?;
+    Ok(())
+}
+
+fn update_jsonc_content(current_content: &str, new_config: &Value) -> String {
+    let root = CstRootNode::parse(current_content, &ParseOptions::default())
+        .unwrap_or_else(|_| CstRootNode::parse("{}", &ParseOptions::default()).unwrap());
+
+    let root_obj = root.object_value_or_set();
+
+    if let Some(obj) = new_config.as_object() {
+        deep_merge_cst_object(&root_obj, obj);
+    }
+
+    root.to_string()
+}
+
+/// Recursively merges a serde_json Map into an existing CST object.
+/// This preserves comments by navigating into existing nested objects rather than replacing them.
+fn deep_merge_cst_object(cst_obj: &CstObject, new_obj: &Map<String, Value>) {
+    let existing_keys: Vec<String> = cst_obj
+        .properties()
+        .iter()
+        .filter_map(|p| p.name().and_then(|n| n.decoded_value().ok()))
+        .collect();
+
+    for key in &existing_keys {
+        if !new_obj.contains_key(key)
+            && let Some(prop) = cst_obj.get(key)
+        {
+            prop.remove();
+        }
+    }
+
+    for (key, new_value) in new_obj {
+        if let Some(prop) = cst_obj.get(key) {
+            if let (Some(existing_obj), Some(new_obj_map)) =
+                (prop.object_value(), new_value.as_object())
+            {
+                deep_merge_cst_object(&existing_obj, new_obj_map);
+            } else {
+                prop.set_value(serde_json_to_cst_input(new_value));
+            }
+        } else {
+            cst_obj.append(key, serde_json_to_cst_input(new_value));
+        }
+    }
+}
+
+fn serde_json_to_cst_input(value: &Value) -> jsonc_parser::cst::CstInputValue {
+    use jsonc_parser::cst::CstInputValue;
+
+    match value {
+        Value::Null => CstInputValue::Null,
+        Value::Bool(b) => CstInputValue::Bool(*b),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                CstInputValue::Number(i.to_string())
+            } else if let Some(f) = n.as_f64() {
+                CstInputValue::Number(f.to_string())
+            } else {
+                CstInputValue::Number(n.to_string())
+            }
+        }
+        Value::String(s) => CstInputValue::String(s.clone()),
+        Value::Array(arr) => {
+            CstInputValue::Array(arr.iter().map(serde_json_to_cst_input).collect())
+        }
+        Value::Object(obj) => CstInputValue::Object(
+            obj.iter()
+                .map(|(k, v)| (k.clone(), serde_json_to_cst_input(v)))
+                .collect(),
+        ),
+    }
+}
+
+type ServerMap = Map<String, Value>;
+
+fn is_http_server(s: &Map<String, Value>) -> bool {
+    matches!(s.get("type").and_then(Value::as_str), Some("http"))
+}
+
+fn is_stdio(s: &Map<String, Value>) -> bool {
+    !is_http_server(s) && s.get("command").is_some()
+}
+
+fn extract_meta(mut obj: ServerMap) -> (ServerMap, Option<Value>) {
+    let meta = obj.remove("meta");
+    (obj, meta)
+}
+
+fn attach_meta(mut obj: ServerMap, meta: Option<Value>) -> Value {
+    if let Some(m) = meta {
+        obj.insert("meta".to_string(), m);
+    }
+    Value::Object(obj)
+}
+
+fn ensure_header(headers: &mut Map<String, Value>, key: &str, val: &str) {
+    match headers.get_mut(key) {
+        Some(Value::String(_)) => {}
+        _ => {
+            headers.insert(key.to_string(), Value::String(val.to_string()));
+        }
+    }
+}
+
+fn transform_http_servers<F>(mut servers: ServerMap, mut f: F) -> ServerMap
+where
+    F: FnMut(Map<String, Value>) -> Map<String, Value>,
+{
+    for (_k, v) in servers.iter_mut() {
+        if let Value::Object(s) = v
+            && is_http_server(s)
+        {
+            let taken = std::mem::take(s);
+            *s = f(taken);
+        }
+    }
+    servers
+}
+
+// --- Adapters ---------------------------------------------------------------
+
+fn adapt_passthrough(servers: ServerMap, meta: Option<Value>) -> Value {
+    attach_meta(servers, meta)
+}
+
+fn adapt_gemini(servers: ServerMap, meta: Option<Value>) -> Value {
+    let servers = transform_http_servers(servers, |mut s| {
+        let url = s
+            .remove("url")
+            .unwrap_or_else(|| Value::String(String::new()));
+        let mut headers = s
+            .remove("headers")
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+
+        ensure_header(
+            &mut headers,
+            "Accept",
+            "application/json, text/event-stream",
+        );
+        Map::from_iter([
+            ("httpUrl".to_string(), url),
+            ("headers".to_string(), Value::Object(headers)),
+        ])
+    });
+    attach_meta(servers, meta)
+}
+
+fn adapt_cursor(servers: ServerMap, meta: Option<Value>) -> Value {
+    let servers = transform_http_servers(servers, |mut s| {
+        let url = s
+            .remove("url")
+            .unwrap_or_else(|| Value::String(String::new()));
+        let headers = s
+            .remove("headers")
+            .unwrap_or_else(|| Value::Object(Default::default()));
+        Map::from_iter([("url".to_string(), url), ("headers".to_string(), headers)])
+    });
+    attach_meta(servers, meta)
+}
+
+fn adapt_codex(mut servers: ServerMap, mut meta: Option<Value>) -> Value {
+    servers.retain(|_, v| v.as_object().map(is_stdio).unwrap_or(false));
+
+    if let Some(Value::Object(ref mut m)) = meta {
+        m.retain(|k, _| servers.contains_key(k));
+        servers.insert("meta".to_string(), Value::Object(std::mem::take(m)));
+        meta = None; // already attached above
+    }
+    attach_meta(servers, meta)
+}
+
+fn adapt_opencode(servers: ServerMap, meta: Option<Value>) -> Value {
+    let mut servers = transform_http_servers(servers, |mut s| {
+        let url = s
+            .remove("url")
+            .unwrap_or_else(|| Value::String(String::new()));
+
+        let mut headers = s
+            .remove("headers")
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+
+        ensure_header(
+            &mut headers,
+            "Accept",
+            "application/json, text/event-stream",
+        );
+
+        Map::from_iter([
+            ("type".to_string(), Value::String("remote".to_string())),
+            ("url".to_string(), url),
+            ("headers".to_string(), Value::Object(headers)),
+            ("enabled".to_string(), Value::Bool(true)),
+        ])
+    });
+
+    for (_k, v) in servers.iter_mut() {
+        if let Value::Object(s) = v
+            && is_stdio(s)
+        {
+            let command_str = s
+                .remove("command")
+                .and_then(|v| match v {
+                    Value::String(s) => Some(s),
+                    _ => None,
+                })
+                .unwrap_or_default();
+
+            let mut cmd_vec: Vec<Value> = Vec::new();
+            if !command_str.is_empty() {
+                cmd_vec.push(Value::String(command_str));
+            }
+
+            if let Some(arr) = s.remove("args").and_then(|v| match v {
+                Value::Array(arr) => Some(arr),
+                _ => None,
+            }) {
+                for a in arr {
+                    match a {
+                        Value::String(s) => cmd_vec.push(Value::String(s)),
+                        other => cmd_vec.push(other), // fall back to raw value if not string
+                    }
+                }
+            }
+
+            let mut new_map = Map::new();
+            new_map.insert("type".to_string(), Value::String("local".to_string()));
+            new_map.insert("command".to_string(), Value::Array(cmd_vec));
+            new_map.insert("enabled".to_string(), Value::Bool(true));
+            *s = new_map;
+        }
+    }
+
+    attach_meta(servers, meta)
+}
+
+fn adapt_copilot(mut servers: ServerMap, meta: Option<Value>) -> Value {
+    for (_, value) in servers.iter_mut() {
+        if let Value::Object(s) = value
+            && !s.contains_key("tools")
+        {
+            s.insert(
+                "tools".to_string(),
+                Value::Array(vec![Value::String("*".to_string())]),
+            );
+        }
+    }
+    attach_meta(servers, meta)
+}
+
+enum Adapter {
+    Passthrough,
+    Gemini,
+    Cursor,
+    Codex,
+    Opencode,
+    Copilot,
+}
+
+fn apply_adapter(adapter: Adapter, canonical: Value) -> Value {
+    let (servers_only, meta) = match canonical.as_object() {
+        Some(map) => extract_meta(map.clone()),
+        None => (ServerMap::new(), None),
+    };
+
+    match adapter {
+        Adapter::Passthrough => adapt_passthrough(servers_only, meta),
+        Adapter::Gemini => adapt_gemini(servers_only, meta),
+        Adapter::Cursor => adapt_cursor(servers_only, meta),
+        Adapter::Codex => adapt_codex(servers_only, meta),
+        Adapter::Opencode => adapt_opencode(servers_only, meta),
+        Adapter::Copilot => adapt_copilot(servers_only, meta),
+    }
+}
+
+impl CodingAgent {
+    pub fn preconfigured_mcp(&self) -> Value {
+        use Adapter::*;
+
+        let adapter = match self {
+            CodingAgent::ClaudeCode(_) | CodingAgent::Amp(_) | CodingAgent::Droid(_) => Passthrough,
+            CodingAgent::QwenCode(_) | CodingAgent::Gemini(_) => Gemini,
+            CodingAgent::CursorAgent(_) => Cursor,
+            CodingAgent::Codex(_) => Codex,
+            CodingAgent::Opencode(_) | CodingAgent::OpenTeamsCli(_) => Opencode,
+            CodingAgent::Copilot(..) => Copilot,
+            CodingAgent::KimiCode(_)
+            | CodingAgent::QoderCli(_)
+            | CodingAgent::Pi(_)
+            | CodingAgent::Hermes(_)
+            | CodingAgent::KiroCli(_)
+            | CodingAgent::DeepseekHarness(_) => Passthrough,
+            #[cfg(feature = "qa-mode")]
+            CodingAgent::QaMock(_) | CodingAgent::AcpQa(_) => Passthrough,
+        };
+
+        let canonical = PRECONFIGURED_MCP_SERVERS.clone();
+        apply_adapter(adapter, canonical)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn member_mcp_config_valid_config_round_trips_in_stable_order() {
+        let config: MemberMcpConfig = serde_json::from_value(serde_json::json!({
+            "mcpServers": {
+                "zeta": {
+                    "type": "http",
+                    "url": "https://example.test/mcp",
+                    "headers": {"X-Mode": "test"},
+                    "enabled": true
+                },
+                "alpha": {
+                    "command": "mcp-tool",
+                    "args": ["serve"],
+                    "env": {"MODE": "test"},
+                    "disabled": false,
+                    "cwd": ".",
+                    "startup_timeout_sec": 120,
+                    "future_option": {"nested": true}
+                },
+                "stream": {
+                    "type": "sse",
+                    "url": "https://example.test/events"
+                }
+            }
+        }))
+        .expect("deserialize canonical member MCP config");
+
+        config.validate("member-1").expect("valid MCP config");
+        let serialized = serde_json::to_value(&config).expect("serialize member MCP config");
+        let server_names = serialized["mcpServers"]
+            .as_object()
+            .expect("server map")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(server_names, vec!["alpha", "stream", "zeta"]);
+        assert_eq!(serialized["mcpServers"]["alpha"]["cwd"], ".");
+        assert_eq!(
+            serialized["mcpServers"]["alpha"]["startup_timeout_sec"],
+            120
+        );
+        assert_eq!(
+            serialized["mcpServers"]["alpha"]["future_option"],
+            serde_json::json!({"nested": true})
+        );
+        assert_eq!(
+            serde_json::from_value::<MemberMcpConfig>(serialized).expect("round trip config"),
+            config
+        );
+    }
+
+    #[test]
+    fn member_mcp_config_invalid_config_error_is_secret_safe() {
+        let configured_value = ["configured", "-", "value"].concat();
+        let config: MemberMcpConfig = serde_json::from_value(serde_json::json!({
+            "mcpServers": {
+                "remote": {
+                    "type": "http",
+                    "url": "https://example.test/mcp",
+                    "headers": {"Authorization": [configured_value.clone()]}
+                }
+            }
+        }))
+        .expect("deserialize invalid member MCP config");
+
+        let error = config
+            .validate("member-2")
+            .expect_err("reject invalid header value");
+        assert_eq!(error.member, "member-2");
+        assert_eq!(error.server, "remote");
+        assert_eq!(error.field_path, "mcpServers.remote.headers.Authorization");
+        assert_eq!(
+            error.to_string(),
+            "invalid member MCP config: member `member-2`, server `remote`, field `mcpServers.remote.headers.Authorization`"
+        );
+        assert!(
+            !error.to_string().contains(&configured_value),
+            "validation error exposed a configured value"
+        );
+    }
+
+    #[test]
+    fn member_mcp_config_validator_checks_canonical_field_types() {
+        for (server_name, server, field_path) in [
+            (
+                " ",
+                serde_json::json!({"command": "mcp-tool"}),
+                "mcpServers",
+            ),
+            (
+                "stdio",
+                serde_json::json!({"command": 7}),
+                "mcpServers.stdio.command",
+            ),
+            (
+                "stdio",
+                serde_json::json!({"command": "mcp-tool", "args": ["ok", 7]}),
+                "mcpServers.stdio.args[1]",
+            ),
+            (
+                "stdio",
+                serde_json::json!({"command": "mcp-tool", "env": {"TOKEN": 7}}),
+                "mcpServers.stdio.env.TOKEN",
+            ),
+            (
+                "remote",
+                serde_json::json!({"type": "http", "url": 7}),
+                "mcpServers.remote.url",
+            ),
+            (
+                "stream",
+                serde_json::json!({"type": "sse", "url": "https://example.test", "enabled": "yes"}),
+                "mcpServers.stream.enabled",
+            ),
+            (
+                "remote",
+                serde_json::json!({"url": "https://example.test", "disabled": 0}),
+                "mcpServers.remote.disabled",
+            ),
+            (
+                "remote",
+                serde_json::json!({"type": "http", "url": "https://example.test", "headers": []}),
+                "mcpServers.remote.headers",
+            ),
+            (
+                "remote",
+                serde_json::json!({"type": "http"}),
+                "mcpServers.remote.url",
+            ),
+        ] {
+            let config: MemberMcpConfig = serde_json::from_value(serde_json::json!({
+                "mcpServers": {server_name: server}
+            }))
+            .expect("deserialize invalid member MCP config");
+            let error = config.validate("member-3").expect_err("reject field type");
+            assert_eq!(error.field_path, field_path);
+        }
+    }
+
+    #[tokio::test]
+    async fn yaml_config_reads_mcp_servers_into_canonical_shape() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            "model: openrouter/nous/hermes\nmcp_servers:\n  filesystem:\n    command: npx\n    args: [\"-y\", \"@modelcontextprotocol/server-filesystem\"]\n",
+        )
+        .expect("write yaml config");
+
+        let canonical = read_canonical_mcp_config(&config_path, &McpConfig::hermes())
+            .await
+            .expect("read canonical config");
+        assert_eq!(
+            canonical["mcpServers"]["filesystem"]["command"],
+            serde_json::json!("npx")
+        );
+        // Non-MCP keys must not leak into the canonical MCP config.
+        assert!(canonical.get("model").is_none());
+    }
+
+    #[tokio::test]
+    async fn yaml_config_write_preserves_yaml_format() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.yaml");
+        std::fs::write(&config_path, "mcp_servers: {}\n").expect("write yaml config");
+
+        let mcp_config = McpConfig::hermes();
+        let mut raw = read_agent_config(&config_path, &mcp_config)
+            .await
+            .expect("read yaml config");
+        raw["mcp_servers"] = serde_json::json!({
+            "filesystem": { "command": "npx" }
+        });
+        write_agent_config(&config_path, &mcp_config, &raw)
+            .await
+            .expect("write yaml config");
+
+        let content = std::fs::read_to_string(&config_path).expect("read written config");
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&content).expect("written config must stay valid YAML");
+        assert_eq!(
+            parsed["mcp_servers"]["filesystem"]["command"],
+            serde_yaml::Value::String("npx".to_string())
+        );
+    }
+}

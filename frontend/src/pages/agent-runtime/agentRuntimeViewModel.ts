@@ -1,0 +1,193 @@
+import type {
+  AgentRuntimeEnvSummary,
+  AgentRuntimeStatus,
+  AvailabilityInfo,
+  BaseCodingAgent,
+} from "@/types";
+import type { MissingRuntimeTool } from "./installGuidance";
+
+export type AgentRuntimeFilter = "all" | "available" | "error" | "not_installed";
+
+export type RuntimeDisplayState = "available" | "error" | "not_installed";
+
+/** Display labels for probed runtime tools (Node.js/npm/npx). */
+export const RUNTIME_TOOL_LABELS: Record<MissingRuntimeTool, string> = {
+  node: "Node.js",
+  npm: "npm",
+  npx: "npx",
+};
+
+export const AGENT_RUNTIME_EDITABLE_FIELDS = [
+  "run_mode",
+  "env_json",
+  "executor_options",
+] as const;
+
+export interface MachineSummary {
+  name: string;
+  total: number;
+  online: number;
+  errors: number;
+  notInstalled: number;
+  workloadLabel: string;
+}
+
+export type EnvTextParseResult =
+  | { ok: true; value: Record<string, string> }
+  | {
+      ok: false;
+      error: { line: number; code: "missing_equals" | "invalid_key" };
+    };
+
+const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+
+export function getRunnerLabel(runner: BaseCodingAgent | string): string {
+  if (runner === "DEEPSEEK_HARNESS") return "DeepSeek Harness";
+  if (runner === "KIRO_CLI") return "Kiro CLI";
+  if (runner === "QODER_CLI") return "Qoder CLI";
+  return runner
+    .toString()
+    .toLowerCase()
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+export function getAvailabilityLabel(availability: AvailabilityInfo): string {
+  switch (availability.type) {
+    case "LOGIN_DETECTED":
+      return "Login detected";
+    case "INSTALLATION_FOUND":
+      return "Installation found";
+    case "NOT_FOUND":
+      return "Not found";
+    default:
+      return "Unknown";
+  }
+}
+
+export interface RuntimeErrorDetail {
+  /** Backend stage tag like `version_check`, null for unstaged lines. */
+  stage: string | null;
+  message: string;
+}
+
+/**
+ * Split the backend's staged `last_error` ("[stage] message" per line) into
+ * display rows. Unrecognized lines are shown verbatim.
+ */
+export function parseRuntimeErrorDetails(
+  lastError: string | null,
+): RuntimeErrorDetail[] {
+  if (!lastError) return [];
+  return lastError
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = /^\[([a-z_]+)\]\s*(.*)$/u.exec(line);
+      if (!match) return { stage: null, message: line };
+      return { stage: match[1], message: match[2] || line };
+    });
+}
+
+export function getRuntimeDisplayState(
+  runner: Pick<AgentRuntimeStatus, "installed" | "executable" | "last_error">,
+): RuntimeDisplayState {
+  if (!runner.installed) return "not_installed";
+  if (!runner.executable || runner.last_error) return "error";
+  return "available";
+}
+
+export function filterRuntimeRunners(
+  runners: AgentRuntimeStatus[],
+  query: string,
+  filter: AgentRuntimeFilter,
+): AgentRuntimeStatus[] {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+
+  return runners.filter((runner) => {
+    const displayState = getRuntimeDisplayState(runner);
+    if (filter !== "all" && displayState !== filter) return false;
+    if (!normalizedQuery) return true;
+
+    const haystack = [
+      getRunnerLabel(runner.runner_type),
+      runner.runner_type,
+      runner.run_mode,
+      runner.version ?? "",
+      runner.last_error ?? "",
+      runner.discovered_models.join(" "),
+      runner.env_summary.map((entry) => entry.key).join(" "),
+    ]
+      .join(" ")
+      .toLocaleLowerCase();
+
+    return haystack.includes(normalizedQuery);
+  });
+}
+
+export function buildLocalMachineSummary(
+  runners: AgentRuntimeStatus[],
+): MachineSummary {
+  const total = runners.length;
+  const online = runners.filter(
+    (runner) => getRuntimeDisplayState(runner) === "available",
+  ).length;
+  const errors = runners.filter(
+    (runner) => getRuntimeDisplayState(runner) === "error",
+  ).length;
+  const notInstalled = runners.filter(
+    (runner) => getRuntimeDisplayState(runner) === "not_installed",
+  ).length;
+  const configuredEnvCount = runners.reduce(
+    (sum, runner) => sum + runner.env_summary.length,
+    0,
+  );
+
+  return {
+    name: "Localhost",
+    total,
+    online,
+    errors,
+    notInstalled,
+    workloadLabel:
+      configuredEnvCount > 0
+        ? `${configuredEnvCount} env keys configured`
+        : "No active workload reported",
+  };
+}
+
+export function envSummaryToText(envSummary: AgentRuntimeEnvSummary[]): string {
+  return envSummary.map((entry) => `${entry.key}=${entry.value}`).join("\n");
+}
+
+export function parseEnvText(text: string): EnvTextParseResult {
+  const value: Record<string, string> = {};
+  const lines = text.split(/\r?\n/u);
+
+  for (const [index, rawLine] of lines.entries()) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    const equalsIndex = line.indexOf("=");
+    if (equalsIndex === -1) {
+      return {
+        ok: false,
+        error: { line: index + 1, code: "missing_equals" },
+      };
+    }
+
+    const key = line.slice(0, equalsIndex).trim();
+    if (!ENV_KEY_PATTERN.test(key)) {
+      return {
+        ok: false,
+        error: { line: index + 1, code: "invalid_key" },
+      };
+    }
+
+    value[key] = line.slice(equalsIndex + 1);
+  }
+
+  return { ok: true, value };
+}

@@ -1,0 +1,5869 @@
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{Arc, atomic::AtomicU8},
+};
+
+use chrono::Utc;
+use command_group::AsyncCommandGroup;
+use db::{
+    DBService,
+    models::{
+        chat_agent::{ChatAgent, CreateChatAgent},
+        chat_message::{ChatMessage, ChatSenderType},
+        chat_message_queue::QueuedMessageStatus,
+        chat_run::ChatRun,
+        chat_session::{ChatSession, ChatSessionStatus, ChatSessionWorktreeMode},
+        chat_session_agent::{ChatSessionAgent, ChatSessionAgentState},
+        member_execution_config::MemberExecutionConfig,
+        project_member::{ProjectMember, ProjectMemberType},
+        workflow_agent_session::{CreateWorkflowAgentSession, WorkflowAgentSession},
+        workflow_types::WorkflowAgentSessionRole,
+    },
+};
+use executors::{
+    env::{ExecutionEnv, RepoContext},
+    executors::{CancellationToken, ExecutorError, ExecutorRunCleanup},
+    mcp_config::MemberMcpConfig,
+    mcp_run::{McpRunContext, PrivateMcpRunDirectory, canonical_mcp_server_map_hash},
+};
+use git::GitService;
+use serde_json::json;
+use sqlx::SqlitePool;
+use tokio::{
+    process::Command,
+    sync::{Mutex, oneshot},
+};
+use utils::{log_msg::LogMsg, msg_store::MsgStore};
+use uuid::Uuid;
+
+use super::{
+    AgentProtocolError, AgentProtocolMessageType, ChatProtocolNoticeCode, ChatRunner,
+    ChatRunnerError, ChatStreamEvent, LifecycleEvent, MARKDOWN_PROTOCOL_OUTPUT_EXAMPLE_JSON,
+    MAX_PROTOCOL_PARSE_RETRIES, PROTOCOL_OUTPUT_SCHEMA_JSON, RUNS_MAX_TOTAL_BYTES_PER_WORKSPACE,
+    RUNS_PRUNE_TARGET_BYTES_PER_WORKSPACE, ResolvedPromptLanguage, RunCompletionStatus,
+    TokenUsageInfo,
+    runtime::{ExitWatcherArgs, RunLogForwarders},
+};
+use crate::services::{
+    chat,
+    config::UiLanguage,
+    queued_message::{CreateQueuedMessage, MemberQueueStatus, QueuedMessageService},
+    session_worktree::SessionWorktreeService,
+    test_support::{
+        ADAPTER_DIAGNOSTIC_SECRET, CANONICAL_MCP_SECRET, TracingCapture,
+        canonical_mcp_config_with_fake_secrets,
+    },
+};
+
+fn test_message_with_sender(
+    sender_type: ChatSenderType,
+    sender_id: Option<Uuid>,
+    content: &str,
+    meta: serde_json::Value,
+) -> ChatMessage {
+    ChatMessage {
+        id: Uuid::new_v4(),
+        session_id: Uuid::new_v4(),
+        sender_type,
+        sender_id,
+        sender_session_agent_id: None,
+        content: content.to_string(),
+        mentions: sqlx::types::Json(Vec::new()),
+        meta: sqlx::types::Json(meta),
+        created_at: Utc::now(),
+    }
+}
+
+fn test_message(content: &str, meta: serde_json::Value) -> ChatMessage {
+    test_message_with_sender(ChatSenderType::User, None, content, meta)
+}
+
+fn test_agent(name: &str, system_prompt: &str) -> ChatAgent {
+    ChatAgent {
+        id: Uuid::new_v4(),
+        name: name.to_string(),
+        runner_type: "codex".to_string(),
+        system_prompt: system_prompt.to_string(),
+        model_name: None,
+        owner_project_id: None,
+        tools_enabled: sqlx::types::Json(json!({})),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    }
+}
+
+fn sleep_command(seconds: u64) -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("powershell");
+        command.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-Command",
+            &format!("Start-Sleep -Seconds {seconds}"),
+        ]);
+        command
+    }
+
+    #[cfg(unix)]
+    {
+        let mut command = Command::new("sh");
+        command.args(["-lc", &format!("sleep {seconds}")]);
+        command
+    }
+}
+
+async fn setup_chat_runner_db() -> DBService {
+    let pool = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("create sqlite memory pool");
+
+    for statement in [
+        "PRAGMA foreign_keys = ON",
+        r#"
+            CREATE TABLE projects (
+                id BLOB PRIMARY KEY,
+                name TEXT NOT NULL,
+                default_agent_working_dir TEXT,
+                remote_project_id BLOB,
+                description TEXT,
+                status TEXT,
+                default_workspace_path TEXT,
+                active_repo_id BLOB,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+        r#"
+            CREATE TABLE project_members (
+                id BLOB PRIMARY KEY,
+                project_id BLOB NOT NULL,
+                member_type TEXT NOT NULL CHECK (member_type IN ('human','agent')),
+                user_id TEXT,
+                agent_id BLOB,
+                member_name TEXT,
+                role TEXT,
+                display_order INTEGER NOT NULL DEFAULT 0,
+                default_workspace_path TEXT,
+                allowed_skill_ids TEXT NOT NULL DEFAULT '[]',
+                execution_config TEXT NOT NULL DEFAULT '{}',
+                is_default BOOLEAN NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+        r#"
+            CREATE TABLE chat_sessions (
+                id BLOB PRIMARY KEY,
+                title TEXT,
+                status TEXT NOT NULL DEFAULT 'active'
+                    CHECK (status IN ('active','archived')),
+                summary_text TEXT,
+                archive_ref TEXT,
+                last_seen_diff_key TEXT,
+                default_workspace_path TEXT,
+                chat_input_mode TEXT,
+                project_id BLOB,
+                lead_agent_id TEXT,
+                lead_session_agent_id BLOB,
+                worktree_mode TEXT NOT NULL DEFAULT 'inherit'
+                    CHECK (worktree_mode IN ('inherit', 'disabled', 'isolated')),
+                pinned_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                archived_at TEXT
+            )
+            "#,
+        r#"
+            CREATE TABLE chat_agents (
+                id BLOB PRIMARY KEY,
+                name TEXT NOT NULL,
+                runner_type TEXT NOT NULL,
+                system_prompt TEXT NOT NULL DEFAULT '',
+                tools_enabled TEXT NOT NULL DEFAULT '{}',
+                model_name TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+        r#"
+            CREATE TABLE chat_session_worktrees (
+                id BLOB PRIMARY KEY,
+                session_id BLOB NOT NULL,
+                project_id BLOB,
+                base_workspace_path TEXT NOT NULL,
+                repo_path TEXT NOT NULL,
+                base_branch TEXT NOT NULL,
+                base_commit TEXT,
+                branch_name TEXT NOT NULL,
+                worktree_path TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'session'
+                    CHECK (mode IN ('session')),
+                status TEXT NOT NULL DEFAULT 'creating'
+                    CHECK (status IN (
+                        'creating', 'active', 'dirty', 'merging',
+                        'needs_conflict_resolution', 'merged',
+                        'archived', 'cleanup_pending', 'cleanup_failed'
+                    )),
+                merge_target_branch TEXT,
+                merge_operation TEXT,
+                conflict_files_json TEXT NOT NULL DEFAULT '[]',
+                operation_started_at TEXT,
+                cleanup_error TEXT,
+                last_used_at TEXT,
+                merged_at TEXT,
+                archived_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+        r#"
+            CREATE TABLE chat_session_agents (
+                id BLOB PRIMARY KEY,
+                session_id BLOB NOT NULL,
+                agent_id BLOB NOT NULL,
+                state TEXT NOT NULL
+                    CHECK (state IN ('idle','running','stopping','waitingapproval','dead')),
+                workspace_path TEXT,
+                pty_session_key TEXT,
+                agent_session_id TEXT,
+                agent_message_id TEXT,
+                project_member_id BLOB,
+                member_name TEXT NOT NULL DEFAULT '',
+                execution_config TEXT NOT NULL DEFAULT '{}',
+                allowed_skill_ids TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+        r#"
+            CREATE TABLE chat_workflow_agent_sessions (
+                id BLOB PRIMARY KEY,
+                workflow_execution_id BLOB NOT NULL,
+                session_agent_id BLOB NOT NULL,
+                role TEXT NOT NULL,
+                agent_session_id TEXT,
+                agent_message_id TEXT,
+                state TEXT NOT NULL DEFAULT 'idle',
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+        r#"
+            CREATE TABLE chat_workflow_executions (
+                id BLOB PRIMARY KEY,
+                session_id BLOB NOT NULL,
+                plan_id BLOB NOT NULL,
+                active_revision_id BLOB,
+                active_round_id BLOB,
+                workflow_card_message_id BLOB,
+                lead_session_agent_id BLOB,
+                status TEXT NOT NULL DEFAULT 'pending',
+                current_round INTEGER NOT NULL DEFAULT 0,
+                title TEXT NOT NULL,
+                compiled_graph_hash TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                cleaned_at TEXT,
+                cleaned_reason TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+        r#"
+            CREATE TABLE chat_messages (
+                id BLOB PRIMARY KEY,
+                session_id BLOB NOT NULL,
+                sender_type TEXT NOT NULL
+                    CHECK (sender_type IN ('user','agent','system')),
+                sender_id BLOB,
+                sender_session_agent_id BLOB,
+                content TEXT NOT NULL,
+                mentions TEXT NOT NULL DEFAULT '[]',
+                meta TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+            )
+            "#,
+        r#"
+            CREATE TABLE chat_message_targets (
+                message_id BLOB NOT NULL,
+                ordinal INTEGER NOT NULL,
+                session_id BLOB NOT NULL,
+                session_agent_id BLOB,
+                project_member_id BLOB,
+                agent_id BLOB NOT NULL,
+                member_name_snapshot TEXT NOT NULL,
+                route_kind TEXT NOT NULL,
+                resolution_status TEXT NOT NULL DEFAULT 'resolved',
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                PRIMARY KEY (message_id, ordinal),
+                UNIQUE (message_id, session_agent_id)
+            )
+            "#,
+        r#"
+            CREATE TABLE chat_work_items (
+                id BLOB PRIMARY KEY,
+                session_id BLOB NOT NULL,
+                run_id BLOB NOT NULL,
+                session_agent_id BLOB NOT NULL,
+                agent_id BLOB NOT NULL,
+                item_type TEXT NOT NULL CHECK (item_type IN ('artifact','conclusion')),
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+            )
+            "#,
+        r#"
+            CREATE TABLE project_team_protocols (
+                project_id BLOB PRIMARY KEY,
+                content TEXT NOT NULL DEFAULT '',
+                enabled BOOLEAN NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+        r#"
+            CREATE TABLE chat_runs (
+                id BLOB PRIMARY KEY,
+                session_id BLOB NOT NULL,
+                session_agent_id BLOB NOT NULL,
+                workspace_path TEXT,
+                run_index INTEGER NOT NULL,
+                run_dir TEXT NOT NULL,
+                input_path TEXT,
+                output_path TEXT,
+                raw_log_path TEXT,
+                meta_path TEXT,
+                log_state TEXT NOT NULL DEFAULT 'live',
+                artifact_state TEXT NOT NULL DEFAULT 'full',
+                log_truncated BOOLEAN NOT NULL DEFAULT 0,
+                log_capture_degraded BOOLEAN NOT NULL DEFAULT 0,
+                pruned_at TEXT,
+                prune_reason TEXT,
+                retention_summary_json TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+        r#"
+            CREATE UNIQUE INDEX idx_chat_runs_unique
+                ON chat_runs(session_agent_id, run_index)
+            "#,
+        r#"
+            CREATE TABLE chat_message_queue (
+                id BLOB PRIMARY KEY,
+                session_id BLOB NOT NULL,
+                session_agent_id BLOB NOT NULL,
+                agent_id BLOB NOT NULL,
+                chat_message_id BLOB NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued'
+                    CHECK (status IN (
+                        'queued','starting','processing','running','waiting_approval','stopping',
+                        'failed','cancelled','skipped','completed'
+                    )),
+                revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+                attempt_no INTEGER NOT NULL DEFAULT 0 CHECK (attempt_no >= 0),
+                processing_started_at TEXT,
+                run_id BLOB,
+                failure_reason TEXT,
+                failure_resolved_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+        r#"
+            CREATE UNIQUE INDEX idx_chat_message_queue_one_active
+                ON chat_message_queue(session_agent_id)
+                WHERE status IN (
+                    'starting', 'processing', 'running', 'waiting_approval', 'stopping'
+                )
+            "#,
+        r#"
+            CREATE UNIQUE INDEX idx_chat_message_queue_delivery_key
+                ON chat_message_queue(chat_message_id, session_agent_id)
+            "#,
+        r#"
+            CREATE UNIQUE INDEX idx_chat_message_queue_run_id
+                ON chat_message_queue(run_id)
+                WHERE run_id IS NOT NULL
+            "#,
+        r#"
+            CREATE TABLE chat_session_runtime_revisions (
+                session_id BLOB PRIMARY KEY,
+                revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+        r#"
+            CREATE TABLE chat_runtime_outbox (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id BLOB NOT NULL,
+                revision INTEGER NOT NULL,
+                delivery_id BLOB NOT NULL,
+                delivery_revision INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                session_agent_id BLOB,
+                agent_id BLOB,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                published_at TEXT,
+                UNIQUE(session_id, revision)
+            )
+            "#,
+        r#"
+            CREATE TRIGGER chat_message_queue_runtime_revision_after_insert
+            AFTER INSERT ON chat_message_queue
+            BEGIN
+                INSERT INTO chat_session_runtime_revisions (session_id, revision, updated_at)
+                VALUES (NEW.session_id, 1, datetime('now', 'subsec'))
+                ON CONFLICT(session_id) DO UPDATE SET
+                    revision = revision + 1,
+                    updated_at = excluded.updated_at;
+                INSERT INTO chat_runtime_outbox (
+                    session_id, revision, delivery_id, delivery_revision, event_type,
+                    session_agent_id, agent_id
+                )
+                SELECT NEW.session_id, revision, NEW.id, NEW.revision, 'delivery_created',
+                       NEW.session_agent_id, NEW.agent_id
+                FROM chat_session_runtime_revisions
+                WHERE session_id = NEW.session_id;
+            END
+            "#,
+        r#"
+            CREATE TRIGGER chat_message_queue_runtime_revision_after_update
+            AFTER UPDATE ON chat_message_queue
+            BEGIN
+                INSERT INTO chat_session_runtime_revisions (session_id, revision, updated_at)
+                VALUES (NEW.session_id, 1, datetime('now', 'subsec'))
+                ON CONFLICT(session_id) DO UPDATE SET
+                    revision = revision + 1,
+                    updated_at = excluded.updated_at;
+                INSERT INTO chat_runtime_outbox (
+                    session_id, revision, delivery_id, delivery_revision, event_type,
+                    session_agent_id, agent_id
+                )
+                SELECT NEW.session_id, revision, NEW.id, NEW.revision, 'delivery_updated',
+                       NEW.session_agent_id, NEW.agent_id
+                FROM chat_session_runtime_revisions
+                WHERE session_id = NEW.session_id;
+            END
+            "#,
+        r#"
+            CREATE TRIGGER chat_message_queue_runtime_revision_after_delete
+            AFTER DELETE ON chat_message_queue
+            BEGIN
+                INSERT INTO chat_session_runtime_revisions (session_id, revision, updated_at)
+                VALUES (OLD.session_id, 1, datetime('now', 'subsec'))
+                ON CONFLICT(session_id) DO UPDATE SET
+                    revision = revision + 1,
+                    updated_at = excluded.updated_at;
+                INSERT INTO chat_runtime_outbox (
+                    session_id, revision, delivery_id, delivery_revision, event_type,
+                    session_agent_id, agent_id
+                )
+                SELECT OLD.session_id, revision, OLD.id, OLD.revision, 'delivery_deleted',
+                       OLD.session_agent_id, OLD.agent_id
+                FROM chat_session_runtime_revisions
+                WHERE session_id = OLD.session_id;
+            END
+            "#,
+    ] {
+        sqlx::query(statement)
+            .execute(&pool)
+            .await
+            .expect("execute setup statement");
+    }
+
+    DBService { pool }
+}
+
+async fn setup_migrated_chat_runner_db() -> DBService {
+    let pool = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("create migrated sqlite memory pool");
+    sqlx::migrate!("../db/migrations")
+        .run(&pool)
+        .await
+        .expect("run chat lifecycle test migrations");
+    DBService { pool }
+}
+
+async fn insert_test_chat_session(db: &DBService, session_id: Uuid) -> ChatSession {
+    sqlx::query(
+        r#"
+        INSERT INTO chat_sessions (id, title, status)
+        VALUES (?, ?, ?)
+        "#,
+    )
+    .bind(session_id)
+    .bind("test session")
+    .bind(ChatSessionStatus::Active)
+    .execute(&db.pool)
+    .await
+    .expect("insert chat session");
+
+    ChatSession::find_by_id(&db.pool, session_id)
+        .await
+        .expect("find inserted chat session")
+        .expect("inserted chat session exists")
+}
+
+async fn insert_test_chat_agent(db: &DBService, name: &str) -> ChatAgent {
+    ChatAgent::create(
+        &db.pool,
+        &CreateChatAgent {
+            name: name.to_string(),
+            runner_type: "codex".to_string(),
+            system_prompt: Some(format!("You are {name}.")),
+            tools_enabled: Some(json!({})),
+            model_name: None,
+            owner_project_id: None,
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("insert chat agent")
+}
+
+async fn insert_test_session_agent(
+    db: &DBService,
+    session_id: Uuid,
+    agent_id: Uuid,
+) -> ChatSessionAgent {
+    ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id,
+            member_name: None,
+            workspace_path: None,
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: db::models::member_execution_config::MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("insert session agent")
+}
+
+async fn insert_test_project(pool: &SqlitePool, project_id: Uuid) {
+    sqlx::query(
+        r#"
+        INSERT INTO projects (id, name, default_workspace_path)
+        VALUES (?1, ?2, ?3)
+        "#,
+    )
+    .bind(project_id)
+    .bind("test project")
+    .bind("/tmp/project-default")
+    .execute(pool)
+    .await
+    .expect("insert project");
+}
+
+#[tokio::test]
+async fn active_workflow_blocks_plan_generation_without_overwriting_its_card() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+
+    let execution_id = Uuid::new_v4();
+    let card = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::System,
+        None,
+        "Active Workflow".to_string(),
+        Some(json!({
+            "card_type": "workflow_execution",
+            "workflow_card": {
+                "execution_id": execution_id,
+                "state": "running",
+                "is_terminal": false
+            }
+        })),
+    )
+    .await
+    .expect("create active workflow card");
+    let original_meta = card.meta.clone();
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_workflow_executions (
+            id, session_id, plan_id, workflow_card_message_id, status, title
+        )
+        VALUES (?1, ?2, ?3, ?4, 'running', 'Active Workflow')
+        "#,
+    )
+    .bind(execution_id)
+    .bind(session_id)
+    .bind(Uuid::new_v4())
+    .bind(card.id)
+    .execute(&db.pool)
+    .await
+    .expect("create active workflow execution");
+
+    runner
+        .trigger_plan_generation(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "lead",
+            Uuid::new_v4(),
+            "Generate another workflow",
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("block plan generation");
+
+    let unchanged_card = ChatMessage::find_by_id(&db.pool, card.id)
+        .await
+        .expect("load active workflow card")
+        .expect("active workflow card still exists");
+    assert_eq!(unchanged_card.content, "Active Workflow");
+    assert_eq!(unchanged_card.meta, original_meta);
+
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list session messages");
+    assert_eq!(messages.len(), 2);
+    let notice = messages.last().expect("active workflow notice exists");
+    assert_eq!(
+        notice.content,
+        "A workflow execution is already active in this session."
+    );
+    assert_eq!(
+        notice
+            .meta
+            .0
+            .get("type")
+            .and_then(serde_json::Value::as_str),
+        Some("workflow_plan_generation_blocked")
+    );
+}
+
+#[tokio::test]
+async fn refreshes_workflow_member_config_and_freezes_each_run_snapshot() {
+    let db = setup_chat_runner_db().await;
+    let project_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    insert_test_project(&db.pool, project_id).await;
+    let agent = insert_test_chat_agent(&db, "runner").await;
+    sqlx::query(
+        r#"
+        INSERT INTO chat_sessions (id, title, status, project_id)
+        VALUES (?1, ?2, ?3, ?4)
+        "#,
+    )
+    .bind(session_id)
+    .bind("project session")
+    .bind(ChatSessionStatus::Active)
+    .bind(project_id)
+    .execute(&db.pool)
+    .await
+    .expect("insert project chat session");
+
+    let member_config = MemberExecutionConfig {
+        runner_type: Some(executors::executors::BaseCodingAgent::Pi),
+        model_name: Some("new-model".to_string()),
+        thinking_effort: Some("high".to_string()),
+        model_variant: None,
+        acp: None,
+        mcp: Some(MemberMcpConfig {
+            mcp_servers: [(
+                "run-one".to_string(),
+                serde_json::json!({"command": "/bin/echo"}),
+            )]
+            .into_iter()
+            .collect(),
+        }),
+    };
+    let member = ProjectMember::create(
+        &db.pool,
+        project_id,
+        ProjectMemberType::Agent,
+        None,
+        Some(agent.id),
+        Some("runner".to_string()),
+        Some("member".to_string()),
+        1,
+        None,
+        Vec::new(),
+        member_config.clone(),
+        true,
+    )
+    .await
+    .expect("create project member");
+
+    let stale_agent = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: agent.id,
+            member_name: None,
+            workspace_path: None,
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig {
+                runner_type: Some(executors::executors::BaseCodingAgent::Codex),
+                model_name: Some("old-model".to_string()),
+                thinking_effort: None,
+                model_variant: None,
+                acp: None,
+                mcp: None,
+            },
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create stale session agent");
+    sqlx::query(
+        r#"
+        UPDATE chat_session_agents
+        SET agent_session_id = 'old-session',
+            agent_message_id = 'old-message'
+        WHERE id = ?1
+        "#,
+    )
+    .bind(stale_agent.id)
+    .execute(&db.pool)
+    .await
+    .expect("seed stale upstream ids");
+    let workflow_session = WorkflowAgentSession::create(
+        &db.pool,
+        &CreateWorkflowAgentSession {
+            workflow_execution_id: Uuid::new_v4(),
+            session_agent_id: stale_agent.id,
+            role: WorkflowAgentSessionRole::Worker,
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create workflow agent session");
+    sqlx::query(
+        r#"
+        UPDATE chat_workflow_agent_sessions
+        SET agent_session_id = 'old-workflow-session',
+            agent_message_id = 'old-workflow-message'
+        WHERE id = ?1
+        "#,
+    )
+    .bind(workflow_session.id)
+    .execute(&db.pool)
+    .await
+    .expect("seed stale workflow runtime ids");
+    let stale_agent = ChatSessionAgent::find_by_id(&db.pool, stale_agent.id)
+        .await
+        .expect("read stale session agent")
+        .expect("stale session agent exists");
+    let session = ChatSession::find_by_id(&db.pool, session_id)
+        .await
+        .expect("read project session")
+        .expect("project session exists");
+
+    let refresh =
+        crate::services::member_execution::refresh_session_agent_execution_config_before_run(
+            &db.pool,
+            &session,
+            stale_agent,
+            agent.id,
+            Some(workflow_session.id),
+        )
+        .await
+        .expect("refresh before workflow run");
+    let synced = refresh.session_agent;
+
+    assert!(refresh.changed);
+    assert_eq!(synced.execution_config.0, member_config);
+    assert_eq!(synced.project_member_id, Some(member.id));
+    assert_eq!(synced.agent_session_id, None);
+    assert_eq!(synced.agent_message_id, None);
+    let effective = crate::services::member_execution::resolve_effective_member_execution_config(
+        &agent, &synced,
+    )
+    .expect("resolve refreshed execution config");
+    assert_eq!(
+        effective.runner_type,
+        executors::executors::BaseCodingAgent::Pi
+    );
+    assert_eq!(effective.model_name.as_deref(), Some("new-model"));
+    let refreshed_workflow_session =
+        WorkflowAgentSession::find_by_id(&db.pool, workflow_session.id)
+            .await
+            .expect("read refreshed workflow session")
+            .expect("workflow session exists");
+    assert_eq!(refreshed_workflow_session.agent_session_id, None);
+    assert_eq!(refreshed_workflow_session.agent_message_id, None);
+
+    let run_workspace = tempfile::tempdir().expect("run workspace");
+    let mut run_one_env = ExecutionEnv::new(
+        RepoContext::new(run_workspace.path().to_path_buf(), Vec::new()),
+        false,
+        String::new(),
+    );
+    let (_, _, run_one_snapshot) =
+        crate::services::member_execution::build_effective_member_executor_for_run(
+            &db.pool,
+            &agent,
+            &synced,
+            run_workspace.path(),
+            Uuid::new_v4(),
+            &mut run_one_env,
+        )
+        .await
+        .expect("prepare run one snapshot");
+    assert_eq!(run_one_snapshot.server_names(), ["run-one"]);
+
+    sqlx::query(
+        r#"
+        UPDATE chat_session_agents
+        SET agent_session_id = 'current-session',
+            agent_message_id = 'current-message'
+        WHERE id = ?1
+        "#,
+    )
+    .bind(synced.id)
+    .execute(&db.pool)
+    .await
+    .expect("seed current session agent runtime ids");
+    sqlx::query(
+        r#"
+        UPDATE chat_workflow_agent_sessions
+        SET agent_session_id = 'current-workflow-session',
+            agent_message_id = 'current-workflow-message'
+        WHERE id = ?1
+        "#,
+    )
+    .bind(workflow_session.id)
+    .execute(&db.pool)
+    .await
+    .expect("seed current workflow runtime ids");
+    let current_agent = ChatSessionAgent::find_by_id(&db.pool, synced.id)
+        .await
+        .expect("read current session agent")
+        .expect("current session agent exists");
+
+    let unchanged =
+        crate::services::member_execution::refresh_session_agent_execution_config_before_run(
+            &db.pool,
+            &session,
+            current_agent,
+            agent.id,
+            Some(workflow_session.id),
+        )
+        .await
+        .expect("refresh unchanged workflow config");
+
+    assert!(!unchanged.changed);
+    assert_eq!(
+        unchanged.session_agent.agent_session_id.as_deref(),
+        Some("current-session")
+    );
+    let unchanged_workflow_session =
+        WorkflowAgentSession::find_by_id(&db.pool, workflow_session.id)
+            .await
+            .expect("read unchanged workflow session")
+            .expect("unchanged workflow session exists");
+    assert_eq!(
+        unchanged_workflow_session.agent_session_id.as_deref(),
+        Some("current-workflow-session")
+    );
+
+    let next_member_config = MemberExecutionConfig {
+        mcp: Some(MemberMcpConfig {
+            mcp_servers: [(
+                "run-two".to_string(),
+                serde_json::json!({"command": "/bin/echo"}),
+            )]
+            .into_iter()
+            .collect(),
+        }),
+        ..member_config.clone()
+    };
+    sqlx::query("UPDATE project_members SET execution_config = ?2 WHERE id = ?1")
+        .bind(member.id)
+        .bind(sqlx::types::Json(next_member_config.clone()))
+        .execute(&db.pool)
+        .await
+        .expect("update project member for run two");
+
+    let run_two_refresh =
+        crate::services::member_execution::refresh_session_agent_execution_config_before_run(
+            &db.pool,
+            &session,
+            unchanged.session_agent,
+            agent.id,
+            Some(workflow_session.id),
+        )
+        .await
+        .expect("refresh before run two");
+    assert!(run_two_refresh.changed);
+    assert_eq!(
+        run_two_refresh.session_agent.execution_config.0,
+        next_member_config
+    );
+    assert_eq!(run_two_refresh.session_agent.agent_session_id, None);
+
+    let mut run_two_env = ExecutionEnv::new(
+        RepoContext::new(run_workspace.path().to_path_buf(), Vec::new()),
+        false,
+        String::new(),
+    );
+    let (_, _, run_two_snapshot) =
+        crate::services::member_execution::build_effective_member_executor_for_run(
+            &db.pool,
+            &agent,
+            &run_two_refresh.session_agent,
+            run_workspace.path(),
+            Uuid::new_v4(),
+            &mut run_two_env,
+        )
+        .await
+        .expect("prepare run two snapshot");
+
+    assert_eq!(run_one_snapshot.server_names(), ["run-one"]);
+    assert_eq!(run_two_snapshot.server_names(), ["run-two"]);
+    assert_ne!(
+        run_one_snapshot.config_hash(),
+        run_two_snapshot.config_hash()
+    );
+}
+
+#[tokio::test]
+async fn leaves_non_project_session_execution_config_unchanged_before_run() {
+    let db = setup_chat_runner_db().await;
+    let session_id = Uuid::new_v4();
+    let session = insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "standalone").await;
+    let session_agent = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: agent.id,
+            member_name: None,
+            workspace_path: None,
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig {
+                runner_type: Some(executors::executors::BaseCodingAgent::Codex),
+                model_name: Some("standalone-model".to_string()),
+                thinking_effort: None,
+                model_variant: None,
+                acp: None,
+                mcp: None,
+            },
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create standalone session agent");
+
+    let refresh =
+        crate::services::member_execution::refresh_session_agent_execution_config_before_run(
+            &db.pool,
+            &session,
+            session_agent.clone(),
+            agent.id,
+            None,
+        )
+        .await
+        .expect("refresh standalone session");
+
+    assert!(!refresh.changed);
+    assert_eq!(
+        refresh.session_agent.execution_config,
+        session_agent.execution_config
+    );
+    assert_eq!(refresh.session_agent.project_member_id, None);
+}
+
+fn finished_count(msg_store: &MsgStore) -> usize {
+    msg_store
+        .get_history()
+        .into_iter()
+        .filter(|msg| matches!(msg, LogMsg::Finished))
+        .count()
+}
+
+fn empty_log_forwarders() -> RunLogForwarders {
+    RunLogForwarders {
+        stdout: tokio::spawn(async {}),
+        stderr: tokio::spawn(async {}),
+    }
+}
+
+fn test_run_cleanup(workspace: &Path) -> (std::path::PathBuf, ExecutorRunCleanup) {
+    let context = McpRunContext::new(workspace, Uuid::new_v4(), Uuid::new_v4())
+        .expect("test MCP run context");
+    let directory =
+        PrivateMcpRunDirectory::create(&context, "chat-test").expect("private run directory");
+    directory
+        .write_file("mcp.json", b"{}")
+        .expect("private run file");
+    let path = directory.path().to_path_buf();
+    (path, directory.into_cleanup())
+}
+
+#[tokio::test]
+async fn default_route_ignores_unmentioned_free_mode_user_messages() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let session = insert_test_chat_session(&db, session_id).await;
+    let first_agent = insert_test_chat_agent(&db, "first").await;
+    let second_agent = insert_test_chat_agent(&db, "second").await;
+    insert_test_session_agent(&db, session_id, first_agent.id).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    insert_test_session_agent(&db, session_id, second_agent.id).await;
+    let message = test_message("please handle this", json!({}));
+
+    let default_mention = runner
+        .resolve_default_mention_for_unmentioned_user_message(&session, &message)
+        .await
+        .expect("resolve default mention");
+
+    assert_eq!(default_mention, None);
+}
+
+#[tokio::test]
+async fn missing_mentioned_member_emits_correlated_error_and_marks_mention_failed() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let session = insert_test_chat_session(&db, session_id).await;
+    let mut events = runner.subscribe(session_id);
+
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@MissingMember please respond".to_string(),
+        Some(json!({ "client_message_id": "client-message-missing-member" })),
+    )
+    .await
+    .expect("create message with missing mention");
+
+    runner.handle_message(&session, &message).await;
+
+    let mention_error = std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| {
+        if let ChatStreamEvent::MentionError {
+            message_id,
+            client_message_id,
+            session_agent_id,
+            project_member_id,
+            agent_name,
+            agent_id,
+            reason,
+            ..
+        } = event
+        {
+            Some((
+                message_id,
+                client_message_id,
+                session_agent_id,
+                project_member_id,
+                agent_name,
+                agent_id,
+                reason,
+            ))
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        mention_error,
+        Some((
+            message.id,
+            Some("client-message-missing-member".to_string()),
+            None,
+            None,
+            "MissingMember".to_string(),
+            None,
+            "member_not_found".to_string(),
+        ))
+    );
+
+    let persisted = ChatMessage::find_by_id(&db.pool, message.id)
+        .await
+        .expect("load missing-mention message")
+        .expect("missing-mention message exists");
+    assert_eq!(
+        persisted.meta["mention_statuses"]["MissingMember"],
+        "failed"
+    );
+
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("load session messages");
+    let system_message = messages
+        .iter()
+        .find(|candidate| candidate.sender_type == ChatSenderType::System)
+        .expect("missing-member system message exists");
+    assert_eq!(
+        system_message.content,
+        "Member @MissingMember does not exist."
+    );
+    assert_eq!(
+        system_message.meta["mention_failure"]["source_message_id"],
+        json!(message.id)
+    );
+    assert_eq!(
+        system_message.meta["mention_failure"]["mentioned_agent"],
+        "MissingMember"
+    );
+    assert_eq!(
+        system_message.meta["mention_failure"]["reason"],
+        "member_not_found"
+    );
+    assert_eq!(
+        system_message.meta["i18n"],
+        json!({
+            "key": "message.memberNotFound",
+            "params": { "member": "@MissingMember" },
+        })
+    );
+}
+
+#[tokio::test]
+async fn mention_resolution_auto_configures_project_member_for_new_session() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    insert_test_project(&db.pool, project_id).await;
+    sqlx::query(
+        r#"
+        INSERT INTO chat_sessions (id, title, status, project_id, default_workspace_path)
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        "#,
+    )
+    .bind(session_id)
+    .bind("test session")
+    .bind(ChatSessionStatus::Active)
+    .bind(project_id)
+    .bind("/tmp/session-default")
+    .execute(&db.pool)
+    .await
+    .expect("insert project session");
+    let agent = insert_test_chat_agent(&db, "OpencodeAgent").await;
+    let member = ProjectMember::create(
+        &db.pool,
+        project_id,
+        ProjectMemberType::Agent,
+        None,
+        Some(agent.id),
+        Some("OpencodeAgent".to_string()),
+        Some("agent".to_string()),
+        1,
+        Some("/tmp/member-workspace".to_string()),
+        vec!["skill-a".to_string()],
+        MemberExecutionConfig::default(),
+        false,
+    )
+    .await
+    .expect("insert project member");
+
+    let resolved = runner
+        .resolve_session_agent_for_mention(session_id, "OpencodeAgent")
+        .await
+        .expect("resolve mention")
+        .expect("project member is materialized");
+
+    assert_eq!(resolved.agent_id, agent.id);
+    assert_eq!(resolved.member_name, "OpencodeAgent");
+    assert_eq!(resolved.project_member_id, Some(member.id));
+    let session_agent = ChatSessionAgent::find_by_id(&db.pool, resolved.session_agent_id)
+        .await
+        .expect("load materialized session member")
+        .expect("materialized session member exists");
+    assert_eq!(
+        session_agent.workspace_path.as_deref(),
+        Some("/tmp/member-workspace")
+    );
+    assert_eq!(session_agent.allowed_skill_ids.0, vec!["skill-a"]);
+}
+
+#[tokio::test]
+async fn mention_resolution_uses_only_the_exact_member_name() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let project_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    insert_test_project(&db.pool, project_id).await;
+    sqlx::query(
+        r#"
+        INSERT INTO chat_sessions (id, title, status, project_id)
+        VALUES (?1, ?2, ?3, ?4)
+        "#,
+    )
+    .bind(session_id)
+    .bind("project session")
+    .bind(ChatSessionStatus::Active)
+    .bind(project_id)
+    .execute(&db.pool)
+    .await
+    .expect("insert project session");
+
+    let lead_agent = insert_test_chat_agent(&db, "SharedTemplate").await;
+    let second_agent = insert_test_chat_agent(&db, "SharedTemplate").await;
+    let lead_member = ProjectMember::create(
+        &db.pool,
+        project_id,
+        ProjectMemberType::Agent,
+        None,
+        Some(lead_agent.id),
+        Some("CodexAgent".to_string()),
+        Some("lead".to_string()),
+        1,
+        None,
+        Vec::new(),
+        MemberExecutionConfig::default(),
+        true,
+    )
+    .await
+    .expect("create lead member");
+    let second_member = ProjectMember::create(
+        &db.pool,
+        project_id,
+        ProjectMemberType::Agent,
+        None,
+        Some(second_agent.id),
+        Some("CodexAgent2".to_string()),
+        Some("member".to_string()),
+        2,
+        None,
+        Vec::new(),
+        MemberExecutionConfig::default(),
+        true,
+    )
+    .await
+    .expect("create second member");
+
+    let mut session_agent_ids = HashMap::new();
+    for (agent_id, project_member_id) in [
+        (lead_agent.id, lead_member.id),
+        (second_agent.id, second_member.id),
+    ] {
+        let session_agent = ChatSessionAgent::create(
+            &db.pool,
+            &db::models::chat_session_agent::CreateChatSessionAgent {
+                session_id,
+                agent_id,
+                member_name: None,
+                workspace_path: Some("/tmp/project-default".to_string()),
+                allowed_skill_ids: Vec::new(),
+                project_member_id: Some(project_member_id),
+                execution_config: MemberExecutionConfig::default(),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create session member");
+        session_agent_ids.insert(agent_id, session_agent.id);
+    }
+
+    let resolved = runner
+        .resolve_session_agent_for_mention(session_id, "CodexAgent")
+        .await
+        .expect("resolve exact member")
+        .expect("exact member exists");
+    assert_eq!(resolved.agent_id, lead_agent.id);
+    assert_eq!(resolved.member_name, "CodexAgent");
+
+    let second_session_agent_id = session_agent_ids[&second_agent.id];
+    let resolved_by_id = runner
+        .resolve_session_agent_by_id(session_id, second_session_agent_id)
+        .await
+        .expect("resolve session agent id")
+        .expect("session member exists");
+    assert_eq!(resolved_by_id.session_agent_id, second_session_agent_id);
+    assert_eq!(resolved_by_id.agent_id, second_agent.id);
+    assert_eq!(resolved_by_id.member_name, "CodexAgent2");
+
+    assert!(
+        runner
+            .resolve_session_agent_for_mention(session_id, "codexagent")
+            .await
+            .expect("resolve lowercase member")
+            .is_none()
+    );
+    assert!(
+        runner
+            .resolve_session_agent_for_mention(session_id, "SharedTemplate")
+            .await
+            .expect("resolve template name")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn mention_resolution_distinguishes_members_sharing_one_backing_agent() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    insert_test_project(&db.pool, project_id).await;
+    sqlx::query(
+        "INSERT INTO chat_sessions (id, title, status, project_id) VALUES (?1, 'shared-config-session', 'active', ?2)",
+    )
+        .bind(session_id)
+        .bind(project_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert project session");
+    let backing_agent = insert_test_chat_agent(&db, "SharedTemplate").await;
+
+    for (ordinal, member_name) in [(1, "BackendMember"), (2, "ReviewMember")] {
+        let member = ProjectMember::create(
+            &db.pool,
+            project_id,
+            ProjectMemberType::Agent,
+            None,
+            Some(backing_agent.id),
+            Some(member_name.to_string()),
+            Some("member".to_string()),
+            ordinal,
+            None,
+            Vec::new(),
+            MemberExecutionConfig::default(),
+            true,
+        )
+        .await
+        .expect("create project member");
+        ChatSessionAgent::create(
+            &db.pool,
+            &db::models::chat_session_agent::CreateChatSessionAgent {
+                session_id,
+                agent_id: backing_agent.id,
+                member_name: Some(member_name.to_string()),
+                workspace_path: Some("/tmp/shared-config".to_string()),
+                allowed_skill_ids: Vec::new(),
+                project_member_id: Some(member.id),
+                execution_config: MemberExecutionConfig::default(),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create session member");
+    }
+
+    let backend = runner
+        .resolve_session_agent_for_mention(session_id, "BackendMember")
+        .await
+        .expect("resolve backend")
+        .expect("backend member exists");
+    let reviewer = runner
+        .resolve_session_agent_for_mention(session_id, "ReviewMember")
+        .await
+        .expect("resolve reviewer")
+        .expect("review member exists");
+
+    assert_eq!(backend.agent_id, backing_agent.id);
+    assert_eq!(reviewer.agent_id, backing_agent.id);
+    assert_ne!(backend.session_agent_id, reviewer.session_agent_id);
+    assert_eq!(backend.member_name, "BackendMember");
+    assert_eq!(reviewer.member_name, "ReviewMember");
+    let member_names =
+        crate::services::chat::member_name_overrides_for_session(&db.pool, session_id)
+            .await
+            .expect("load member names by session identity");
+    assert_eq!(
+        member_names
+            .get(&backend.session_agent_id)
+            .map(String::as_str),
+        Some("BackendMember")
+    );
+    assert_eq!(
+        member_names
+            .get(&reviewer.session_agent_id)
+            .map(String::as_str),
+        Some("ReviewMember")
+    );
+    assert!(
+        !crate::services::chat::unambiguous_member_names_by_agent_for_session(
+            &db.pool,
+            session_id,
+        )
+        .await
+        .expect("load legacy member names")
+        .contains_key(&backing_agent.id)
+    );
+}
+
+#[tokio::test]
+async fn session_member_creation_writes_requested_name_before_unique_check() {
+    let db = setup_chat_runner_db().await;
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let backing_agent = insert_test_chat_agent(&db, "SharedTemplate").await;
+    sqlx::query(
+        "CREATE UNIQUE INDEX test_session_member_name_once ON chat_session_agents(session_id, lower(member_name))",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("create member name constraint");
+
+    let template_named = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: backing_agent.id,
+            member_name: None,
+            workspace_path: None,
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create template-named member");
+    let requested = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: backing_agent.id,
+            member_name: Some("ReviewMember".to_string()),
+            workspace_path: None,
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create requested-name member in one insert");
+
+    assert_eq!(template_named.member_name, "SharedTemplate");
+    assert_eq!(requested.member_name, "ReviewMember");
+}
+
+#[tokio::test]
+async fn self_mention_is_rejected_by_session_member_id_and_persisted() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "SharedTemplate").await;
+    let session_member = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: agent.id,
+            member_name: None,
+            workspace_path: Some("/tmp/self-mention".to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create session member");
+    let message_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO chat_messages (
+               id, session_id, sender_type, sender_id, sender_session_agent_id,
+               content, mentions, meta
+           ) VALUES (?1, ?2, 'agent', ?3, ?4, 'self ping', '["SharedTemplate"]', '{}')"#,
+    )
+    .bind(message_id)
+    .bind(session_id)
+    .bind(agent.id)
+    .bind(session_member.id)
+    .execute(&db.pool)
+    .await
+    .expect("insert self mention");
+    let message = ChatMessage::find_by_id(&db.pool, message_id)
+        .await
+        .expect("load self mention")
+        .expect("self mention exists");
+
+    let outcome = runner
+        .run_agent_for_mention(session_id, "SharedTemplate", 0, &message)
+        .await
+        .expect("route self mention");
+    assert!(matches!(
+        outcome,
+        super::DispatchOutcome::Rejected { ref reason } if reason == "self_mention"
+    ));
+    let targets =
+        db::models::chat_message_target::ChatMessageTarget::find_by_message(&db.pool, message_id)
+            .await
+            .expect("load targets");
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].session_agent_id, Some(session_member.id));
+    assert_eq!(
+        targets[0].resolution_status,
+        db::models::chat_message_target::ChatMessageTargetResolutionStatus::Rejected
+    );
+}
+
+#[tokio::test]
+async fn agent_protocol_delivery_is_durably_queued_before_target_startup() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    runner
+        .stop_after_queue_binding
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let workspace = tempfile::tempdir().expect("create target workspace");
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let source_agent = insert_test_chat_agent(&db, "SourceAgent").await;
+    let target_agent = insert_test_chat_agent(&db, "TargetAgent").await;
+    let source_member = insert_test_session_agent(&db, session_id, source_agent.id).await;
+    let target_member = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: target_agent.id,
+            member_name: Some("TargetAgent".to_string()),
+            workspace_path: Some(workspace.path().to_string_lossy().to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create target member");
+    let message_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO chat_messages (
+               id, session_id, sender_type, sender_id, sender_session_agent_id,
+               content, mentions, meta
+           ) VALUES (?1, ?2, 'agent', ?3, ?4, '@TargetAgent work', '["TargetAgent"]', '{}')"#,
+    )
+    .bind(message_id)
+    .bind(session_id)
+    .bind(source_agent.id)
+    .bind(source_member.id)
+    .execute(&db.pool)
+    .await
+    .expect("insert inter-agent message");
+    let message = ChatMessage::find_by_id(&db.pool, message_id)
+        .await
+        .expect("load inter-agent message")
+        .expect("inter-agent message exists");
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        runner.run_agent_for_mention(session_id, "TargetAgent", 0, &message),
+    )
+    .await
+    .expect("source delivery must not wait for target startup")
+    .expect("queue target delivery");
+
+    let queue_id = match outcome {
+        super::DispatchOutcome::Queued { queue_id } => queue_id,
+        other => panic!("expected durable queued handoff, got {other:?}"),
+    };
+    let queued = QueuedMessageService::new()
+        .find_by_id(&db.pool, queue_id)
+        .await
+        .expect("load durable handoff")
+        .expect("durable handoff exists");
+    assert_eq!(queued.chat_message_id, message_id);
+    assert_eq!(queued.session_agent_id, target_member.id);
+}
+
+#[tokio::test]
+async fn queued_dispatch_keeps_claimed_session_agent_when_backing_names_collide() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    runner
+        .stop_after_queue_binding
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let workspace = tempfile::tempdir().expect("create temp workspace");
+    let workspace_path = workspace.path().to_string_lossy().to_string();
+    let project_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    insert_test_project(&db.pool, project_id).await;
+    sqlx::query("UPDATE projects SET default_workspace_path = ?2 WHERE id = ?1")
+        .bind(project_id)
+        .bind(&workspace_path)
+        .execute(&db.pool)
+        .await
+        .expect("set temp project workspace");
+    sqlx::query(
+        r#"
+        INSERT INTO chat_sessions (id, title, status, project_id, default_workspace_path)
+        VALUES (?1, 'queue identity regression', 'active', ?2, ?3)
+        "#,
+    )
+    .bind(session_id)
+    .bind(project_id)
+    .bind(&workspace_path)
+    .execute(&db.pool)
+    .await
+    .expect("insert project session");
+
+    let lead_agent = insert_test_chat_agent(&db, "CodexAgent").await;
+    let second_agent = insert_test_chat_agent(&db, "CodexAgent").await;
+    let lead_member = ProjectMember::create(
+        &db.pool,
+        project_id,
+        ProjectMemberType::Agent,
+        None,
+        Some(lead_agent.id),
+        Some("CodexAgent".to_string()),
+        Some("lead".to_string()),
+        1,
+        Some(workspace_path.clone()),
+        Vec::new(),
+        MemberExecutionConfig::default(),
+        true,
+    )
+    .await
+    .expect("create lead project member");
+    let second_member = ProjectMember::create(
+        &db.pool,
+        project_id,
+        ProjectMemberType::Agent,
+        None,
+        Some(second_agent.id),
+        Some("CodexAgent2".to_string()),
+        Some("backend".to_string()),
+        2,
+        Some(workspace_path.clone()),
+        Vec::new(),
+        MemberExecutionConfig::default(),
+        true,
+    )
+    .await
+    .expect("create second project member");
+    let lead_session_agent = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: lead_agent.id,
+            member_name: Some("CodexAgent".to_string()),
+            workspace_path: Some(workspace_path.clone()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: Some(lead_member.id),
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create lead session member");
+    let second_session_agent = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: second_agent.id,
+            member_name: Some("CodexAgent2".to_string()),
+            workspace_path: Some(workspace_path),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: Some(second_member.id),
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create second session member");
+
+    let source_message_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO chat_messages (
+            id, session_id, sender_type, sender_id, content, mentions, meta
+        )
+        VALUES (?1, ?2, 'agent', ?3, 'queued for CodexAgent2', '["CodexAgent2"]', '{}')
+        "#,
+    )
+    .bind(source_message_id)
+    .bind(session_id)
+    .bind(lead_agent.id)
+    .execute(&db.pool)
+    .await
+    .expect("insert source agent message");
+    let source_message = ChatMessage::find_by_id(&db.pool, source_message_id)
+        .await
+        .expect("load source message")
+        .expect("source message exists");
+    let queue = QueuedMessageService::new()
+        .create_queued(
+            &db.pool,
+            &CreateQueuedMessage {
+                session_id,
+                session_agent_id: second_session_agent.id,
+                agent_id: second_agent.id,
+                chat_message_id: source_message.id,
+            },
+        )
+        .await
+        .expect("queue message for second member");
+    let claimed = QueuedMessageService::new()
+        .claim_next(&db.pool, second_session_agent.id)
+        .await
+        .expect("claim second member queue")
+        .expect("claimed queue exists");
+    assert_eq!(claimed.id, queue.id);
+
+    let mut events = runner.subscribe(session_id);
+    runner
+        .dispatch_queued_entry(session_id, second_session_agent.id, claimed)
+        .await;
+
+    let bound = QueuedMessageService::new()
+        .find_by_id(&db.pool, queue.id)
+        .await
+        .expect("load bound queue")
+        .expect("bound queue exists");
+    assert_eq!(bound.id, queue.id);
+    assert_eq!(
+        bound.status,
+        db::models::chat_message_queue::QueuedMessageStatus::Running
+    );
+    let run_id = bound.run_id.expect("claimed queue is bound to a run");
+    let run = db::models::chat_run::ChatRun::find_by_id(&db.pool, run_id)
+        .await
+        .expect("load bound run")
+        .expect("bound run exists");
+    assert_eq!(run.session_agent_id, second_session_agent.id);
+
+    let lead_after = ChatSessionAgent::find_by_id(&db.pool, lead_session_agent.id)
+        .await
+        .expect("load lead session member")
+        .expect("lead session member exists");
+    let second_after = ChatSessionAgent::find_by_id(&db.pool, second_session_agent.id)
+        .await
+        .expect("load second session member")
+        .expect("second session member exists");
+    assert_eq!(lead_after.state, ChatSessionAgentState::Idle);
+    assert_eq!(second_after.state, ChatSessionAgentState::Running);
+    let mut started_targets = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let ChatStreamEvent::AgentRunStarted {
+            session_agent_id,
+            agent_name,
+            ..
+        } = event
+        {
+            started_targets.push((session_agent_id, agent_name));
+        }
+    }
+    assert_eq!(
+        started_targets,
+        vec![(second_session_agent.id, "CodexAgent2".to_string())]
+    );
+    assert_eq!(
+        QueuedMessageService::new()
+            .list_for_member(&db.pool, second_session_agent.id)
+            .await
+            .expect("list second member queue")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn direct_dispatch_commits_delivery_run_member_and_revision_before_running_events() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    runner
+        .stop_after_queue_binding
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let workspace = tempfile::tempdir().expect("create direct dispatch workspace");
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "AtomicTarget").await;
+    let member = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: agent.id,
+            member_name: Some("AtomicTarget".to_string()),
+            workspace_path: Some(workspace.path().to_string_lossy().to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create atomic target member");
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@AtomicTarget verify atomic bind".to_string(),
+        Some(json!({ "client_message_id": "atomic-direct-1" })),
+    )
+    .await
+    .expect("create direct source message");
+    let mut events = runner.subscribe(session_id);
+
+    let outcome = runner
+        .run_agent_for_mention(session_id, "AtomicTarget", 0, &message)
+        .await
+        .expect("dispatch direct delivery");
+    let run_id = match outcome {
+        super::DispatchOutcome::Started { run_id } => run_id,
+        other => panic!("expected started direct delivery, got {other:?}"),
+    };
+
+    let delivery = QueuedMessageService::new()
+        .find_by_run_id(&db.pool, run_id)
+        .await
+        .expect("load bound delivery")
+        .expect("bound delivery exists");
+    assert_eq!(delivery.status, QueuedMessageStatus::Running);
+    assert_eq!(delivery.chat_message_id, message.id);
+    assert_eq!(delivery.session_agent_id, member.id);
+    assert_eq!(delivery.revision, 3);
+    assert_eq!(delivery.attempt_no, 1);
+    let persisted_run = ChatRun::find_by_id(&db.pool, run_id)
+        .await
+        .expect("load committed run")
+        .expect("committed run exists");
+    assert_eq!(persisted_run.session_agent_id, member.id);
+    let persisted_member = ChatSessionAgent::find_by_id(&db.pool, member.id)
+        .await
+        .expect("load committed member")
+        .expect("committed member exists");
+    assert_eq!(persisted_member.state, ChatSessionAgentState::Running);
+
+    let queue_snapshot = QueuedMessageService::new()
+        .snapshot_for_member(&db.pool, session_id, member.id, agent.id)
+        .await
+        .expect("load versioned queue snapshot");
+    assert_eq!(queue_snapshot.status, MemberQueueStatus::Running);
+    assert_eq!(queue_snapshot.revision, 3);
+    let events = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    let running_queue_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                ChatStreamEvent::QueueUpdated { queue, .. }
+                    if queue.status == MemberQueueStatus::Running && queue.revision == 3
+            )
+        })
+        .expect("running queue event after bind commit");
+    let (run_started_index, run_started_event) = events
+        .iter()
+        .enumerate()
+        .find(|(_, event)| {
+            matches!(
+                event,
+                ChatStreamEvent::AgentRunStarted {
+                    delivery_id: event_delivery_id,
+                    run_id: event_run_id,
+                    ..
+                } if *event_delivery_id == delivery.id && *event_run_id == run_id
+            )
+        })
+        .expect("run started event carries the committed delivery identity");
+    let run_started_json =
+        serde_json::to_value(run_started_event).expect("serialize run started event");
+    assert_eq!(run_started_json["delivery_id"], json!(delivery.id));
+    assert!(running_queue_index < run_started_index);
+}
+
+#[tokio::test]
+async fn concurrent_direct_dispatch_claims_exactly_one_delivery_for_member() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    runner
+        .stop_after_queue_binding
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let workspace = tempfile::tempdir().expect("create concurrent dispatch workspace");
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "ConcurrentTarget").await;
+    let member = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: agent.id,
+            member_name: Some("ConcurrentTarget".to_string()),
+            workspace_path: Some(workspace.path().to_string_lossy().to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create concurrent target member");
+    let first = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@ConcurrentTarget first".to_string(),
+        None,
+    )
+    .await
+    .expect("create first direct source");
+    let second = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@ConcurrentTarget second".to_string(),
+        None,
+    )
+    .await
+    .expect("create second direct source");
+    let mut events = runner.subscribe(session_id);
+
+    let (first_result, second_result) = tokio::join!(
+        runner.run_agent_for_mention(session_id, "ConcurrentTarget", 0, &first),
+        runner.run_agent_for_mention(session_id, "ConcurrentTarget", 0, &second),
+    );
+    let outcomes = [
+        first_result.expect("dispatch first direct delivery"),
+        second_result.expect("dispatch second direct delivery"),
+    ];
+    let started_count = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, super::DispatchOutcome::Started { .. }))
+        .count();
+    let queued_count = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, super::DispatchOutcome::Queued { .. }))
+        .count();
+    // A caller may claim and start the older delivery while returning its own newer delivery as
+    // queued, so FIFO-concurrent dispatch can legitimately report two queued outcomes. The
+    // persisted delivery ledger below is the authoritative assertion.
+    assert!(started_count <= 1);
+    assert_eq!(started_count + queued_count, outcomes.len());
+
+    let deliveries = QueuedMessageService::new()
+        .list_for_member(&db.pool, member.id)
+        .await
+        .expect("list concurrent deliveries");
+    assert_eq!(deliveries.len(), 2);
+    assert_eq!(
+        deliveries
+            .iter()
+            .filter(|delivery| delivery.status == QueuedMessageStatus::Running)
+            .count(),
+        1
+    );
+    assert_eq!(
+        deliveries
+            .iter()
+            .filter(|delivery| delivery.status == QueuedMessageStatus::Queued)
+            .count(),
+        1
+    );
+    assert_eq!(
+        ChatRun::list_all(&db.pool).await.expect("list runs").len(),
+        1
+    );
+    let started_events = std::iter::from_fn(|| events.try_recv().ok())
+        .filter(|event| matches!(event, ChatStreamEvent::AgentRunStarted { .. }))
+        .count();
+    assert_eq!(started_events, 1);
+}
+
+#[tokio::test]
+async fn stop_agent_cancels_starting_delivery_with_revisioned_transition() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "StartingStopTarget").await;
+    let member = insert_test_session_agent(&db, session_id, agent.id).await;
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "stop before bind".to_string(),
+        None,
+    )
+    .await
+    .expect("create starting stop source");
+    let service = QueuedMessageService::new();
+    let queued = service
+        .create_queued(
+            &db.pool,
+            &CreateQueuedMessage {
+                session_id,
+                session_agent_id: member.id,
+                agent_id: agent.id,
+                chat_message_id: message.id,
+            },
+        )
+        .await
+        .expect("create starting delivery");
+    let starting = service
+        .claim_next(&db.pool, member.id)
+        .await
+        .expect("claim starting delivery")
+        .expect("starting delivery exists");
+    assert_eq!(starting.id, queued.id);
+    assert_eq!(starting.status, QueuedMessageStatus::Starting);
+    let run_id = Uuid::new_v4();
+    let stop = runner.register_run_control(member.id, run_id);
+
+    runner
+        .stop_agent(session_id, member.id)
+        .await
+        .expect("stop starting delivery");
+
+    assert!(stop.is_cancelled());
+    let cancelled = service
+        .find_by_id(&db.pool, queued.id)
+        .await
+        .expect("load cancelled delivery")
+        .expect("cancelled delivery exists");
+    assert_eq!(cancelled.status, QueuedMessageStatus::Cancelled);
+    assert_eq!(cancelled.revision, starting.revision + 1);
+    assert!(cancelled.run_id.is_none());
+    let member_after = ChatSessionAgent::find_by_id(&db.pool, member.id)
+        .await
+        .expect("load member after starting stop")
+        .expect("member after starting stop exists");
+    assert_eq!(member_after.state, ChatSessionAgentState::Idle);
+}
+
+#[tokio::test]
+async fn recovery_reuses_delivery_after_crash_at_bound_run_boundary() {
+    let db = setup_chat_runner_db().await;
+    let first_runner = ChatRunner::new(db.clone());
+    first_runner
+        .stop_after_queue_binding
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let workspace = tempfile::tempdir().expect("create recovery workspace");
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "RecoveryTarget").await;
+    let member = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: agent.id,
+            member_name: Some("RecoveryTarget".to_string()),
+            workspace_path: Some(workspace.path().to_string_lossy().to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create recovery target member");
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@RecoveryTarget recover bound run".to_string(),
+        None,
+    )
+    .await
+    .expect("create recovery source");
+    first_runner
+        .run_agent_for_mention(session_id, "RecoveryTarget", 0, &message)
+        .await
+        .expect("bind first run before simulated crash");
+    let service = QueuedMessageService::new();
+    let before = service
+        .list_for_member(&db.pool, member.id)
+        .await
+        .expect("load delivery before recovery")
+        .pop()
+        .expect("delivery before recovery exists");
+    assert_eq!(before.status, QueuedMessageStatus::Running);
+    assert_eq!(before.attempt_no, 1);
+
+    let recovery_runner = ChatRunner::new(db.clone());
+    recovery_runner
+        .block_executor_spawn
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        recovery_runner
+            .recover_orphaned_session_agents()
+            .await
+            .expect("recover bound run boundary"),
+        1
+    );
+
+    let recovered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let delivery = service
+                .find_by_id(&db.pool, before.id)
+                .await
+                .expect("poll recovered delivery")
+                .expect("recovered delivery exists");
+            if delivery.status.is_terminal() {
+                break delivery;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("recovered delivery reaches terminal state");
+    assert_eq!(recovered.id, before.id);
+    assert_eq!(recovered.attempt_no, 2);
+    assert_eq!(recovered.status, QueuedMessageStatus::Skipped);
+    assert_eq!(
+        ChatRun::list_all(&db.pool)
+            .await
+            .expect("list recovered runs")
+            .len(),
+        2
+    );
+    let snapshot = service
+        .snapshot_for_member(&db.pool, session_id, member.id, agent.id)
+        .await
+        .expect("load recovered snapshot");
+    assert_eq!(snapshot.status, MemberQueueStatus::Empty);
+    assert!(snapshot.revision >= 7);
+}
+
+#[tokio::test]
+async fn prebind_configuration_failure_finalizes_claimed_delivery() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "InvalidRunnerTarget").await;
+    let member = insert_test_session_agent(&db, session_id, agent.id).await;
+    sqlx::query("UPDATE chat_agents SET runner_type = 'invalid-runner' WHERE id = ?1")
+        .bind(agent.id)
+        .execute(&db.pool)
+        .await
+        .expect("make runner configuration invalid");
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@InvalidRunnerTarget fail before bind".to_string(),
+        None,
+    )
+    .await
+    .expect("create invalid runner source message");
+
+    runner
+        .run_agent_for_mention(session_id, "InvalidRunnerTarget", 0, &message)
+        .await
+        .expect_err("invalid runner must fail before bind");
+
+    let delivery = QueuedMessageService::new()
+        .list_for_member(&db.pool, member.id)
+        .await
+        .expect("load finalized prebind delivery")
+        .pop()
+        .expect("prebind delivery exists");
+    assert_eq!(delivery.status, QueuedMessageStatus::Skipped);
+    assert!(
+        delivery
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.trim().is_empty()),
+        "pre-bind CAS terminal delivery must retain a non-empty failure reason"
+    );
+    assert_eq!(delivery.revision, 3);
+    assert_eq!(delivery.attempt_no, 1);
+    assert!(delivery.run_id.is_none());
+    assert!(
+        ChatRun::list_all(&db.pool)
+            .await
+            .expect("list prebind failure runs")
+            .is_empty()
+    );
+    assert_eq!(
+        ChatSessionAgent::find_by_id(&db.pool, member.id)
+            .await
+            .expect("load member after prebind failure")
+            .expect("member after prebind failure exists")
+            .state,
+        ChatSessionAgentState::Idle
+    );
+    assert!(!runner.run_controls.contains_key(&member.id));
+}
+
+#[tokio::test]
+async fn stale_dispatch_failure_does_not_finalize_retried_delivery() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "StaleDispatchFailureTarget").await;
+    let member = insert_test_session_agent(&db, session_id, agent.id).await;
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "retry after dispatch failure".to_string(),
+        None,
+    )
+    .await
+    .expect("create stale dispatch source");
+    let service = QueuedMessageService::new();
+    let queued = service
+        .create_queued(
+            &db.pool,
+            &CreateQueuedMessage {
+                session_id,
+                session_agent_id: member.id,
+                agent_id: agent.id,
+                chat_message_id: message.id,
+            },
+        )
+        .await
+        .expect("create stale dispatch delivery");
+    let stale_claim = service
+        .claim_next(&db.pool, member.id)
+        .await
+        .expect("claim first attempt")
+        .expect("first attempt exists");
+    let requeued = db::models::chat_message_queue::ChatMessageQueue::recover_inflight_cas(
+        &db.pool,
+        queued.id,
+        stale_claim.revision,
+        stale_claim.status,
+    )
+        .await
+        .expect("requeue first attempt")
+        .expect("first attempt requeued");
+    let retried = service
+        .claim_next(&db.pool, member.id)
+        .await
+        .expect("claim retry")
+        .expect("retry exists");
+    assert_eq!(retried.id, stale_claim.id);
+    assert_eq!(retried.attempt_no, stale_claim.attempt_no + 1);
+    assert!(retried.revision > requeued.revision);
+    let revision_before_stale_failure = service
+        .current_runtime_revision(&db.pool, session_id)
+        .await
+        .expect("load revision before stale failure");
+
+    runner
+        .fail_or_skip_queue_entry(&stale_claim, Some("late first-attempt failure".to_string()))
+        .await;
+
+    let after = service
+        .find_by_id(&db.pool, retried.id)
+        .await
+        .expect("load delivery after stale failure")
+        .expect("delivery survives stale failure");
+    assert_eq!(after.status, QueuedMessageStatus::Starting);
+    assert_eq!(after.revision, retried.revision);
+    assert_eq!(after.attempt_no, retried.attempt_no);
+    assert_eq!(
+        service
+            .current_runtime_revision(&db.pool, session_id)
+            .await
+            .expect("load revision after stale failure"),
+        revision_before_stale_failure
+    );
+    assert_eq!(
+        ChatSessionAgent::find_by_id(&db.pool, member.id)
+            .await
+            .expect("load retry member")
+            .expect("retry member exists")
+            .state,
+        ChatSessionAgentState::Idle
+    );
+}
+
+#[tokio::test]
+async fn terminal_finalize_wins_stop_without_reverting_member_to_stopping() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    runner
+        .stop_after_queue_binding
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let workspace = tempfile::tempdir().expect("create terminal stop race workspace");
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "TerminalStopRaceTarget").await;
+    let member = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: agent.id,
+            member_name: Some("TerminalStopRaceTarget".to_string()),
+            workspace_path: Some(workspace.path().to_string_lossy().to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create terminal stop race member");
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@TerminalStopRaceTarget bind before stop race".to_string(),
+        None,
+    )
+    .await
+    .expect("create terminal stop race source");
+    runner
+        .run_agent_for_mention(session_id, "TerminalStopRaceTarget", 0, &message)
+        .await
+        .expect("bind terminal stop race run");
+    let service = QueuedMessageService::new();
+    let running = service
+        .find_active_for_member(&db.pool, member.id)
+        .await
+        .expect("load running stop race delivery")
+        .expect("running stop race delivery exists");
+    assert_eq!(running.status, QueuedMessageStatus::Running);
+    let run_id = running.run_id.expect("running delivery is bound");
+
+    runner.stop_transition_gate.arm();
+    let stop_runner = runner.clone();
+    let stop_task =
+        tokio::spawn(async move { stop_runner.stop_agent(session_id, member.id).await });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        runner.stop_transition_gate.wait_until_reached(),
+    )
+    .await
+    .expect("stop reaches stale-read boundary");
+
+    let finalization = service
+        .finalize_completed_run_cas(&db.pool, run_id, member.id, running.revision, false)
+        .await
+        .expect("terminal finalization wins stop race");
+    assert!(finalization.applied);
+    runner.stop_transition_gate.release();
+    stop_task
+        .await
+        .expect("join stop race task")
+        .expect("stop race returns successfully");
+
+    let completed = service
+        .find_by_id(&db.pool, running.id)
+        .await
+        .expect("load completed stop race delivery")
+        .expect("completed stop race delivery exists");
+    assert_eq!(completed.status, QueuedMessageStatus::Completed);
+    assert_eq!(completed.revision, running.revision + 1);
+    assert_eq!(
+        ChatSessionAgent::find_by_id(&db.pool, member.id)
+            .await
+            .expect("load member after stop race")
+            .expect("member after stop race exists")
+            .state,
+        ChatSessionAgentState::Idle
+    );
+}
+
+#[tokio::test]
+async fn default_route_for_unmentioned_workflow_message_uses_lead_agent() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let session = insert_test_chat_session(&db, session_id).await;
+    let first_agent = insert_test_chat_agent(&db, "first").await;
+    let second_agent = insert_test_chat_agent(&db, "second").await;
+    insert_test_session_agent(&db, session_id, first_agent.id).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    insert_test_session_agent(&db, session_id, second_agent.id).await;
+    let message = test_message("please plan this", json!({ "chat_input_mode": "workflow" }));
+
+    let default_mention = runner
+        .resolve_default_mention_for_unmentioned_user_message(&session, &message)
+        .await
+        .expect("resolve default mention");
+
+    assert_eq!(
+        default_mention.map(|member| member.member_name),
+        Some("first".to_string())
+    );
+}
+
+#[tokio::test]
+async fn default_route_ignores_messages_with_explicit_mentions() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let session = insert_test_chat_session(&db, session_id).await;
+    let first_agent = insert_test_chat_agent(&db, "first").await;
+    insert_test_session_agent(&db, session_id, first_agent.id).await;
+    let mut message = test_message("@someone please handle this", json!({}));
+    message.mentions = sqlx::types::Json(vec!["someone".to_string()]);
+
+    let default_mention = runner
+        .resolve_default_mention_for_unmentioned_user_message(&session, &message)
+        .await
+        .expect("resolve default mention");
+
+    assert_eq!(default_mention, None);
+}
+
+#[tokio::test]
+async fn default_route_ignores_unmentioned_agent_messages() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let session = insert_test_chat_session(&db, session_id).await;
+    let first_agent = insert_test_chat_agent(&db, "first").await;
+    insert_test_session_agent(&db, session_id, first_agent.id).await;
+    let message = test_message_with_sender(
+        ChatSenderType::Agent,
+        Some(first_agent.id),
+        "done",
+        json!({}),
+    );
+
+    let default_mention = runner
+        .resolve_default_mention_for_unmentioned_user_message(&session, &message)
+        .await
+        .expect("resolve default mention");
+
+    assert_eq!(default_mention, None);
+}
+
+#[test]
+fn run_budget_thresholds_match_latest_policy() {
+    assert_eq!(RUNS_MAX_TOTAL_BYTES_PER_WORKSPACE, 500 * 1024 * 1024);
+    assert_eq!(RUNS_PRUNE_TARGET_BYTES_PER_WORKSPACE, 200 * 1024 * 1024);
+}
+
+#[test]
+fn parse_token_usage_from_codex_token_count_line() {
+    let line = r#"{"method":"codex/event/token_count","params":{"msg":{"info":{"last_token_usage":{"total_tokens":53002},"model_context_window":258400}}}}"#;
+    let usage = ChatRunner::parse_token_usage_from_stdout_line(line).expect("usage");
+    assert_eq!(usage.total_tokens, 53002);
+    assert_eq!(usage.model_context_window, 258400);
+}
+
+#[test]
+fn parse_token_usage_from_codex_token_count_line_keeps_model() {
+    let line = r#"{"method":"codex/event/token_count","params":{"msg":{"model":"gpt-5-codex","provider_id":"openai","thread_id":"thread-1","info":{"last_token_usage":{"input_tokens":100,"output_tokens":50},"model_context_window":258400}}}}"#;
+    let usage = ChatRunner::parse_token_usage_from_stdout_line(line).expect("usage");
+    assert_eq!(usage.total_tokens, 150);
+    assert_eq!(usage.runtime_model_id.as_deref(), Some("gpt-5-codex"));
+    assert_eq!(usage.provider_id.as_deref(), Some("openai"));
+    assert_eq!(usage.runtime_thread_id.as_deref(), Some("thread-1"));
+}
+
+#[test]
+fn parse_token_usage_from_plain_token_usage_line() {
+    let line = r#"{"type":"token_usage","total_tokens":14596,"model_context_window":258400}"#;
+    let usage = ChatRunner::parse_token_usage_from_stdout_line(line).expect("usage");
+    assert_eq!(usage.total_tokens, 14596);
+    assert_eq!(usage.model_context_window, 258400);
+}
+
+#[test]
+fn parse_token_usage_from_gemini_acp_quota_line() {
+    let line = r#"{"type":"token_usage","total_tokens":168,"model_context_window":0,"input_tokens":123,"output_tokens":45,"runtime_agent":"gemini","runtime_model_id":"gemini-3-pro-preview","provider_id":"google","usage_scope":"turn_delta"}"#;
+    let usage = ChatRunner::parse_token_usage_from_stdout_line(line).expect("usage");
+    assert_eq!(usage.total_tokens, 168);
+    assert_eq!(usage.model_context_window, 0);
+    assert_eq!(usage.input_tokens, Some(123));
+    assert_eq!(usage.output_tokens, Some(45));
+    assert_eq!(usage.runtime_agent.as_deref(), Some("gemini"));
+    assert_eq!(
+        usage.runtime_model_id.as_deref(),
+        Some("gemini-3-pro-preview")
+    );
+    assert_eq!(usage.provider_id.as_deref(), Some("google"));
+    assert_eq!(usage.usage_scope.as_deref(), Some("turn_delta"));
+    assert!(!usage.is_estimated);
+}
+
+#[test]
+fn select_workspace_path_prefers_session_agent_override() {
+    let resolved = ChatRunner::select_workspace_path(
+        Some("/tmp/session-agent"),
+        Some("/tmp/session-default"),
+        "/tmp/generated".to_string(),
+    );
+
+    assert_eq!(resolved, "/tmp/session-agent");
+}
+
+#[test]
+fn select_workspace_path_falls_back_to_session_default_before_generated_path() {
+    let resolved = ChatRunner::select_workspace_path(
+        None,
+        Some("/tmp/session-default"),
+        "/tmp/generated".to_string(),
+    );
+
+    assert_eq!(resolved, "/tmp/session-default");
+}
+
+#[tokio::test]
+async fn resolve_workspace_path_for_merged_isolated_session_keeps_worktree() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let base_workspace = "E:/workspace/base";
+    let worktree_workspace = "E:/workspace/.openteams/worktrees/session";
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_sessions (
+            id, title, status, default_workspace_path, worktree_mode
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        "#,
+    )
+    .bind(session_id)
+    .bind("merged isolated session")
+    .bind(ChatSessionStatus::Active)
+    .bind(base_workspace)
+    .bind(ChatSessionWorktreeMode::Isolated)
+    .execute(&db.pool)
+    .await
+    .expect("insert isolated session");
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_session_worktrees (
+            id, session_id, base_workspace_path, repo_path, base_branch,
+            branch_name, worktree_path, mode, status, merged_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'session', 'merged', datetime('now', 'subsec'))
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(session_id)
+    .bind(base_workspace)
+    .bind(base_workspace)
+    .bind("main")
+    .bind("openteams/session/test")
+    .bind(worktree_workspace)
+    .execute(&db.pool)
+    .await
+    .expect("insert merged worktree row");
+
+    let resolved = runner
+        .resolve_workspace_path_for_agent(session_id, agent_id, None)
+        .await
+        .expect("resolve workspace");
+
+    assert_eq!(resolved, worktree_workspace);
+
+    let active_rows: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM chat_session_worktrees
+        WHERE session_id = ?1
+          AND status IN (
+              'creating', 'active', 'dirty', 'merging',
+              'needs_conflict_resolution', 'merged', 'cleanup_pending'
+          )
+        "#,
+    )
+    .bind(session_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("count active rows");
+    assert_eq!(active_rows, 1);
+}
+
+#[tokio::test]
+async fn resolve_workspace_path_for_active_isolated_session_ignores_stale_agent_workspace() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let base_workspace = "E:/workspace/base";
+    let worktree_workspace = "E:/workspace/.openteams/worktrees/session";
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_sessions (
+            id, title, status, default_workspace_path, worktree_mode
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        "#,
+    )
+    .bind(session_id)
+    .bind("active isolated session")
+    .bind(ChatSessionStatus::Active)
+    .bind(base_workspace)
+    .bind(ChatSessionWorktreeMode::Isolated)
+    .execute(&db.pool)
+    .await
+    .expect("insert isolated session");
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_session_worktrees (
+            id, session_id, base_workspace_path, repo_path, base_branch,
+            branch_name, worktree_path, mode, status
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'session', 'active')
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(session_id)
+    .bind(base_workspace)
+    .bind(base_workspace)
+    .bind("main")
+    .bind("openteams/session/test")
+    .bind(worktree_workspace)
+    .execute(&db.pool)
+    .await
+    .expect("insert active worktree row");
+
+    let resolved = runner
+        .resolve_workspace_path_for_agent(session_id, agent_id, Some(base_workspace.to_string()))
+        .await
+        .expect("resolve workspace");
+
+    assert_eq!(resolved, worktree_workspace);
+}
+
+#[test]
+fn parse_agent_protocol_messages_supports_json_list() {
+    let content = r#"
+```json
+[
+  {"type":"send","to":"backend","intent":"REQUEST","content":"redo api"},
+  {"type":"record","content":"route=/chat"},
+  {"type":"artifact","content":["frontend/src/app.tsx", "crates/server/src/routes/chat/sessions.rs"]},
+  {"type":"conclusion","content":"waiting for backend confirmation"}
+]
+```
+"#;
+
+    let messages = ChatRunner::parse_agent_protocol_messages(content).expect("messages");
+    assert_eq!(messages.len(), 4);
+    assert!(matches!(
+        messages[0].message_type,
+        AgentProtocolMessageType::Send
+    ));
+    assert_eq!(messages[0].to.as_deref(), Some("backend"));
+    assert_eq!(messages[0].intent.as_deref(), Some("request"));
+    assert_eq!(
+        messages[2].content,
+        r#"["frontend/src/app.tsx","crates/server/src/routes/chat/sessions.rs"]"#
+    );
+    assert!(matches!(
+        messages[3].message_type,
+        AgentProtocolMessageType::Conclusion
+    ));
+}
+
+#[test]
+fn parse_agent_protocol_messages_supports_json_array_with_tool_call_tail() {
+    let content = r#"[{"type":"send","to":"you","content":"done"}]</parameter>
+</invoke>
+</minimax:tool_call>"#;
+
+    let messages = ChatRunner::parse_agent_protocol_messages(content).expect("messages");
+    assert_eq!(messages.len(), 1);
+    assert!(matches!(
+        messages[0].message_type,
+        AgentProtocolMessageType::Send
+    ));
+    assert_eq!(messages[0].to.as_deref(), Some("you"));
+    assert_eq!(messages[0].content, "done");
+}
+
+#[test]
+fn parse_agent_protocol_messages_json_with_embedded_backticks() {
+    let backticks = "\u{0060}\u{0060}\u{0060}";
+    let content = format!(
+        "[Pasted ~5 lines] {backticks}json\n\
+[\n\
+  {{\"type\": \"send\", \"to\": \"you\", \"content\": \"## Heading\\n\\n{backticks}\\ncode block inside json\\n{backticks}\\n\\nMore text\"}}\n\
+]\n\
+{backticks}"
+    );
+
+    let messages = ChatRunner::parse_agent_protocol_messages(&content).expect("messages");
+    assert_eq!(messages.len(), 1);
+    assert!(matches!(
+        messages[0].message_type,
+        AgentProtocolMessageType::Send
+    ));
+    assert_eq!(messages[0].to.as_deref(), Some("you"));
+    assert!(messages[0].content.contains("code block inside json"));
+}
+
+#[test]
+fn parse_agent_protocol_messages_supports_relaxed_message_type_shorthand() {
+    let content = r#"
+```json
+[
+  {
+    "type": "send",
+    "to": "you",
+    "intent": "reply",
+    "content": "done"
+  },
+  {
+    "record",
+    "content": "hero grid restored to idle"
+  },
+  {
+    "conclusion",
+    "content": "restoration behavior is now configured"
+  }
+]
+```
+"#;
+
+    let messages = ChatRunner::parse_agent_protocol_messages(content).expect("messages");
+    assert_eq!(messages.len(), 3);
+    assert!(matches!(
+        messages[0].message_type,
+        AgentProtocolMessageType::Send
+    ));
+    assert_eq!(messages[0].to.as_deref(), Some("you"));
+    assert_eq!(messages[0].intent.as_deref(), Some("reply"));
+    assert!(matches!(
+        messages[1].message_type,
+        AgentProtocolMessageType::Record
+    ));
+    assert_eq!(messages[1].content, "hero grid restored to idle");
+    assert!(matches!(
+        messages[2].message_type,
+        AgentProtocolMessageType::Conclusion
+    ));
+    assert_eq!(
+        messages[2].content,
+        "restoration behavior is now configured"
+    );
+}
+
+#[test]
+fn parse_agent_protocol_messages_rejects_legacy_object() {
+    let content = r#"{
+  "send_to_member": { "target": "@architect", "content": "sync API changes" },
+  "send_to_user_important": "frontend done",
+  "record": "route=/chat",
+  "result": "backend API still pending"
+}"#;
+
+    let err = ChatRunner::parse_agent_protocol_messages(content).expect_err("error");
+    assert_eq!(err.code, ChatProtocolNoticeCode::NotJsonArray);
+}
+
+#[test]
+fn parse_agent_protocol_messages_rejects_missing_send_target() {
+    let content = r#"[{"type":"send","content":"hello"}]"#;
+    let err = ChatRunner::parse_agent_protocol_messages(content).expect_err("error");
+    assert_eq!(err.code, ChatProtocolNoticeCode::MissingSendTarget);
+}
+
+#[test]
+fn parse_agent_protocol_messages_rejects_invalid_send_intent() {
+    let content = r#"[{"type":"send","to":"backend","intent":"delegate","content":"hello"}]"#;
+    let err = ChatRunner::parse_agent_protocol_messages(content).expect_err("error");
+    assert_eq!(err.code, ChatProtocolNoticeCode::InvalidSendIntent);
+}
+
+#[test]
+fn parse_agent_protocol_messages_rejects_empty_content() {
+    let content = r#"[{"type":"conclusion","content":"   "}]"#;
+    let err = ChatRunner::parse_agent_protocol_messages(content).expect_err("error");
+    assert_eq!(err.code, ChatProtocolNoticeCode::EmptyMessage);
+}
+
+#[test]
+fn protocol_send_routing_blocks_agent_targets_in_workflow_mode() {
+    assert!(!ChatRunner::should_route_protocol_send(
+        true,
+        "backend-runtime"
+    ));
+    assert!(!ChatRunner::should_route_protocol_send(
+        true,
+        "@frontend-dev"
+    ));
+    assert!(ChatRunner::should_route_protocol_send(true, "you"));
+    assert!(ChatRunner::should_route_protocol_send(
+        false,
+        "backend-runtime"
+    ));
+}
+
+#[tokio::test]
+async fn executor_startup_stop_interrupts_a_pending_spawn() {
+    let stop = CancellationToken::new();
+    let stop_request = stop.clone();
+    tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        stop_request.cancel();
+    });
+
+    let result = ChatRunner::wait_for_executor_startup(
+        std::future::pending::<Result<executors::executors::SpawnedChild, ExecutorError>>(),
+        &stop,
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+
+    assert!(matches!(result, Err(ChatRunnerError::StartupStopped)));
+}
+
+#[tokio::test]
+async fn executor_startup_has_a_bounded_deadline() {
+    let stop = CancellationToken::new();
+    let result = ChatRunner::wait_for_executor_startup(
+        std::future::pending::<Result<executors::executors::SpawnedChild, ExecutorError>>(),
+        &stop,
+        std::time::Duration::from_millis(10),
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(ChatRunnerError::Executor(ExecutorError::Io(error)))
+            if error.kind() == std::io::ErrorKind::TimedOut
+    ));
+}
+
+#[tokio::test]
+async fn exit_signal_waits_for_cleanup_before_finished() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (cleanup_path, cleanup) = test_run_cleanup(workspace.path());
+    let child = sleep_command(1).group_spawn().expect("spawn child");
+    let stop = CancellationToken::new();
+    let msg_store = Arc::new(MsgStore::new());
+    let completion_status = Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8()));
+    let terminal_failure_reason = Arc::new(Mutex::new(None));
+    let (exit_tx, exit_rx) = oneshot::channel();
+    exit_tx
+        .send(executors::executors::ExecutorExitResult::Success)
+        .expect("send exit signal");
+
+    let watcher = tokio::spawn(
+        ChatRunner::watch_executor_lifecycle_and_cleanup_with_timeout(
+            ExitWatcherArgs {
+                child,
+                stop,
+                executor_cancel: None,
+                exit_signal: Some(exit_rx),
+                cleanup: Some(cleanup),
+                msg_store: msg_store.clone(),
+                completion_status: completion_status.clone(),
+                terminal_failure_reason,
+                log_forwarders: empty_log_forwarders(),
+            },
+            Uuid::new_v4(),
+            std::time::Duration::from_secs(3),
+        ),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(finished_count(&msg_store), 0);
+    assert!(cleanup_path.exists());
+
+    watcher.await.expect("watcher complete");
+
+    assert_eq!(finished_count(&msg_store), 1);
+    assert_eq!(
+        RunCompletionStatus::from_atomic(&completion_status),
+        RunCompletionStatus::Succeeded
+    );
+    assert!(!cleanup_path.exists());
+}
+
+#[tokio::test]
+async fn exit_signal_preserves_authoritative_failure_reason() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (cleanup_path, cleanup) = test_run_cleanup(workspace.path());
+    let child = sleep_command(30).group_spawn().expect("spawn child");
+    let stop = CancellationToken::new();
+    let msg_store = Arc::new(MsgStore::new());
+    let completion_status = Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8()));
+    let terminal_failure_reason = Arc::new(Mutex::new(None));
+    let (exit_tx, exit_rx) = oneshot::channel();
+    exit_tx
+        .send(executors::executors::ExecutorExitResult::FailureWithError(
+            "OpenTeamsCli request timed out after 2400s without session activity".to_string(),
+        ))
+        .expect("send exit signal");
+
+    ChatRunner::watch_executor_lifecycle_and_cleanup_with_timeout(
+        ExitWatcherArgs {
+            child,
+            stop,
+            executor_cancel: None,
+            exit_signal: Some(exit_rx),
+            cleanup: Some(cleanup),
+            msg_store,
+            completion_status: completion_status.clone(),
+            terminal_failure_reason: terminal_failure_reason.clone(),
+            log_forwarders: empty_log_forwarders(),
+        },
+        Uuid::new_v4(),
+        std::time::Duration::from_millis(100),
+    )
+    .await;
+
+    assert_eq!(
+        RunCompletionStatus::from_atomic(&completion_status),
+        RunCompletionStatus::Failed
+    );
+    assert_eq!(
+        terminal_failure_reason.lock().await.as_deref(),
+        Some("OpenTeamsCli request timed out after 2400s without session activity")
+    );
+    assert!(!cleanup_path.exists());
+}
+
+#[tokio::test]
+async fn lifecycle_wait_times_out_after_session_inactivity() {
+    let mut child = sleep_command(30).group_spawn().expect("spawn child");
+    let stop = CancellationToken::new();
+    let msg_store = MsgStore::new();
+    let mut exit_signal = None;
+
+    let event = ChatRunner::wait_for_lifecycle_event_with_inactivity_timeout(
+        &mut child,
+        &stop,
+        &mut exit_signal,
+        &msg_store,
+        Uuid::new_v4(),
+        std::time::Duration::from_millis(25),
+    )
+    .await;
+
+    assert!(matches!(event, LifecycleEvent::SessionInactivityTimeout));
+    let _ = child.kill().await;
+}
+
+#[tokio::test]
+async fn stop_request_uses_same_cleanup_flow() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (cleanup_path, cleanup) = test_run_cleanup(workspace.path());
+    let child = sleep_command(30).group_spawn().expect("spawn child");
+    let stop = CancellationToken::new();
+    let executor_cancel = CancellationToken::new();
+    let msg_store = Arc::new(MsgStore::new());
+    let completion_status = Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8()));
+    let terminal_failure_reason = Arc::new(Mutex::new(None));
+
+    let watcher = tokio::spawn(
+        ChatRunner::watch_executor_lifecycle_and_cleanup_with_timeout(
+            ExitWatcherArgs {
+                child,
+                stop: stop.clone(),
+                executor_cancel: Some(executor_cancel.clone()),
+                exit_signal: None,
+                cleanup: Some(cleanup),
+                msg_store: msg_store.clone(),
+                completion_status: completion_status.clone(),
+                terminal_failure_reason,
+                log_forwarders: empty_log_forwarders(),
+            },
+            Uuid::new_v4(),
+            std::time::Duration::from_millis(100),
+        ),
+    );
+
+    stop.cancel();
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert_eq!(finished_count(&msg_store), 0);
+    assert!(cleanup_path.exists());
+
+    watcher.await.expect("watcher complete");
+
+    assert!(executor_cancel.is_cancelled());
+    assert_eq!(
+        RunCompletionStatus::from_atomic(&completion_status),
+        RunCompletionStatus::Stopped
+    );
+    assert_eq!(finished_count(&msg_store), 1);
+    assert!(!cleanup_path.exists());
+}
+
+#[tokio::test]
+async fn watcher_drop_releases_run_cleanup_without_touching_siblings() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let vendor_file = workspace.path().join("vendor-config.json");
+    std::fs::write(&vendor_file, "preserve").expect("vendor fixture");
+    let (cleanup_path, cleanup) = test_run_cleanup(workspace.path());
+    let child = sleep_command(1).group_spawn().expect("spawn child");
+    let watcher = tokio::spawn(
+        ChatRunner::watch_executor_lifecycle_and_cleanup_with_timeout(
+            ExitWatcherArgs {
+                child,
+                stop: CancellationToken::new(),
+                executor_cancel: None,
+                exit_signal: None,
+                cleanup: Some(cleanup),
+                msg_store: Arc::new(MsgStore::new()),
+                completion_status: Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8())),
+                terminal_failure_reason: Arc::new(Mutex::new(None)),
+                log_forwarders: empty_log_forwarders(),
+            },
+            Uuid::new_v4(),
+            std::time::Duration::from_millis(100),
+        ),
+    );
+    tokio::task::yield_now().await;
+    assert!(cleanup_path.exists());
+
+    watcher.abort();
+    let _ = watcher.await;
+
+    assert!(!cleanup_path.exists());
+    assert_eq!(
+        std::fs::read_to_string(vendor_file).expect("preserved vendor file"),
+        "preserve"
+    );
+}
+
+#[tokio::test]
+async fn stop_request_waits_for_executor_exit_signal_before_finished() {
+    let child = sleep_command(30).group_spawn().expect("spawn child");
+    let stop = CancellationToken::new();
+    let executor_cancel = CancellationToken::new();
+    let msg_store = Arc::new(MsgStore::new());
+    let completion_status = Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8()));
+    let terminal_failure_reason = Arc::new(Mutex::new(None));
+    let (exit_tx, exit_rx) = oneshot::channel();
+
+    let watcher = tokio::spawn(ChatRunner::watch_executor_lifecycle_with_timeout(
+        child,
+        stop.clone(),
+        Some(executor_cancel.clone()),
+        Some(exit_rx),
+        msg_store.clone(),
+        completion_status.clone(),
+        terminal_failure_reason,
+        empty_log_forwarders(),
+        Uuid::new_v4(),
+        std::time::Duration::from_millis(100),
+    ));
+
+    stop.cancel();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(executor_cancel.is_cancelled());
+    assert_eq!(finished_count(&msg_store), 0);
+
+    exit_tx
+        .send(executors::executors::ExecutorExitResult::Success)
+        .expect("send exit signal");
+
+    watcher.await.expect("watcher complete");
+
+    assert_eq!(
+        RunCompletionStatus::from_atomic(&completion_status),
+        RunCompletionStatus::Stopped
+    );
+    assert_eq!(finished_count(&msg_store), 1);
+}
+
+#[tokio::test]
+async fn stop_agent_with_control_but_without_delivery_recovers_to_idle() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let session_agent_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+            INSERT INTO chat_session_agents (
+                id,
+                session_id,
+                agent_id,
+                state,
+                workspace_path,
+                pty_session_key,
+                agent_session_id,
+                agent_message_id,
+                allowed_skill_ids
+            )
+            VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, NULL, ?5)
+            "#,
+    )
+    .bind(session_agent_id)
+    .bind(session_id)
+    .bind(agent_id)
+    .bind(ChatSessionAgentState::Running)
+    .bind("[]")
+    .execute(&db.pool)
+    .await
+    .expect("insert running session agent");
+
+    let stop = runner.register_run_control(session_agent_id, Uuid::new_v4());
+
+    runner
+        .stop_agent(session_id, session_agent_id)
+        .await
+        .expect("stop agent");
+
+    assert!(stop.is_cancelled());
+
+    let session_agent = ChatSessionAgent::find_by_id(&db.pool, session_agent_id)
+        .await
+        .expect("lookup session agent")
+        .expect("session agent exists");
+    assert_eq!(
+        session_agent.state,
+        ChatSessionAgentState::Idle,
+        "an anomalous active member without a durable delivery must recover, not enter the legacy stopping compatibility state"
+    );
+}
+
+#[tokio::test]
+async fn stop_agent_recovers_deliveryless_waiting_approval_to_idle() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let session_agent_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+            INSERT INTO chat_session_agents (
+                id, session_id, agent_id, state, workspace_path,
+                pty_session_key, agent_session_id, agent_message_id,
+                allowed_skill_ids
+            )
+            VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, NULL, ?5)
+            "#,
+    )
+    .bind(session_agent_id)
+    .bind(session_id)
+    .bind(agent_id)
+    .bind(ChatSessionAgentState::WaitingApproval)
+    .bind("[]")
+    .execute(&db.pool)
+    .await
+    .expect("insert approval-waiting session agent");
+
+    let stop = runner.register_run_control(session_agent_id, Uuid::new_v4());
+    runner
+        .stop_agent(session_id, session_agent_id)
+        .await
+        .expect("stop approval-waiting agent");
+
+    assert!(stop.is_cancelled());
+    let session_agent = ChatSessionAgent::find_by_id(&db.pool, session_agent_id)
+        .await
+        .expect("lookup session agent")
+        .expect("session agent exists");
+    assert_eq!(session_agent.state, ChatSessionAgentState::Idle);
+}
+
+#[test]
+fn waiting_for_approval_keeps_new_messages_on_the_member_queue() {
+    assert!(super::member_state_accepts_queued_messages(
+        &ChatSessionAgentState::WaitingApproval
+    ));
+}
+
+#[tokio::test]
+async fn stop_agent_without_run_control_recovers_agent_to_idle() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let session_agent_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let mut rx = runner.subscribe(session_id);
+
+    sqlx::query(
+        r#"
+            INSERT INTO chat_session_agents (
+                id,
+                session_id,
+                agent_id,
+                state,
+                workspace_path,
+                pty_session_key,
+                agent_session_id,
+                agent_message_id,
+                allowed_skill_ids
+            )
+            VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8)
+            "#,
+    )
+    .bind(session_agent_id)
+    .bind(session_id)
+    .bind(agent_id)
+    .bind(ChatSessionAgentState::Running)
+    .bind("pty-123")
+    .bind("agent-session-123")
+    .bind("agent-message-123")
+    .bind("[]")
+    .execute(&db.pool)
+    .await
+    .expect("insert running session agent");
+
+    runner
+        .stop_agent(session_id, session_agent_id)
+        .await
+        .expect("stop agent");
+
+    let session_agent = ChatSessionAgent::find_by_id(&db.pool, session_agent_id)
+        .await
+        .expect("lookup session agent")
+        .expect("session agent exists");
+    assert_eq!(session_agent.state, ChatSessionAgentState::Idle);
+    assert_eq!(session_agent.pty_session_key, None);
+    assert_eq!(session_agent.agent_session_id, None);
+    assert_eq!(session_agent.agent_message_id, None);
+
+    let event = rx.recv().await.expect("agent state event");
+    match event {
+        ChatStreamEvent::AgentState {
+            session_agent_id: emitted_session_agent_id,
+            agent_id: emitted_agent_id,
+            state,
+            run_id,
+            started_at,
+        } => {
+            assert_eq!(emitted_session_agent_id, session_agent_id);
+            assert_eq!(emitted_agent_id, agent_id);
+            assert_eq!(state, ChatSessionAgentState::Idle);
+            // Recovering an agent with no in-memory run control carries no run id.
+            assert_eq!(run_id, None);
+            assert_eq!(started_at, None);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn recover_orphaned_session_agents_resets_active_agents() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let running_session_agent_id = Uuid::new_v4();
+    let stopping_session_agent_id = Uuid::new_v4();
+    let waiting_session_agent_id = Uuid::new_v4();
+    let idle_session_agent_id = Uuid::new_v4();
+
+    for (session_agent_id, state) in [
+        (running_session_agent_id, ChatSessionAgentState::Running),
+        (stopping_session_agent_id, ChatSessionAgentState::Stopping),
+        (
+            waiting_session_agent_id,
+            ChatSessionAgentState::WaitingApproval,
+        ),
+        (idle_session_agent_id, ChatSessionAgentState::Idle),
+    ] {
+        sqlx::query(
+            r#"
+                INSERT INTO chat_session_agents (
+                    id,
+                    session_id,
+                    agent_id,
+                    state,
+                    workspace_path,
+                    pty_session_key,
+                    agent_session_id,
+                    agent_message_id,
+                    allowed_skill_ids
+                )
+                VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8)
+                "#,
+        )
+        .bind(session_agent_id)
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind(state)
+        .bind(format!("pty-{session_agent_id}"))
+        .bind(format!("agent-session-{session_agent_id}"))
+        .bind(format!("agent-message-{session_agent_id}"))
+        .bind("[]")
+        .execute(&db.pool)
+        .await
+        .expect("insert session agent");
+    }
+
+    let recovered = runner
+        .recover_orphaned_session_agents()
+        .await
+        .expect("recover orphaned session agents");
+    assert_eq!(recovered, 3);
+
+    let running = ChatSessionAgent::find_by_id(&db.pool, running_session_agent_id)
+        .await
+        .expect("lookup running agent")
+        .expect("running agent exists");
+    assert_eq!(running.state, ChatSessionAgentState::Idle);
+    assert_eq!(running.pty_session_key, None);
+    assert_eq!(running.agent_session_id, None);
+    assert_eq!(running.agent_message_id, None);
+
+    let stopping = ChatSessionAgent::find_by_id(&db.pool, stopping_session_agent_id)
+        .await
+        .expect("lookup stopping agent")
+        .expect("stopping agent exists");
+    assert_eq!(stopping.state, ChatSessionAgentState::Idle);
+    assert_eq!(stopping.pty_session_key, None);
+    assert_eq!(stopping.agent_session_id, None);
+    assert_eq!(stopping.agent_message_id, None);
+
+    let waiting = ChatSessionAgent::find_by_id(&db.pool, waiting_session_agent_id)
+        .await
+        .expect("lookup approval-waiting agent")
+        .expect("approval-waiting agent exists");
+    assert_eq!(waiting.state, ChatSessionAgentState::Idle);
+    assert_eq!(waiting.pty_session_key, None);
+    assert_eq!(waiting.agent_session_id, None);
+    assert_eq!(waiting.agent_message_id, None);
+
+    let idle = ChatSessionAgent::find_by_id(&db.pool, idle_session_agent_id)
+        .await
+        .expect("lookup idle agent")
+        .expect("idle agent exists");
+    assert_eq!(idle.state, ChatSessionAgentState::Idle);
+    assert!(idle.pty_session_key.is_some());
+    assert!(idle.agent_session_id.is_some());
+    assert!(idle.agent_message_id.is_some());
+}
+
+#[tokio::test]
+async fn recover_orphaned_session_agents_finds_dead_member_with_unbound_processing_queue() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let session_agent_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let processing_queue_id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_session_agents (
+            id, session_id, agent_id, state, pty_session_key,
+            agent_session_id, agent_message_id, allowed_skill_ids
+        )
+        VALUES (?1, ?2, ?3, 'dead', 'stale-pty', 'stale-session', 'stale-message', '[]')
+        "#,
+    )
+    .bind(session_agent_id)
+    .bind(session_id)
+    .bind(agent_id)
+    .execute(&db.pool)
+    .await
+    .expect("insert dead session agent");
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_message_queue (
+            id, session_id, session_agent_id, agent_id, chat_message_id,
+            status, processing_started_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, 'processing', datetime('now', 'subsec'))
+        "#,
+    )
+    .bind(processing_queue_id)
+    .bind(session_id)
+    .bind(session_agent_id)
+    .bind(agent_id)
+    .bind(Uuid::new_v4())
+    .execute(&db.pool)
+    .await
+    .expect("insert unbound processing queue row");
+
+    let recovered = runner
+        .recover_orphaned_session_agents()
+        .await
+        .expect("recover unbound processing queue");
+    assert_eq!(recovered, 1);
+
+    let session_agent = ChatSessionAgent::find_by_id(&db.pool, session_agent_id)
+        .await
+        .expect("lookup recovered member")
+        .expect("recovered member exists");
+    assert_eq!(session_agent.state, ChatSessionAgentState::Idle);
+    assert_eq!(session_agent.pty_session_key, None);
+    assert_eq!(session_agent.agent_session_id, None);
+    assert_eq!(session_agent.agent_message_id, None);
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let queue_status: String =
+                sqlx::query_scalar("SELECT status FROM chat_message_queue WHERE id = ?1")
+                    .bind(processing_queue_id)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("lookup recovered queue row");
+            if queue_status == "skipped" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("recovered queue is automatically dispatched and finalized");
+}
+
+#[tokio::test]
+async fn recover_orphaned_session_agents_dispatches_queued_idle_member_without_resetting_session() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let session_agent_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let queue_id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_session_agents (
+            id, session_id, agent_id, state, pty_session_key,
+            agent_session_id, agent_message_id, allowed_skill_ids
+        )
+        VALUES (?1, ?2, ?3, 'idle', 'preserved-pty', 'preserved-session', 'preserved-message', '[]')
+        "#,
+    )
+    .bind(session_agent_id)
+    .bind(session_id)
+    .bind(agent_id)
+    .execute(&db.pool)
+    .await
+    .expect("insert idle session agent");
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_message_queue (
+            id, session_id, session_agent_id, agent_id, chat_message_id, status
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, 'queued')
+        "#,
+    )
+    .bind(queue_id)
+    .bind(session_id)
+    .bind(session_agent_id)
+    .bind(agent_id)
+    .bind(Uuid::new_v4())
+    .execute(&db.pool)
+    .await
+    .expect("insert queued row");
+
+    let recovered = runner
+        .recover_orphaned_session_agents()
+        .await
+        .expect("recover queued idle member");
+    assert_eq!(recovered, 1);
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let queue_status: String =
+                sqlx::query_scalar("SELECT status FROM chat_message_queue WHERE id = ?1")
+                    .bind(queue_id)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("lookup recovered queue row");
+            if queue_status == "skipped" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("queued idle member is automatically dispatched");
+
+    let session_agent = ChatSessionAgent::find_by_id(&db.pool, session_agent_id)
+        .await
+        .expect("lookup recovered member")
+        .expect("recovered member exists");
+    assert_eq!(session_agent.state, ChatSessionAgentState::Idle);
+    assert_eq!(
+        session_agent.pty_session_key.as_deref(),
+        Some("preserved-pty")
+    );
+    assert_eq!(
+        session_agent.agent_session_id.as_deref(),
+        Some("preserved-session")
+    );
+    assert_eq!(
+        session_agent.agent_message_id.as_deref(),
+        Some("preserved-message")
+    );
+}
+
+#[test]
+fn parse_agent_protocol_messages_reports_json_error_detail() {
+    let content = r#"
+```json
+[
+  {"type":"send","to":"backend","content":"missing value","intent": }
+]
+```
+"#;
+
+    let err = ChatRunner::parse_agent_protocol_messages(content).expect_err("error");
+    assert_eq!(err.code, ChatProtocolNoticeCode::InvalidJson);
+    let detail = err.detail.expect("detail");
+    assert!(detail.contains("line"));
+    assert!(detail.contains("column"));
+}
+
+#[test]
+fn parse_agent_protocol_messages_repairs_unescaped_quotes_from_run_0003() {
+    let content = r#"All changes look correct. Now let me write the final implementation notes document and respond to the coordinator.
+
+```json
+[
+  {"type": "artifact", "content": "T6 实现完成，变更文件：`frontend/src/lib/api.ts`（新增 `getSessionRunsRetention`）、`frontend/src/pages/ui-new/chat/types.ts`（新增 `RunRetentionState` 类型，`RunHistoryItem` 增加 `retention?` 字段）、`frontend/src/pages/ui-new/chat/hooks/useChatData.ts`（新增 `useRunRetention` hook）、`frontend/src/pages/ui-new/chat/index.ts`（导出 `useRunRetention`）、`frontend/src/pages/ui-new/chat/components/WorkspaceDrawer.tsx`（新增 `retentionByRunId` prop，View Log 按钮支持 pruned/tail/截断/降级状态展示）、`frontend/src/pages/ui-new/ChatSessions.tsx`（接入 `useRunRetention`，410 错误单独处理，传递 `retentionByRunId` 给 Drawer）。"},
+  {"type": "record", "content": "frontend T6 已落地：run 列表通过 `useRunRetention(sessionId, runIds)` 拉取 `GET /api/chat/sessions/{session_id}/runs/retention`，按 runId map 后传入 WorkspaceDrawer；View Log 按钮在 `log_state=pruned` 时禁用并显示"日志已清理"，在 `log_state=tail` 时附加提示；`log_truncated`/`log_capture_degraded`/`artifact_state` 以 badge 形式展示；`handleLoadLog` 对 HTTP 410 单独提示"日志已按保留策略清理"。"},
+  {"type": "send", "to": "coordinator", "intent": "notify", "content": "T6 实现完成。已接入 retention 接口、新增 `useRunRetention` hook、WorkspaceDrawer 支持 pruned/tail/截断/降级/stub/artifactPruned 状态展示，`handleLoadLog` 对 410 单独处理。共变更 6 个文件，均以 T4 API 契约为准，`/log` 的 410 处理位已预留。"},
+  {"type": "conclusion", "content": "T6 retention 前端实现已全部落地，5 个目标文件加 index.ts 共 6 处改动。`/log` 的 410 处理位已按 T4 契约预留，后续 T5 落地后无需额外适配。"}
+]
+```"#;
+
+    let messages = ChatRunner::parse_agent_protocol_messages(content).expect("messages");
+    assert_eq!(messages.len(), 4);
+    assert!(matches!(
+        messages[0].message_type,
+        AgentProtocolMessageType::Artifact
+    ));
+    assert!(matches!(
+        messages[1].message_type,
+        AgentProtocolMessageType::Record
+    ));
+    assert!(messages[1].content.contains("\"日志已清理\""));
+    assert!(matches!(
+        messages[2].message_type,
+        AgentProtocolMessageType::Send
+    ));
+    assert_eq!(messages[2].to.as_deref(), Some("coordinator"));
+    assert_eq!(messages[2].intent.as_deref(), Some("notify"));
+    assert!(matches!(
+        messages[3].message_type,
+        AgentProtocolMessageType::Conclusion
+    ));
+}
+
+#[test]
+fn parse_agent_protocol_messages_repairs_unescaped_quotes_from_run_0004() {
+    let content = r#"```json
+[
+  {"type": "conclusion", "content": "T6 实现已在上一轮完成，契约已按 T4 文档落地：`getSessionRunsRetention` 使用逗号分隔 `run_ids`，`handleLoadLog` 对 HTTP 410 单独提示"日志已按保留策略清理"，与 `Chat run log expired` 响应对应。无待处理项。"}
+]
+```"#;
+
+    let messages = ChatRunner::parse_agent_protocol_messages(content).expect("messages");
+    assert_eq!(messages.len(), 1);
+    assert!(matches!(
+        messages[0].message_type,
+        AgentProtocolMessageType::Conclusion
+    ));
+    assert!(messages[0].content.contains("\"日志已按保留策略清理\""));
+}
+
+#[test]
+fn parse_agent_protocol_messages_repairs_unescaped_quotes_from_run_0005() {
+    let content = r#"```json
+[
+  {"type": "artifact", "content": "T6 完成报告已写入 `.openteams/context/3058d52b-0264-416f-a787-d2346c012f07/frontend-t6-completion-report.md`，包含 6 个变更文件、核心改动点和契约对接验证表。"},
+  {"type": "record", "content": "frontend T6 已完成交付：`useRunRetention` hook 接入 `GET /api/chat/sessions/{session_id}/runs/retention`；WorkspaceDrawer 对 `log_state=pruned/tail`、`log_truncated`、`log_capture_degraded`、`artifact_state=stub/pruned` 实现了独立 UI 渲染；`handleLoadLog` 对 HTTP 410 单独提示"日志已按保留策略清理"，与 `Chat run log expired` 响应对应。"},
+  {"type": "send", "to": "coordinator", "intent": "notify", "content": "T6 已完成收口。6 个文件变更：`api.ts`（retention 接口）、`chat/types.ts`（类型）、`useChatData.ts`（hook）、`index.ts`（导出）、`WorkspaceDrawer.tsx`（retention UI）、`ChatSessions.tsx`（410 处理 + retention 注入）。报告见 `frontend-t6-completion-report.md`。唯一未覆盖项：response header 未解析（retention API 已能提前感知状态，无阻塞）。"},
+  {"type": "conclusion", "content": "T6 实现已全量落地，与 T4/T5 契约完全对齐。6 个文件改动包含 retention 状态展示、View Log 禁用态和 410 Gone 单独处理。`X-OpenTeams-Log-State` header 解析为非必要项，未实现但不影响功能完整性。"}
+]
+```"#;
+
+    let messages = ChatRunner::parse_agent_protocol_messages(content).expect("messages");
+    assert_eq!(messages.len(), 4);
+    assert!(matches!(
+        messages[0].message_type,
+        AgentProtocolMessageType::Artifact
+    ));
+    assert!(matches!(
+        messages[1].message_type,
+        AgentProtocolMessageType::Record
+    ));
+    assert!(messages[1].content.contains("\"日志已按保留策略清理\""));
+    assert!(matches!(
+        messages[2].message_type,
+        AgentProtocolMessageType::Send
+    ));
+    assert!(matches!(
+        messages[3].message_type,
+        AgentProtocolMessageType::Conclusion
+    ));
+}
+
+#[test]
+fn should_handle_protocol_error_as_raw_output_only_for_json_shape_errors() {
+    let invalid_json = AgentProtocolError {
+        code: ChatProtocolNoticeCode::InvalidJson,
+        target: None,
+        detail: None,
+    };
+    let not_json_array = AgentProtocolError {
+        code: ChatProtocolNoticeCode::NotJsonArray,
+        target: None,
+        detail: None,
+    };
+    let missing_target = AgentProtocolError {
+        code: ChatProtocolNoticeCode::MissingSendTarget,
+        target: None,
+        detail: None,
+    };
+    let empty_message = AgentProtocolError {
+        code: ChatProtocolNoticeCode::EmptyMessage,
+        target: None,
+        detail: None,
+    };
+
+    assert!(ChatRunner::should_handle_protocol_error_as_raw_output(
+        &invalid_json
+    ));
+    assert!(ChatRunner::should_handle_protocol_error_as_raw_output(
+        &not_json_array
+    ));
+    assert!(!ChatRunner::should_handle_protocol_error_as_raw_output(
+        &empty_message
+    ));
+    assert!(!ChatRunner::should_handle_protocol_error_as_raw_output(
+        &missing_target
+    ));
+}
+
+#[tokio::test]
+async fn process_agent_protocol_output_requests_retry_for_first_json_shape_failure() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+
+    let result = runner
+        .process_agent_protocol_output(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "coder",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            0,
+            ResolvedPromptLanguage {
+                setting: "english",
+                code: "en",
+                instruction: "You MUST respond in English.",
+            },
+            r#"{"type":"send","to":"you","content":"object is not allowed"}"#,
+            None,
+            None,
+            RunCompletionStatus::Succeeded,
+            false,
+            None,
+            None,
+            0,
+            None,
+        )
+        .await
+        .expect("process protocol output");
+
+    match result {
+        super::ProtocolProcessResult::RetryableParseFailure { code, .. } => {
+            assert_eq!(code, ChatProtocolNoticeCode::NotJsonArray);
+        }
+        other => panic!("expected retryable parse failure, got {other:?}"),
+    }
+
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list messages");
+    assert!(messages.is_empty());
+}
+
+#[tokio::test]
+async fn process_agent_protocol_output_uses_raw_output_after_retry_exhaustion() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let run_id = Uuid::new_v4();
+
+    let result = runner
+        .process_agent_protocol_output(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "coder",
+            run_id,
+            Uuid::new_v4(),
+            None,
+            0,
+            ResolvedPromptLanguage {
+                setting: "english",
+                code: "en",
+                instruction: "You MUST respond in English.",
+            },
+            "still not json",
+            None,
+            None,
+            RunCompletionStatus::Succeeded,
+            false,
+            None,
+            None,
+            MAX_PROTOCOL_PARSE_RETRIES,
+            None,
+        )
+        .await
+        .expect("process protocol output");
+
+    assert!(matches!(result, super::ProtocolProcessResult::Success(1)));
+
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].sender_type, ChatSenderType::Agent);
+    assert_eq!(messages[0].content, "still not json");
+    assert_eq!(messages[0].meta["protocol"]["mode"], json!("raw_fallback"));
+    assert_eq!(messages[0].meta["run_id"], json!(run_id));
+}
+
+#[tokio::test]
+async fn persist_protocol_retry_attempt_message_keeps_run_activity_anchor() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let run_id = Uuid::new_v4();
+    let previous_run_id = Uuid::new_v4();
+    let previous_retry_meta = json!({
+        "attempt": 1,
+        "previous_run_id": previous_run_id,
+    });
+
+    runner
+        .persist_protocol_retry_attempt_message(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            run_id,
+            "coder",
+            Uuid::new_v4(),
+            Some("client-message"),
+            0,
+            ResolvedPromptLanguage {
+                setting: "simplified_chinese",
+                code: "zh-Hans",
+                instruction: "You MUST respond in Simplified Chinese.",
+            },
+            1,
+            Some(&previous_retry_meta),
+            &ChatProtocolNoticeCode::InvalidJson,
+            Some("expected an array"),
+            None,
+            Some("kimi"),
+        )
+        .await
+        .expect("persist retry attempt");
+
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].content, "响应格式无效，正在自动重试。");
+    assert_eq!(messages[0].meta["run_id"], json!(run_id));
+    assert_eq!(
+        messages[0].meta["protocol"]["mode"],
+        json!("protocol_retry")
+    );
+    assert_eq!(
+        messages[0].meta["protocol_retry"]["previous_run_id"],
+        json!(previous_run_id)
+    );
+    assert_eq!(
+        messages[0].meta["protocol_retry"]["current_run_id"],
+        json!(run_id)
+    );
+    assert_eq!(messages[0].meta["protocol_retry"]["next_attempt"], json!(2));
+}
+
+#[tokio::test]
+async fn process_agent_protocol_output_uses_conclusion_when_no_send() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+
+    let result = runner
+        .process_agent_protocol_output(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "coder",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            0,
+            ResolvedPromptLanguage {
+                setting: "english",
+                code: "en",
+                instruction: "You MUST respond in English.",
+            },
+            r#"[{"type":"record","content":"shared fact"},{"type":"conclusion","content":"done"}]"#,
+            None,
+            None,
+            RunCompletionStatus::Succeeded,
+            false,
+            None,
+            None,
+            0,
+            None,
+        )
+        .await
+        .expect("process protocol output");
+
+    assert!(matches!(result, super::ProtocolProcessResult::Success(1)));
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].sender_type, ChatSenderType::Agent);
+    assert_eq!(messages[0].content, "done");
+    assert_eq!(messages[0].meta["protocol"]["type"], json!("conclusion"));
+    assert_eq!(
+        messages[0].meta["protocol"]["mode"],
+        json!("display_fallback")
+    );
+}
+
+#[tokio::test]
+async fn process_agent_protocol_output_persists_run_model_on_send_message() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+
+    let previous_run_id = Uuid::new_v4();
+    let protocol_retry_meta = json!({
+        "attempt": 1,
+        "previous_run_id": previous_run_id,
+        "error_code": "invalid_json",
+    });
+    let result = runner
+        .process_agent_protocol_output(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "coder",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            0,
+            ResolvedPromptLanguage {
+                setting: "english",
+                code: "en",
+                instruction: "You MUST respond in English.",
+            },
+            r#"[{"type":"send","to":"you","content":"done"}]"#,
+            None,
+            None,
+            RunCompletionStatus::Succeeded,
+            false,
+            None,
+            Some("gpt-5.5"),
+            0,
+            Some(&protocol_retry_meta),
+        )
+        .await
+        .expect("process protocol output");
+
+    assert!(matches!(result, super::ProtocolProcessResult::Success(1)));
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].sender_type, ChatSenderType::Agent);
+    assert_eq!(messages[0].meta["model"], json!("gpt-5.5"));
+    assert_eq!(
+        messages[0].meta["protocol_retry"]["previous_run_id"],
+        json!(previous_run_id)
+    );
+}
+
+#[tokio::test]
+async fn process_agent_protocol_output_uses_record_when_no_send_or_conclusion() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+
+    let result = runner
+        .process_agent_protocol_output(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "coder",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            0,
+            ResolvedPromptLanguage {
+                setting: "english",
+                code: "en",
+                instruction: "You MUST respond in English.",
+            },
+            r#"[{"type":"record","content":"shared fact"}]"#,
+            None,
+            None,
+            RunCompletionStatus::Succeeded,
+            false,
+            None,
+            None,
+            0,
+            None,
+        )
+        .await
+        .expect("process protocol output");
+
+    assert!(matches!(result, super::ProtocolProcessResult::Success(1)));
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].sender_type, ChatSenderType::Agent);
+    assert_eq!(messages[0].content, "shared fact");
+    assert_eq!(messages[0].meta["protocol"]["type"], json!("record"));
+}
+
+#[tokio::test]
+async fn process_agent_protocol_output_persists_error_when_output_empty() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+
+    let result = runner
+        .process_agent_protocol_output(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "coder",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            0,
+            ResolvedPromptLanguage {
+                setting: "english",
+                code: "en",
+                instruction: "You MUST respond in English.",
+            },
+            "",
+            Some("CLI failed before writing output"),
+            None,
+            RunCompletionStatus::Failed,
+            false,
+            None,
+            None,
+            0,
+            None,
+        )
+        .await
+        .expect("process protocol output");
+
+    assert!(matches!(result, super::ProtocolProcessResult::Success(1)));
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].sender_type, ChatSenderType::Agent);
+    assert_eq!(messages[0].content, "CLI failed before writing output");
+    assert_eq!(messages[0].meta["protocol"]["output_is_empty"], json!(true));
+}
+
+#[tokio::test]
+async fn process_agent_protocol_output_persists_failure_hint_when_output_empty() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+
+    let result = runner
+        .process_agent_protocol_output(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "coder",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            0,
+            ResolvedPromptLanguage {
+                setting: "english",
+                code: "en",
+                instruction: "You MUST respond in English.",
+            },
+            "",
+            None,
+            None,
+            RunCompletionStatus::Failed,
+            false,
+            None,
+            None,
+            0,
+            None,
+        )
+        .await
+        .expect("process protocol output");
+
+    assert!(matches!(result, super::ProtocolProcessResult::Success(1)));
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].sender_type, ChatSenderType::Agent);
+    assert_eq!(messages[0].content, "Agent运行失败");
+    assert_eq!(messages[0].meta["protocol"]["output_is_empty"], json!(true));
+    assert_eq!(messages[0].meta["i18n"]["key"], json!("agent.runFailed"));
+}
+
+#[tokio::test]
+async fn process_agent_protocol_output_persists_completed_hint_when_successful_output_empty() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+
+    let result = runner
+        .process_agent_protocol_output(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "coder",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            0,
+            ResolvedPromptLanguage {
+                setting: "simplified_chinese",
+                code: "zh-Hans",
+                instruction: "You MUST respond in Simplified Chinese.",
+            },
+            "",
+            None,
+            None,
+            RunCompletionStatus::Succeeded,
+            false,
+            None,
+            None,
+            0,
+            None,
+        )
+        .await
+        .expect("process protocol output");
+
+    assert!(matches!(result, super::ProtocolProcessResult::Success(1)));
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].sender_type, ChatSenderType::Agent);
+    assert_eq!(messages[0].content, "Agent运行完成（未返回文本）");
+    assert_eq!(messages[0].meta["protocol"]["output_is_empty"], json!(true));
+    assert_eq!(
+        messages[0].meta["protocol"]["terminal_reason"],
+        json!("completed_without_output")
+    );
+    assert_eq!(
+        messages[0].meta["i18n"]["key"],
+        json!("agent.runCompletedNoOutput")
+    );
+}
+
+#[tokio::test]
+async fn process_agent_protocol_output_persists_permission_rejected_hint_when_output_empty() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+
+    let result = runner
+        .process_agent_protocol_output(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "coder",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            0,
+            ResolvedPromptLanguage {
+                setting: "simplified_chinese",
+                code: "zh-Hans",
+                instruction: "You MUST respond in Simplified Chinese.",
+            },
+            "",
+            None,
+            None,
+            RunCompletionStatus::Succeeded,
+            true,
+            None,
+            None,
+            0,
+            None,
+        )
+        .await
+        .expect("process protocol output");
+
+    assert!(matches!(result, super::ProtocolProcessResult::Success(1)));
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].sender_type, ChatSenderType::Agent);
+    assert_eq!(messages[0].content, "操作已拒绝/未执行");
+    assert_eq!(messages[0].meta["protocol"]["output_is_empty"], json!(true));
+    assert_eq!(
+        messages[0].meta["protocol"]["terminal_reason"],
+        json!("permission_rejected")
+    );
+    assert_eq!(
+        messages[0].meta["i18n"]["key"],
+        json!("agent.permissionRejected")
+    );
+}
+
+#[tokio::test]
+async fn process_agent_protocol_output_keeps_model_output_after_permission_rejection() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+
+    let result = runner
+        .process_agent_protocol_output(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "coder",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            0,
+            ResolvedPromptLanguage {
+                setting: "english",
+                code: "en",
+                instruction: "You MUST respond in English.",
+            },
+            r#"[{"type":"send","to":"you","content":"The tool was rejected, so I did not modify the file."}]"#,
+            None,
+            None,
+            RunCompletionStatus::Succeeded,
+            true,
+            None,
+            None,
+            0,
+            None,
+        )
+        .await
+        .expect("process protocol output");
+
+    assert!(matches!(result, super::ProtocolProcessResult::Success(1)));
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0].content,
+        "@you The tool was rejected, so I did not modify the file."
+    );
+    assert!(messages[0].meta["protocol"]["terminal_reason"].is_null());
+    assert!(messages[0].meta["i18n"].is_null());
+}
+
+#[tokio::test]
+async fn process_agent_protocol_output_persists_stopped_hint_when_stopped_empty() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+
+    let result = runner
+        .process_agent_protocol_output(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "coder",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            0,
+            ResolvedPromptLanguage {
+                setting: "simplified_chinese",
+                code: "zh-Hans",
+                instruction: "You MUST respond in Simplified Chinese.",
+            },
+            "",
+            None,
+            None,
+            RunCompletionStatus::Stopped,
+            true,
+            None,
+            None,
+            0,
+            None,
+        )
+        .await
+        .expect("process protocol output");
+
+    assert!(matches!(result, super::ProtocolProcessResult::Success(1)));
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].sender_type, ChatSenderType::Agent);
+    assert_eq!(messages[0].content, "Agent停止运行");
+    assert_eq!(messages[0].meta["protocol"]["output_is_empty"], json!(true));
+    assert_eq!(messages[0].meta["i18n"]["key"], json!("agent.stopped"));
+}
+
+#[test]
+fn markdown_protocol_output_example_json_is_valid() {
+    let messages = ChatRunner::parse_agent_protocol_messages(MARKDOWN_PROTOCOL_OUTPUT_EXAMPLE_JSON)
+        .expect("json");
+    assert_eq!(messages.len(), 4);
+    assert!(matches!(
+        messages.first().map(|message| &message.message_type),
+        Some(AgentProtocolMessageType::Send)
+    ));
+    assert_eq!(messages[0].intent.as_deref(), Some("request"));
+    assert!(matches!(
+        messages[1].message_type,
+        AgentProtocolMessageType::Artifact
+    ));
+    assert!(matches!(
+        messages[2].message_type,
+        AgentProtocolMessageType::Record
+    ));
+}
+
+#[test]
+fn resolve_prompt_language_from_value_returns_concrete_language_setting() {
+    let language = ChatRunner::resolve_prompt_language_from_value("zh-Hans").expect("language");
+    assert_eq!(language.setting, "simplified_chinese");
+    assert_eq!(language.code, "zh-Hans");
+    assert_eq!(
+        language.instruction,
+        "You MUST respond in Simplified Chinese."
+    );
+}
+
+#[test]
+fn resolve_prompt_language_from_ui_language_never_returns_browser_setting() {
+    let language = ChatRunner::resolve_prompt_language_from_ui_language(&UiLanguage::Browser);
+    assert_eq!(language.setting, "english");
+    assert_eq!(language.code, "en");
+    assert_eq!(language.instruction, "You MUST respond in English.");
+}
+
+#[test]
+fn resolve_prompt_language_uses_system_locale_when_browser_is_configured() {
+    let message = test_message("Please answer this in English.", serde_json::json!({}));
+    let language = ChatRunner::resolve_prompt_language_with_system_locale(
+        &message,
+        &UiLanguage::Browser,
+        Some("fr-CA"),
+    );
+    assert_eq!(language.setting, "french");
+    assert_eq!(language.code, "fr");
+    assert_eq!(language.instruction, "You MUST respond in French.");
+}
+
+#[test]
+fn resolve_prompt_language_prefers_message_meta_over_system_locale() {
+    let message = test_message(
+        "Please answer this in English.",
+        serde_json::json!({ "app_language": "zh-Hant" }),
+    );
+    let language = ChatRunner::resolve_prompt_language_with_system_locale(
+        &message,
+        &UiLanguage::Browser,
+        Some("fr-CA"),
+    );
+    assert_eq!(language.setting, "traditional_chinese");
+    assert_eq!(language.code, "zh-Hant");
+    assert_eq!(
+        language.instruction,
+        "You MUST respond in Traditional Chinese."
+    );
+}
+
+#[test]
+fn infer_prompt_language_prefers_traditional_chinese_hint_chars() {
+    let language =
+        ChatRunner::infer_prompt_language_from_text("\u{81fa}\u{7063}").expect("language");
+    assert_eq!(language.setting, "traditional_chinese");
+    assert_eq!(language.code, "zh-Hant");
+    assert_eq!(
+        language.instruction,
+        "You MUST respond in Traditional Chinese."
+    );
+}
+
+#[test]
+fn infer_prompt_language_detects_spanish_accented_punctuation() {
+    let language =
+        ChatRunner::infer_prompt_language_from_text("\u{00bf}Como estas?").expect("language");
+    assert_eq!(language.setting, "spanish");
+    assert_eq!(language.code, "es");
+    assert_eq!(language.instruction, "You MUST respond in Spanish.");
+}
+
+#[test]
+fn infer_prompt_language_detects_french_accented_letters() {
+    let language =
+        ChatRunner::infer_prompt_language_from_text("\u{00e9}l\u{00e8}ve").expect("language");
+    assert_eq!(language.setting, "french");
+    assert_eq!(language.code, "fr");
+    assert_eq!(language.instruction, "You MUST respond in French.");
+}
+
+#[test]
+fn resolve_message_sender_identity_uses_agent_sender_label() {
+    let agent_id = Uuid::new_v4();
+    let message = test_message_with_sender(
+        ChatSenderType::Agent,
+        Some(agent_id),
+        "@product hello",
+        json!({
+            "sender": {
+                "label": "architect",
+                "name": "architect"
+            },
+            "structured": {
+                "sender_label": "architect"
+            }
+        }),
+    );
+
+    let sender = ChatRunner::resolve_message_sender_identity(&message);
+    assert_eq!(sender.label, "architect");
+    assert_eq!(sender.address, "agent:architect");
+}
+
+#[test]
+fn build_protocol_send_message_meta_includes_token_usage() {
+    let token_usage = TokenUsageInfo {
+        total_tokens: 2048,
+        model_context_window: 128000,
+        input_tokens: Some(1536),
+        output_tokens: Some(512),
+        reasoning_output_tokens: None,
+        cache_read_tokens: Some(256),
+        runtime_agent: Some("codex".to_string()),
+        runtime_model_id: Some("gpt-5".to_string()),
+        provider_id: Some("openai".to_string()),
+        runtime_thread_id: Some("thread-1".to_string()),
+        usage_scope: Some("turn_delta".to_string()),
+        snapshot_total_tokens: None,
+        snapshot_input_tokens: None,
+        snapshot_output_tokens: None,
+        snapshot_reasoning_output_tokens: None,
+        snapshot_cache_read_tokens: None,
+        is_estimated: false,
+    };
+
+    let meta = ChatRunner::build_protocol_send_message_meta(
+        "zh-Hans",
+        Uuid::nil(),
+        Uuid::nil(),
+        Uuid::nil(),
+        Some("client-message-1"),
+        0,
+        "you",
+        0,
+        Some("reply"),
+        Some("The receiver should reply."),
+        Some(&token_usage),
+        Some("gpt-5.5"),
+    );
+
+    assert_eq!(meta["app_language"], json!("zh-Hans"));
+    assert_eq!(meta["protocol"]["type"], json!("send"));
+    assert_eq!(meta["protocol"]["to"], json!("you"));
+    assert_eq!(meta["protocol"]["intent"], json!("reply"));
+    assert_eq!(meta["client_message_id"], json!("client-message-1"));
+    assert_eq!(meta["model"], json!("gpt-5.5"));
+    assert_eq!(
+        meta["token_usage"]["total_tokens"],
+        json!(token_usage.total_tokens)
+    );
+    assert_eq!(
+        meta["token_usage"]["model_context_window"],
+        json!(token_usage.model_context_window)
+    );
+    assert_eq!(
+        meta["token_usage"]["input_tokens"],
+        json!(token_usage.input_tokens)
+    );
+    assert_eq!(
+        meta["token_usage"]["output_tokens"],
+        json!(token_usage.output_tokens)
+    );
+    assert_eq!(
+        meta["token_usage"]["is_estimated"],
+        json!(token_usage.is_estimated)
+    );
+}
+
+#[test]
+fn build_exact_markdown_prompt_includes_routed_message_intent_meaning() {
+    let agent = test_agent("product", "");
+    let message = test_message_with_sender(
+        ChatSenderType::Agent,
+        Some(Uuid::new_v4()),
+        "@product Please confirm the delivery scope",
+        json!({
+            "sender": {
+                "label": "architect",
+                "name": "architect"
+            },
+            "protocol": {
+                "type": "send",
+                "to": "product",
+                "intent": "confirm"
+            }
+        }),
+    );
+
+    let prompt = ChatRunner::build_exact_markdown_prompt(
+        &agent,
+        &message,
+        Path::new(r"E:\workspace\projectSS\MainPage2\.openteams\context\demo"),
+        Path::new(r"E:\workspace\projectSS\MainPage2"),
+        &[],
+        None,
+        None,
+        &[],
+        ResolvedPromptLanguage {
+            setting: "english",
+            code: "en",
+            instruction: "You MUST respond in English.",
+        },
+        Some("Follow the team protocol."),
+        false,
+    );
+
+    assert!(prompt.contains("- intent: confirm"));
+    assert!(prompt.contains("- intent_meaning: Explicit confirmation is required."));
+    assert!(prompt.contains("## Team Protocol"));
+    assert!(prompt.contains("Follow the team protocol."));
+}
+
+#[test]
+fn build_exact_markdown_prompt_declares_active_workspace_as_project_repo() {
+    let agent = test_agent("worker", "");
+    let message = test_message("@worker inspect the repo", json!({}));
+    let workspace_path =
+        Path::new(r"C:\Users\Admin\AppData\Local\Temp\openteams-dev\worktrees\sessions\34a8ed29");
+
+    let prompt = ChatRunner::build_exact_markdown_prompt(
+        &agent,
+        &message,
+        &workspace_path
+            .join(".openteams")
+            .join("context")
+            .join("demo"),
+        workspace_path,
+        &[],
+        None,
+        None,
+        &[],
+        ResolvedPromptLanguage {
+            setting: "english",
+            code: "en",
+            instruction: "You MUST respond in English.",
+        },
+        None,
+        false,
+    );
+
+    assert!(prompt.contains("## Workspace"));
+    assert!(prompt.contains("Active workspace path"));
+    assert!(prompt.contains("Treat this active workspace path as the project repository"));
+    assert!(
+        prompt.contains(
+            r"C:\Users\Admin\AppData\Local\Temp\openteams-dev\worktrees\sessions\34a8ed29"
+        )
+    );
+}
+
+#[tokio::test]
+async fn prompt_after_worktree_discard_declares_base_workspace() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let base_workspace = "E:/workspace/base";
+    let worktree_workspace = "E:/workspace/.openteams/worktrees/session";
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_sessions (
+            id, title, status, default_workspace_path, worktree_mode
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        "#,
+    )
+    .bind(session_id)
+    .bind("discarded isolated session")
+    .bind(ChatSessionStatus::Active)
+    .bind(base_workspace)
+    .bind(ChatSessionWorktreeMode::Isolated)
+    .execute(&db.pool)
+    .await
+    .expect("insert isolated session");
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_session_agents (
+            id, session_id, agent_id, state, workspace_path
+        )
+        VALUES (?1, ?2, ?3, 'idle', ?4)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(session_id)
+    .bind(agent_id)
+    .bind(worktree_workspace)
+    .execute(&db.pool)
+    .await
+    .expect("insert session agent");
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_session_worktrees (
+            id, session_id, base_workspace_path, repo_path, base_branch,
+            branch_name, worktree_path, mode, status, merged_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'session', 'merged', datetime('now', 'subsec'))
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(session_id)
+    .bind(base_workspace)
+    .bind(base_workspace)
+    .bind("main")
+    .bind("openteams/session/test")
+    .bind(worktree_workspace)
+    .execute(&db.pool)
+    .await
+    .expect("insert merged worktree row");
+
+    SessionWorktreeService::new(db.pool.clone())
+        .discard_worktree(session_id)
+        .await
+        .expect("discard worktree");
+
+    let resolved = runner
+        .resolve_workspace_path_for_agent(
+            session_id,
+            agent_id,
+            Some(worktree_workspace.to_string()),
+        )
+        .await
+        .expect("resolve workspace");
+    assert_eq!(resolved, base_workspace);
+
+    let agent = test_agent("worker", "");
+    let message = test_message("@worker inspect the repo", json!({}));
+    let workspace_path = Path::new(&resolved);
+    let prompt = ChatRunner::build_exact_markdown_prompt(
+        &agent,
+        &message,
+        &workspace_path
+            .join(".openteams")
+            .join("context")
+            .join("demo"),
+        workspace_path,
+        &[],
+        None,
+        None,
+        &[],
+        ResolvedPromptLanguage {
+            setting: "english",
+            code: "en",
+            instruction: "You MUST respond in English.",
+        },
+        None,
+        false,
+    );
+
+    assert!(prompt.contains("Active workspace path: `E:/workspace/base`"));
+    assert!(!prompt.contains(worktree_workspace));
+}
+
+#[test]
+fn build_exact_markdown_prompt_tells_notify_receiver_not_to_reply() {
+    let agent = test_agent("coordinator", "");
+    let message = test_message_with_sender(
+        ChatSenderType::Agent,
+        Some(Uuid::new_v4()),
+        "@coordinator Frontend task is done",
+        json!({
+            "sender": {
+                "label": "frontend",
+                "name": "frontend"
+            },
+            "protocol": {
+                "type": "send",
+                "to": "coordinator",
+                "intent": "notify"
+            }
+        }),
+    );
+
+    let prompt = ChatRunner::build_exact_markdown_prompt(
+        &agent,
+        &message,
+        Path::new(r"E:\workspace\projectSS\MainPage2\.openteams\context\demo"),
+        Path::new(r"E:\workspace\projectSS\MainPage2"),
+        &[],
+        None,
+        None,
+        &[],
+        ResolvedPromptLanguage {
+            setting: "english",
+            code: "en",
+            instruction: "You MUST respond in English.",
+        },
+        Some("Follow the team protocol."),
+        false,
+    );
+
+    assert!(prompt.contains("- intent: notify"));
+    assert!(prompt.contains("- intent_meaning: Informational only. Do not send a reply."));
+    assert!(prompt.contains(
+        "- response_requirement: Notification only. Do not send a reply or acknowledgment to the sender."
+    ));
+}
+
+#[test]
+fn build_exact_markdown_prompt_includes_team_protocol_section_when_empty() {
+    let agent = test_agent("product", "You are the Product Manager.");
+    let message = test_message_with_sender(ChatSenderType::User, None, "@product hello", json!({}));
+
+    let prompt = ChatRunner::build_exact_markdown_prompt(
+        &agent,
+        &message,
+        Path::new(r"E:\workspace\projectSS\MainPage2\.openteams\context\demo"),
+        Path::new(r"E:\workspace\projectSS\MainPage2"),
+        &[],
+        None,
+        None,
+        &[],
+        ResolvedPromptLanguage {
+            setting: "english",
+            code: "en",
+            instruction: "You MUST respond in English.",
+        },
+        Some(" "),
+        false,
+    );
+
+    assert!(prompt.contains("## Team Protocol"));
+    assert!(prompt.contains("No team protocol configured."));
+}
+
+#[test]
+fn artifact_path_extraction_allows_explicit_openteams_runtime_paths() {
+    let paths = super::extract_workspace_paths_from_artifact_text(
+        "Saved `.openteams/context/demo/messages.jsonl`, `.openteams/context/demo/attachments/message-1/input.txt`, and `src/app.ts`.",
+        Path::new(r"E:\workspace\projectSS\MainPage2"),
+    );
+
+    assert!(paths.contains(&".openteams/context/demo/messages.jsonl".to_string()));
+    assert!(paths.contains(&".openteams/context/demo/attachments/message-1/input.txt".to_string()));
+    assert!(paths.contains(&"src/app.ts".to_string()));
+    assert_eq!(paths.len(), 3);
+}
+
+#[test]
+fn artifact_path_extraction_supports_json_path_lists() {
+    let paths = super::extract_workspace_paths_from_artifact_text(
+        r#"["src/app.ts","docs/report.md"]"#,
+        Path::new(r"E:\workspace\projectSS\MainPage2"),
+    );
+
+    assert_eq!(
+        paths,
+        vec!["docs/report.md".to_string(), "src/app.ts".to_string()]
+    );
+}
+
+#[test]
+fn file_change_refresh_excludes_openteams_artifact_paths() {
+    let changes = ChatRunner::file_change_entries_from_observed(&[
+        super::WorkspaceObservedPathEntry {
+            path: ".openteams/context/demo/report.md".to_string(),
+            source: "artifact_record".to_string(),
+            existed_after_run: true,
+            modified_at: None,
+        },
+        super::WorkspaceObservedPathEntry {
+            path: "src/app.ts".to_string(),
+            source: "git_diff".to_string(),
+            existed_after_run: true,
+            modified_at: None,
+        },
+    ]);
+
+    let paths = changes
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(paths, vec!["src/app.ts"]);
+}
+
+#[test]
+fn build_exact_markdown_prompt_matches_expected_input_template() {
+    let session_id = Uuid::parse_str("1475cda0-6f11-464e-a61a-7dc81217810e").expect("uuid");
+    let message_id = Uuid::parse_str("88bd7b05-1ba3-407c-8ca3-a52f14c8aced").expect("uuid");
+    let created_at = chrono::DateTime::parse_from_rfc3339("2026-03-10T06:22:12.973Z")
+        .expect("timestamp")
+        .with_timezone(&Utc);
+    let agent = ChatAgent {
+            id: Uuid::new_v4(),
+            name: "fullstack".to_string(),
+            runner_type: "codex".to_string(),
+            system_prompt: "You are the team \"Full-stack Engineer\". Your goal is to ship complete user-facing capabilities by aligning backend contracts, frontend behavior, and operational reliability.\n\n\n".to_string(),
+            model_name: None,
+            owner_project_id: None,
+            tools_enabled: sqlx::types::Json(json!({})),
+            created_at,
+            updated_at: created_at,
+        };
+    let message = ChatMessage {
+        id: message_id,
+        session_id,
+        sender_type: ChatSenderType::User,
+        sender_id: None,
+        sender_session_agent_id: None,
+        content: "@fullstack ".to_string(),
+        mentions: sqlx::types::Json(vec!["fullstack".to_string()]),
+        meta: sqlx::types::Json(json!({})),
+        created_at,
+    };
+
+    let prompt = ChatRunner::build_exact_markdown_prompt(
+        &agent,
+        &message,
+        Path::new(
+            r"E:\workspace\projectSS\MainPage2\.openteams\context\1475cda0-6f11-464e-a61a-7dc81217810e",
+        ),
+        Path::new(r"E:\workspace\projectSS\MainPage2"),
+        &[],
+        None,
+        None,
+        &[],
+        ResolvedPromptLanguage {
+            setting: "simplified_chinese",
+            code: "zh-Hans",
+            instruction: "You MUST respond in Simplified Chinese.",
+        },
+        Some("Follow the team protocol."),
+        false,
+    );
+
+    // Verify key sections exist instead of exact string match
+    assert!(prompt.starts_with("[OPENTEAMS_SOURCE=openteams]\n\n"));
+    assert_eq!(prompt.matches("[OPENTEAMS_SOURCE=openteams]").count(), 1);
+    assert!(prompt.contains("# Chat Message"));
+    assert!(prompt.contains("## Input Message"));
+    assert!(prompt.contains("- sender: you"));
+    assert!(prompt.contains("@fullstack"));
+    assert!(prompt.contains("## Output Requirements"));
+    assert!(prompt.contains("### Rules"));
+    assert!(prompt.contains("### Schema"));
+    assert!(prompt.contains("send.to"));
+    assert!(prompt.contains(
+        "Emit at most one `send` item for each `send.to` value per response, including `\"you\"` and every agent."
+    ));
+    assert!(prompt.contains(
+        "Never emit multiple `send` items with the same `send.to`; combine their content into one complete Markdown message."
+    ));
+    assert!(prompt.contains("record`: long-lived shared facts only."));
+    assert!(prompt.contains("artifact.content`: a JSON array of file paths only."));
+    assert!(prompt.contains("conclusion`: current-turn summary only"));
+    assert!(prompt.contains(PROTOCOL_OUTPUT_SCHEMA_JSON));
+    assert!(prompt.contains("### Example"));
+    assert!(!prompt.contains("## Mandatory output validation"));
+    assert!(!prompt.contains("POST $OPENTEAMS_OUTPUT_VALIDATION_URL"));
+    assert!(!prompt.contains("\"kind\": \"chat_protocol\""));
+    assert!(!prompt.contains("Do not make a fifth validation request."));
+    assert!(!prompt.contains("`workflow_generate`"));
+    assert!(prompt.contains("## Agent"));
+    assert!(prompt.contains("- name: fullstack"));
+    assert!(prompt.contains("Full-stack Engineer"));
+    assert!(prompt.contains("## Using language:"));
+    assert!(prompt.contains("simplified_chinese"));
+    assert!(prompt.contains("## Team Protocol"));
+    assert!(prompt.contains("Follow the team protocol."));
+    assert!(prompt.contains("## Group Members"));
+    assert!(prompt.contains("## History"));
+    let prompt_normalized = prompt.replace('\\', "/");
+    assert!(
+        prompt_normalized
+            .contains(".openteams/context/1475cda0-6f11-464e-a61a-7dc81217810e/messages.jsonl")
+    );
+    assert!(prompt_normalized.contains(
+        ".openteams/context/1475cda0-6f11-464e-a61a-7dc81217810e/shared_blackboard.jsonl"
+    ));
+    assert!(
+        prompt_normalized
+            .contains(".openteams/context/1475cda0-6f11-464e-a61a-7dc81217810e/work_records.jsonl")
+    );
+    assert!(prompt.contains("## Current Turn"));
+    assert!(prompt.contains("## Envelope"));
+    assert!(prompt.contains("- session_id: 1475cda0-6f11-464e-a61a-7dc81217810e"));
+    assert!(prompt.contains("- from: user:you"));
+    assert!(prompt.contains("- to: agent:fullstack"));
+    assert!(prompt.contains("- message_id: 88bd7b05-1ba3-407c-8ca3-a52f14c8aced"));
+    assert!(prompt.contains("- timestamp: 2026-03-10 06:22:12.973 UTC"));
+    assert!(
+        prompt
+            .find("## Output Requirements")
+            .expect("output requirements section")
+            < prompt
+                .find("## Current Turn")
+                .expect("current turn section")
+    );
+    assert!(
+        prompt.find("## History").expect("history section")
+            < prompt
+                .find("## Current Turn")
+                .expect("current turn section")
+    );
+}
+
+#[test]
+fn build_exact_markdown_prompt_restricts_send_targets_in_workflow_mode() {
+    let agent = test_agent("planner", "Workflow lead");
+    let message = test_message(
+        "Generate a workflow plan",
+        json!({ "chat_input_mode": "workflow" }),
+    );
+
+    let prompt = ChatRunner::build_exact_markdown_prompt(
+        &agent,
+        &message,
+        Path::new(r"E:\workspace\projectSS\MainPage2\.openteams\context\demo"),
+        Path::new(r"E:\workspace\projectSS\MainPage2"),
+        &[],
+        None,
+        None,
+        &[],
+        ResolvedPromptLanguage {
+            setting: "simplified_chinese",
+            code: "zh-Hans",
+            instruction: "You MUST respond in Simplified Chinese.",
+        },
+        None,
+        false,
+    );
+
+    assert!(prompt.contains("Workflow mode: `send.to` may only be `\"you\"`"));
+    assert!(prompt.contains(
+        "Emit at most one `send` item for each `send.to` value per response, including `\"you\"` and every agent."
+    ));
+    assert!(prompt.contains(
+        "Never emit multiple `send` items with the same `send.to`; combine their content into one complete Markdown message."
+    ));
+    assert!(prompt.contains("do not send workflow-mode messages to other agents"));
+    assert!(!prompt.contains("`send.to` must match a group member name"));
+    assert!(prompt.contains("`workflow_generate`"));
+    assert!(prompt.contains("plan_check"));
+    assert!(prompt.contains(
+        "Emit `workflow_generate` only when the user explicitly asks to start generating an execution plan."
+    ));
+    assert!(prompt.contains("`生成计划`, `开始执行`, `开始落实`, `进入执行`"));
+    assert!(!prompt.contains("## Mandatory output validation"));
+    assert!(!prompt.contains("\"kind\": \"chat_workflow_protocol\""));
+    assert!(!prompt.contains("\"workflow_generation_allowed\": true"));
+}
+
+#[test]
+fn build_exact_markdown_prompt_blocks_workflow_generation_when_execution_is_active() {
+    let agent = test_agent("planner", "Workflow lead");
+    let message = test_message(
+        "Generate another workflow plan",
+        json!({ "chat_input_mode": "workflow" }),
+    );
+
+    let prompt = ChatRunner::build_exact_markdown_prompt(
+        &agent,
+        &message,
+        Path::new(r"E:\workspace\projectSS\MainPage2\.openteams\context\demo"),
+        Path::new(r"E:\workspace\projectSS\MainPage2"),
+        &[],
+        None,
+        None,
+        &[],
+        ResolvedPromptLanguage {
+            setting: "english",
+            code: "en",
+            instruction: "You MUST respond in English.",
+        },
+        None,
+        true,
+    );
+
+    assert!(prompt.contains("A workflow execution is already active in this session"));
+    assert!(prompt.contains("`workflow_generate` is unavailable"));
+    assert!(prompt.contains(
+        "return only a `send` item addressed to `\"you\"` explaining that another workflow cannot be generated"
+    ));
+    assert!(prompt.contains(PROTOCOL_OUTPUT_SCHEMA_JSON));
+    assert!(!prompt.contains("## Mandatory output validation"));
+    assert!(!prompt.contains("\"kind\": \"chat_workflow_protocol\""));
+    assert!(!prompt.contains("\"workflow_generation_allowed\": false"));
+    assert!(!prompt.contains(r#""type": { "const": "workflow_generate" }"#));
+    assert!(!prompt.contains("Generate a workflow plan to implement the following task"));
+}
+
+#[test]
+fn build_exact_markdown_prompt_includes_output_validation_for_workflow_protocol_retry() {
+    let agent = test_agent("planner", "Workflow lead");
+    let message = test_message(
+        "Your previous response was not a valid JSON array.",
+        json!({
+            "chat_input_mode": "workflow",
+            "protocol_retry": { "attempt": 1, "previous_run_id": Uuid::new_v4() }
+        }),
+    );
+
+    let prompt = ChatRunner::build_exact_markdown_prompt(
+        &agent,
+        &message,
+        Path::new(r"E:\workspace\projectSS\MainPage2\.openteams\context\demo"),
+        Path::new(r"E:\workspace\projectSS\MainPage2"),
+        &[],
+        None,
+        None,
+        &[],
+        ResolvedPromptLanguage {
+            setting: "english",
+            code: "en",
+            instruction: "You MUST respond in English.",
+        },
+        None,
+        false,
+    );
+
+    assert!(prompt.contains("## Mandatory output validation"));
+    assert!(prompt.contains("\"kind\": \"chat_workflow_protocol\""));
+    assert!(prompt.contains("\"workflow_generation_allowed\": true"));
+}
+
+#[test]
+fn build_exact_markdown_prompt_keeps_current_turn_after_stable_prefix() {
+    let agent = test_agent("planner", "Workflow lead");
+    let first_message = test_message(
+        "Generate a workflow plan for task A",
+        json!({ "chat_input_mode": "workflow" }),
+    );
+    let second_message = test_message(
+        "Generate a workflow plan for task B",
+        json!({ "chat_input_mode": "workflow" }),
+    );
+
+    let first_prompt = ChatRunner::build_exact_markdown_prompt(
+        &agent,
+        &first_message,
+        Path::new(r"E:\workspace\projectSS\MainPage2\.openteams\context\demo"),
+        Path::new(r"E:\workspace\projectSS\MainPage2"),
+        &[],
+        None,
+        None,
+        &[],
+        ResolvedPromptLanguage {
+            setting: "simplified_chinese",
+            code: "zh-Hans",
+            instruction: "You MUST respond in Simplified Chinese.",
+        },
+        None,
+        false,
+    );
+    let second_prompt = ChatRunner::build_exact_markdown_prompt(
+        &agent,
+        &second_message,
+        Path::new(r"E:\workspace\projectSS\MainPage2\.openteams\context\demo"),
+        Path::new(r"E:\workspace\projectSS\MainPage2"),
+        &[],
+        None,
+        None,
+        &[],
+        ResolvedPromptLanguage {
+            setting: "simplified_chinese",
+            code: "zh-Hans",
+            instruction: "You MUST respond in Simplified Chinese.",
+        },
+        None,
+        false,
+    );
+
+    let first_prefix = first_prompt
+        .split_once("## Current Turn")
+        .expect("current turn section")
+        .0;
+    let second_prefix = second_prompt
+        .split_once("## Current Turn")
+        .expect("current turn section")
+        .0;
+    assert_eq!(first_prefix, second_prefix);
+    assert!(first_prompt.contains("Generate a workflow plan for task A"));
+    assert!(second_prompt.contains("Generate a workflow plan for task B"));
+}
+
+#[test]
+fn build_exact_markdown_prompt_for_protocol_retry_omits_agent_and_team_protocol_sections() {
+    let agent = test_agent("fullstack", "Full-stack Engineer");
+    let message = test_message(
+        "Your previous response was not a valid JSON array.\nPrevious input message:\n<BEGIN_INPUT_MESSAGE>\n@fullstack fix the API\n<END_INPUT_MESSAGE>",
+        json!({
+            "protocol_retry": { "attempt": 1, "previous_run_id": Uuid::new_v4() }
+        }),
+    );
+
+    let prompt = ChatRunner::build_exact_markdown_prompt(
+        &agent,
+        &message,
+        Path::new(r"E:\workspace\projectSS\MainPage2\.openteams\context\demo"),
+        Path::new(r"E:\workspace\projectSS\MainPage2"),
+        &[],
+        None,
+        None,
+        &[],
+        ResolvedPromptLanguage {
+            setting: "simplified_chinese",
+            code: "zh-Hans",
+            instruction: "You MUST respond in Simplified Chinese.",
+        },
+        Some("Follow the team protocol."),
+        false,
+    );
+
+    assert!(prompt.contains("## Input Message"));
+    assert!(prompt.contains("<BEGIN_INPUT_MESSAGE>"));
+    assert!(prompt.contains("@fullstack fix the API"));
+    assert!(prompt.contains("## Mandatory output validation"));
+    assert!(prompt.contains("POST $OPENTEAMS_OUTPUT_VALIDATION_URL"));
+    assert!(prompt.contains("\"kind\": \"chat_protocol\""));
+    assert!(prompt.contains(
+        "You may retry validation at most 3 times after the initial request (4 total validation requests)."
+    ));
+    assert!(!prompt.contains("## Agent"));
+    assert!(!prompt.contains("## Team Protocol"));
+}
+
+#[test]
+fn strip_embedded_team_protocol_from_system_prompt_removes_legacy_embedded_block() {
+    let prompt = ChatRunner::strip_embedded_team_protocol_from_system_prompt(
+        "You are the team \"Backend Engineer\".\n\n(Embedded: Team Collaboration Protocol)\nFollow the team protocol.\n\nInputs:\n- input\n\nOutput format:\n- output",
+    );
+
+    assert_eq!(
+        prompt,
+        "You are the team \"Backend Engineer\".\n\nInputs:\n- input\n\nOutput format:\n- output"
+    );
+}
+
+#[tokio::test]
+async fn capture_untracked_files_allows_user_openteams_files_but_skips_runtime_artifacts() {
+    let tempdir = tempfile::tempdir().expect("create tempdir");
+    let repo_path = tempdir.path().join("repo");
+    git2::Repository::init(&repo_path).expect("init repo");
+
+    std::fs::create_dir_all(repo_path.join("binaries")).expect("create binaries dir");
+    std::fs::write(repo_path.join("binaries").join("test.txt"), "binary\n")
+        .expect("write binaries file");
+    std::fs::create_dir_all(repo_path.join(".openteams").join("context").join("demo"))
+        .expect("create runtime dir");
+    std::fs::write(repo_path.join(".openteams").join("test.txt"), "user\n")
+        .expect("write user openteams file");
+    std::fs::write(
+        repo_path
+            .join(".openteams")
+            .join("context")
+            .join("demo")
+            .join("messages.jsonl"),
+        "runtime\n",
+    )
+    .expect("write runtime artifact");
+    std::fs::write(
+        repo_path
+            .join(".openteams")
+            .join("context")
+            .join("demo")
+            .join("independent-mode-discussion-proposal.md"),
+        "proposal\n",
+    )
+    .expect("write user proposal artifact");
+    std::fs::create_dir_all(
+        repo_path
+            .join(".openteams")
+            .join("context")
+            .join("demo")
+            .join("attachments")
+            .join("message-1"),
+    )
+    .expect("create attachment dir");
+    std::fs::write(
+        repo_path
+            .join(".openteams")
+            .join("context")
+            .join("demo")
+            .join("attachments")
+            .join("message-1")
+            .join("input.txt"),
+        "attachment\n",
+    )
+    .expect("write attachment artifact");
+
+    let run_dir = tempdir.path().join("run-record");
+    tokio::fs::create_dir_all(&run_dir)
+        .await
+        .expect("create run dir");
+
+    let session_agent_id = Uuid::new_v4();
+
+    let files =
+        ChatRunner::capture_untracked_files(&repo_path, &run_dir, session_agent_id, 1).await;
+
+    assert!(files.iter().any(|path| path == "binaries/test.txt"));
+    assert!(files.iter().any(|path| path == ".openteams/test.txt"));
+    assert!(
+        files
+            .iter()
+            .any(|path| path == ".openteams/context/demo/independent-mode-discussion-proposal.md")
+    );
+    assert!(
+        !files
+            .iter()
+            .any(|path| path == ".openteams/context/demo/messages.jsonl")
+    );
+    assert!(
+        !files
+            .iter()
+            .any(|path| path == ".openteams/context/demo/attachments/message-1/input.txt")
+    );
+    assert!(
+        !run_dir
+            .join(format!(
+                "{}_untracked",
+                ChatRunner::run_records_prefix(session_agent_id, 1)
+            ))
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn ensure_openteams_ignored_for_git_workspace_appends_entry_once() {
+    let tempdir = tempfile::tempdir().expect("create tempdir");
+    let repo_path = tempdir.path().join("repo");
+    git2::Repository::init(&repo_path).expect("init repo");
+
+    std::fs::write(repo_path.join(".gitignore"), "target/\n").expect("write gitignore");
+    let nested_workspace = repo_path.join("nested").join("workspace");
+    std::fs::create_dir_all(&nested_workspace).expect("create nested workspace");
+
+    ChatRunner::ensure_openteams_ignored_for_git_workspace(&nested_workspace)
+        .await
+        .expect("inject gitignore rule");
+    ChatRunner::ensure_openteams_ignored_for_git_workspace(&nested_workspace)
+        .await
+        .expect("avoid duplicate gitignore rule");
+
+    let gitignore = std::fs::read_to_string(repo_path.join(".gitignore")).expect("read gitignore");
+    assert_eq!(gitignore.matches(".openteams/").count(), 1);
+    assert!(gitignore.contains("target/\n.openteams/\n"));
+}
+
+#[tokio::test]
+async fn capture_git_diff_skips_patch_when_diff_matches_run_baseline() {
+    let tempdir = tempfile::tempdir().expect("create tempdir");
+    let repo_path = tempdir.path().join("repo");
+    let git = GitService::new();
+    git.initialize_repo_with_main_branch(&repo_path)
+        .expect("init repo");
+
+    std::fs::write(repo_path.join("tracked.txt"), "base\n").expect("write tracked");
+    git.commit(&repo_path, "baseline").expect("commit baseline");
+
+    std::fs::write(repo_path.join("tracked.txt"), "dirty\n").expect("modify tracked");
+
+    let baseline = ChatRunner::capture_tracked_git_diff_snapshot(&repo_path).await;
+    assert!(
+        baseline
+            .as_deref()
+            .is_some_and(|diff| diff.contains("tracked.txt"))
+    );
+
+    let run_dir = tempdir.path().join("run-record");
+    tokio::fs::create_dir_all(&run_dir)
+        .await
+        .expect("create run dir");
+
+    let session_agent_id = Uuid::new_v4();
+    let diff_info = ChatRunner::capture_git_diff(
+        &repo_path,
+        &run_dir,
+        session_agent_id,
+        1,
+        baseline.as_deref(),
+    )
+    .await;
+
+    assert!(diff_info.is_none());
+    assert!(
+        !run_dir
+            .join(format!(
+                "{}_diff.patch",
+                ChatRunner::run_records_prefix(session_agent_id, 1)
+            ))
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn capture_git_diff_records_only_paths_changed_since_run_baseline() {
+    let tempdir = tempfile::tempdir().expect("create tempdir");
+    let repo_path = tempdir.path().join("repo");
+    let git = GitService::new();
+    git.initialize_repo_with_main_branch(&repo_path)
+        .expect("init repo");
+
+    std::fs::write(repo_path.join("other_session.txt"), "base\n").expect("write other file");
+    std::fs::write(repo_path.join("current_session.txt"), "base\n").expect("write current file");
+    git.commit(&repo_path, "baseline").expect("commit baseline");
+
+    std::fs::write(repo_path.join("other_session.txt"), "other dirty\n")
+        .expect("modify other file");
+    let baseline = ChatRunner::capture_tracked_git_diff_snapshot(&repo_path).await;
+    assert!(
+        baseline
+            .as_deref()
+            .is_some_and(|diff| diff.contains("other_session.txt"))
+    );
+
+    std::fs::write(repo_path.join("current_session.txt"), "current dirty\n")
+        .expect("modify current file");
+
+    let run_dir = tempdir.path().join("run-record");
+    tokio::fs::create_dir_all(&run_dir)
+        .await
+        .expect("create run dir");
+    let session_agent_id = Uuid::new_v4();
+
+    let diff_info = ChatRunner::capture_git_diff(
+        &repo_path,
+        &run_dir,
+        session_agent_id,
+        1,
+        baseline.as_deref(),
+    )
+    .await
+    .expect("capture current-session diff");
+
+    assert_eq!(
+        diff_info.observed_paths,
+        vec!["current_session.txt".to_string()]
+    );
+
+    let patch = std::fs::read_to_string(run_dir.join(format!(
+        "{}_diff.patch",
+        ChatRunner::run_records_prefix(session_agent_id, 1)
+    )))
+    .expect("read filtered patch");
+    assert!(patch.contains("current_session.txt"));
+    assert!(!patch.contains("other_session.txt"));
+}
+
+#[tokio::test]
+async fn capture_untracked_files_can_be_filtered_against_run_baseline() {
+    let tempdir = tempfile::tempdir().expect("create tempdir");
+    let repo_path = tempdir.path().join("repo");
+    let git = GitService::new();
+    git.initialize_repo_with_main_branch(&repo_path)
+        .expect("init repo");
+
+    std::fs::write(repo_path.join("tracked.txt"), "base\n").expect("write tracked");
+    git.commit(&repo_path, "baseline").expect("commit baseline");
+
+    std::fs::write(repo_path.join("other_session_new.txt"), "other\n")
+        .expect("write other untracked");
+    let baseline = ChatRunner::capture_untracked_file_snapshot(&repo_path).await;
+    assert_eq!(baseline, vec!["other_session_new.txt".to_string()]);
+
+    std::fs::write(repo_path.join("current_session_new.txt"), "current\n")
+        .expect("write current untracked");
+    let after = ChatRunner::capture_untracked_file_snapshot(&repo_path).await;
+    let baseline_set = baseline.iter().collect::<std::collections::HashSet<_>>();
+    let filtered = after
+        .into_iter()
+        .filter(|path| !baseline_set.contains(path))
+        .collect::<Vec<_>>();
+
+    assert_eq!(filtered, vec!["current_session_new.txt".to_string()]);
+}
+
+#[test]
+fn pi_agent_type_is_recognized_in_chat_agent_configuration() {
+    use executors::executors::BaseCodingAgent;
+    let agent = ChatAgent {
+        runner_type: "PI".to_string(),
+        ..test_agent("pi-test", "system")
+    };
+    assert_eq!(
+        agent.runner_type.parse::<BaseCodingAgent>(),
+        Ok(BaseCodingAgent::Pi)
+    );
+}
+
+#[test]
+fn pi_acp_quota_token_usage_is_parsed_for_free_chat_records() {
+    let line = r#"{"type":"token_usage","total_tokens":35,"model_context_window":0,"input_tokens":10,"output_tokens":20,"runtime_agent":"pi","runtime_model_id":"offline-model","usage_scope":"turn_delta"}"#;
+    let usage = ChatRunner::parse_token_usage_from_stdout_line(line).expect("usage");
+    assert_eq!(usage.total_tokens, 35);
+    assert_eq!(usage.input_tokens, Some(10));
+    assert_eq!(usage.output_tokens, Some(20));
+    assert_eq!(usage.runtime_agent.as_deref(), Some("pi"));
+    assert_eq!(usage.runtime_model_id.as_deref(), Some("offline-model"));
+}
+
+#[test]
+fn pi_session_follow_up_uses_acp_session_load_semantics() {
+    use std::io;
+
+    use executors::executors::{BaseCodingAgent, ExecutorError};
+
+    let agent = ChatAgent {
+        runner_type: "PI".to_string(),
+        ..test_agent("pi-followup", "system")
+    };
+    assert_eq!(
+        agent.runner_type.parse::<BaseCodingAgent>(),
+        Ok(BaseCodingAgent::Pi)
+    );
+
+    let follow_up_error = ExecutorError::FollowUpNotSupported(
+        "Pi ACP could not reuse the requested session: I/O error: ACP startup failed: Unknown sessionId: stale"
+            .to_string(),
+    );
+    assert!(
+        matches!(follow_up_error, ExecutorError::FollowUpNotSupported(_)),
+        "Pi follow-up failure must be FollowUpNotSupported variant"
+    );
+    let display = format!("{follow_up_error}");
+    assert!(display.contains("Follow-up is not supported"));
+    assert!(display.contains("Unknown sessionId"));
+
+    let startup_error =
+        ExecutorError::Io(io::Error::other("ACP startup failed: connection refused"));
+    assert!(
+        !matches!(startup_error, ExecutorError::FollowUpNotSupported(_)),
+        "ACP startup failure must not be classified as FollowUpNotSupported"
+    );
+}
+
+#[test]
+fn pi_layered_error_mapping_preserves_acp_startup_failures() {
+    use std::io;
+
+    use executors::executors::ExecutorError;
+
+    let startup_io = ExecutorError::Io(io::Error::other("ACP startup failed: connection refused"));
+    let display = format!("{startup_io}");
+    assert!(
+        display.contains("ACP startup failed"),
+        "ACP startup failure must preserve prefix in Display: {display}"
+    );
+
+    let auth_error = ExecutorError::AuthRequired("ACP startup failed: AuthRequired".to_string());
+    assert!(
+        matches!(auth_error, ExecutorError::AuthRequired(_)),
+        "ACP auth failure must be AuthRequired variant"
+    );
+    assert!(
+        !matches!(auth_error, ExecutorError::Io(_)),
+        "ACP auth failure must not be Io variant"
+    );
+
+    let follow_up = ExecutorError::FollowUpNotSupported(
+        "Pi ACP could not reuse the requested session: stale-id".to_string(),
+    );
+    let fu_display = format!("{follow_up}");
+    assert!(fu_display.contains("Follow-up is not supported"));
+    assert!(fu_display.contains("Pi ACP could not reuse"));
+
+    assert!(
+        !matches!(
+            startup_io,
+            ExecutorError::FollowUpNotSupported(_) | ExecutorError::AuthRequired(_)
+        ),
+        "Io, FollowUpNotSupported, and AuthRequired must be distinct variants"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn pi_free_chat_dispatches_through_service_and_projects_records() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use db::models::chat_session_agent::CreateChatSessionAgent;
+
+    let _fixture_lock = super::PI_FIXTURE_TEST_LOCK.lock().await;
+
+    const PI_FIXTURE_DIR: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../executors/tests/fixtures/pi_acp"
+    );
+
+    let temp = tempfile::tempdir().expect("pi qa workspace");
+    let root = temp.path();
+
+    let bin = root.join("bin");
+    let nm_bin = root.join("node_modules/.bin");
+    let pi_pkg = root.join("node_modules/@earendil-works/pi-coding-agent");
+    let mcp_pkg = root.join("node_modules/pi-mcp-adapter");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&nm_bin).unwrap();
+    std::fs::create_dir_all(&pi_pkg).unwrap();
+    std::fs::create_dir_all(&mcp_pkg).unwrap();
+
+    std::fs::write(pi_pkg.join("package.json"), r#"{"version":"0.83.0"}"#).unwrap();
+    std::fs::write(mcp_pkg.join("package.json"), r#"{"version":"2.18.0"}"#).unwrap();
+    std::fs::write(mcp_pkg.join("index.ts"), "export default () => {};").unwrap();
+
+    let mode = 0o755;
+    let npx_path = bin.join("npx");
+    std::fs::write(
+        &npx_path,
+        std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_npx.sh")).unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&npx_path, std::fs::Permissions::from_mode(mode)).unwrap();
+
+    let pi_acp_path = bin.join("pi-acp");
+    std::fs::write(
+        &pi_acp_path,
+        std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi_acp.mjs")).unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&pi_acp_path, std::fs::Permissions::from_mode(mode)).unwrap();
+
+    let pi_bin_path = nm_bin.join("pi");
+    std::fs::write(
+        &pi_bin_path,
+        std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi.mjs")).unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&pi_bin_path, std::fs::Permissions::from_mode(mode)).unwrap();
+
+    let mcp_bin_path = nm_bin.join("pi-mcp-adapter");
+    std::fs::write(
+        &mcp_bin_path,
+        std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi_mcp_adapter.mjs")).unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&mcp_bin_path, std::fs::Permissions::from_mode(mode)).unwrap();
+
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let prompts = root.join("prompts.txt");
+    let pids = root.join("pids.json");
+    let session_file = root.join("sessions/session.jsonl");
+    let perm_log = root.join("permissions.jsonl");
+    let proto_log = root.join("protocol.jsonl");
+
+    unsafe {
+        std::env::set_var("OPENTEAMS_PI_QA_NPX_PATH", &npx_path);
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}:{}",
+                bin.display(),
+                nm_bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        std::env::set_var("HOME", root.join("home"));
+        std::env::set_var("OPENTEAMS_FAKE_PI_PROMPTS", &prompts);
+        std::env::set_var("OPENTEAMS_FAKE_PI_CHILD_PID_FILE", &pids);
+        std::env::set_var("OPENTEAMS_FAKE_PI_SESSION_FILE", &session_file);
+        std::env::set_var("OPENTEAMS_FAKE_PI_PERMISSION_LOG", &perm_log);
+        std::env::set_var("OPENTEAMS_FAKE_PI_PROTOCOL_LOG", &proto_log);
+        std::env::set_var("OPENTEAMS_FAKE_PI_CHAT_PROTOCOL", "1");
+    }
+
+    let db = setup_chat_runner_db().await;
+    let session_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO chat_sessions (id, title, status, default_workspace_path, worktree_mode)
+           VALUES (?, ?, ?, ?, ?)"#,
+    )
+    .bind(session_id)
+    .bind("pi service test")
+    .bind(ChatSessionStatus::Active)
+    .bind(workspace.to_string_lossy().to_string())
+    .bind(ChatSessionWorktreeMode::Disabled)
+    .execute(&db.pool)
+    .await
+    .expect("insert session");
+
+    let agent = ChatAgent::create(
+        &db.pool,
+        &CreateChatAgent {
+            name: "Pi Agent".to_string(),
+            runner_type: "PI".to_string(),
+            system_prompt: Some("You are Pi.".to_string()),
+            tools_enabled: Some(json!({})),
+            model_name: None,
+            owner_project_id: None,
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create pi agent");
+
+    let session_agent = ChatSessionAgent::create(
+        &db.pool,
+        &CreateChatSessionAgent {
+            session_id,
+            agent_id: agent.id,
+            member_name: Some("Pi".to_string()),
+            workspace_path: Some(workspace.to_string_lossy().to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig {
+                mcp: Some(Default::default()),
+                ..Default::default()
+            },
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create session agent");
+
+    sqlx::query("UPDATE chat_sessions SET lead_session_agent_id = ? WHERE id = ?")
+        .bind(session_agent.id)
+        .bind(session_id)
+        .execute(&db.pool)
+        .await
+        .expect("set lead session agent");
+
+    let session = ChatSession::find_by_id(&db.pool, session_id)
+        .await
+        .expect("read Pi chat session")
+        .expect("Pi chat session exists");
+
+    let runner = ChatRunner::new(db.clone());
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@Pi hello pi".to_string(),
+        None,
+    )
+    .await
+    .expect("create message");
+
+    runner.handle_message(&session, &message).await;
+
+    let mut run_completed = false;
+    for _ in 0..150 {
+        let sa = ChatSessionAgent::find_by_id(&db.pool, session_agent.id)
+            .await
+            .expect("find sa")
+            .expect("sa exists");
+        if sa.agent_session_id.is_some()
+            && (sa.state == ChatSessionAgentState::Idle || sa.state == ChatSessionAgentState::Dead)
+        {
+            run_completed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let sa = ChatSessionAgent::find_by_id(&db.pool, session_agent.id)
+        .await
+        .expect("find sa")
+        .expect("sa exists");
+    if !run_completed {
+        let run_dirs = sqlx::query_scalar::<_, String>(
+            "SELECT run_dir FROM chat_runs WHERE session_agent_id = ? ORDER BY run_index",
+        )
+        .bind(session_agent.id)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read Pi run directories");
+        panic!(
+            "Pi agent run did not complete; state={:?}, has_session_id={}, run_dirs={run_dirs:?}",
+            sa.state,
+            sa.agent_session_id.is_some()
+        );
+    }
+    assert_eq!(sa.state, ChatSessionAgentState::Idle);
+    assert!(
+        sa.agent_session_id.is_some(),
+        "session ID must be persisted"
+    );
+    assert_eq!(sa.agent_session_id.as_deref(), Some("pi-offline-session"));
+
+    let messages = sqlx::query_as::<_, (String, String)>(
+        "SELECT sender_type, content FROM chat_messages WHERE session_id = ? ORDER BY created_at",
+    )
+    .bind(session_id)
+    .fetch_all(&db.pool)
+    .await
+    .expect("fetch messages");
+    assert!(
+        messages
+            .iter()
+            .any(|(st, c)| st == "agent" && c.contains("echo:") && c.contains("@Pi hello pi")),
+        "agent message must contain echo response: {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|(_, content)| content.contains("响应格式无效")),
+        "valid Pi protocol output must not trigger a parsing retry: {messages:?}"
+    );
+
+    let run = sqlx::query_as::<_, (Uuid,)>(
+        "SELECT id FROM chat_runs WHERE session_agent_id = ? ORDER BY run_index DESC LIMIT 1",
+    )
+    .bind(session_agent.id)
+    .fetch_optional(&db.pool)
+    .await
+    .expect("fetch run");
+    assert!(run.is_some(), "chat run record must exist");
+
+    let prompts_content = std::fs::read_to_string(&prompts).expect("read prompts");
+    assert!(
+        prompts_content.contains("hello pi"),
+        "prompts file must record the prompt: {prompts_content}"
+    );
+
+    unsafe {
+        std::env::remove_var("OPENTEAMS_PI_QA_NPX_PATH");
+        std::env::remove_var("OPENTEAMS_FAKE_PI_CHAT_PROTOCOL");
+    }
+}
+
+struct ChatStartupBoundaryResult {
+    _workspace: tempfile::TempDir,
+    db: DBService,
+    session_id: Uuid,
+    session_agent_id: Uuid,
+    error: String,
+    spawn_attempts: usize,
+    state: ChatSessionAgentState,
+    tracing: String,
+    events: Vec<ChatStreamEvent>,
+}
+
+async fn run_chat_startup_until_spawn_boundary(
+    runner_type: &str,
+    mcp: Option<MemberMcpConfig>,
+    adapter_diagnostic: Option<String>,
+) -> ChatStartupBoundaryResult {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let db = setup_migrated_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    runner
+        .block_executor_spawn
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    runner.set_mcp_preparation_diagnostic_for_test(adapter_diagnostic);
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let mut events = runner.subscribe(session_id);
+    let agent = insert_test_chat_agent(&db, "McpTarget").await;
+    sqlx::query("UPDATE chat_agents SET runner_type = ?2 WHERE id = ?1")
+        .bind(agent.id)
+        .bind(runner_type)
+        .execute(&db.pool)
+        .await
+        .expect("set test runner type");
+    let session_agent = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: agent.id,
+            member_name: Some("McpTarget".to_string()),
+            workspace_path: Some(workspace.path().to_string_lossy().to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig {
+                mcp,
+                ..Default::default()
+            },
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create MCP target");
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@McpTarget verify preparation order".to_string(),
+        None,
+    )
+    .await
+    .expect("create MCP test message");
+
+    let tracing = TracingCapture::start();
+    let error = runner
+        .run_agent_for_mention(session_id, "McpTarget", 0, &message)
+        .await
+        .expect_err("startup must stop at the expected boundary")
+        .to_string();
+    let tracing = tracing.finish();
+    let spawn_attempts = runner
+        .executor_spawn_attempts
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let state = ChatSessionAgent::find_by_id(&db.pool, session_agent.id)
+        .await
+        .expect("read MCP target")
+        .expect("MCP target exists")
+        .state;
+    let events = std::iter::from_fn(|| events.try_recv().ok()).collect();
+    ChatStartupBoundaryResult {
+        _workspace: workspace,
+        db,
+        session_id,
+        session_agent_id: session_agent.id,
+        error,
+        spawn_attempts,
+        state,
+        tracing,
+        events,
+    }
+}
+
+#[tokio::test]
+async fn chat_lifecycle_prepares_mcp_before_any_executor_spawn() {
+    let missing = run_chat_startup_until_spawn_boundary("CODEX", None, None).await;
+    assert!(missing.error.contains("not initialized"));
+    assert_eq!(missing.spawn_attempts, 0);
+    assert_eq!(missing.state, ChatSessionAgentState::Dead);
+
+    let codex =
+        run_chat_startup_until_spawn_boundary("CODEX", Some(Default::default()), None).await;
+    assert!(codex.error.contains("test blocked executor spawn"));
+    assert_eq!(codex.spawn_attempts, 1);
+    assert_eq!(codex.state, ChatSessionAgentState::Dead);
+
+    let spawn = run_chat_startup_until_spawn_boundary("PI", Some(Default::default()), None).await;
+    assert!(spawn.error.contains("test blocked executor spawn"));
+    assert_eq!(spawn.spawn_attempts, 1);
+    assert_eq!(spawn.state, ChatSessionAgentState::Dead);
+}
+
+#[tokio::test]
+async fn chat_mcp_preparation_failure_redacts_canonical_and_adapter_secrets_everywhere() {
+    let canonical = canonical_mcp_config_with_fake_secrets();
+    let expected_hash = canonical_mcp_server_map_hash(&canonical).expect("canonical MCP hash");
+    let result = run_chat_startup_until_spawn_boundary(
+        "PI",
+        Some(canonical),
+        Some(format!(
+            "adapter stderr echoed {ADAPTER_DIAGNOSTIC_SECRET} and {CANONICAL_MCP_SECRET}"
+        )),
+    )
+    .await;
+
+    assert_eq!(result.spawn_attempts, 0);
+    assert_eq!(result.state, ChatSessionAgentState::Dead);
+
+    let event_surface = serde_json::to_string(&result.events).expect("serialize chat events");
+    let messages = sqlx::query_as::<_, (String, String)>(
+        "SELECT content, CAST(meta AS TEXT) FROM chat_messages WHERE session_id = ?1",
+    )
+    .bind(result.session_id)
+    .fetch_all(&result.db.pool)
+    .await
+    .expect("read chat transcript surfaces");
+    let queue_failures = sqlx::query_scalar::<_, String>(
+        "SELECT COALESCE(failure_reason, '') FROM chat_message_queue WHERE session_agent_id = ?1",
+    )
+    .bind(result.session_agent_id)
+    .fetch_all(&result.db.pool)
+    .await
+    .expect("read queue failure surfaces");
+    let inbox_items = sqlx::query_as::<_, (String, String)>(
+        "SELECT title, COALESCE(body, '') FROM inbox_items WHERE session_id = ?1",
+    )
+    .bind(result.session_id)
+    .fetch_all(&result.db.pool)
+    .await
+    .expect("read inbox failure surfaces");
+    let run = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+        r#"
+        SELECT run_dir, meta_path, raw_log_path, retention_summary_json
+        FROM chat_runs
+        WHERE session_agent_id = ?1
+        ORDER BY run_index DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(result.session_agent_id)
+    .fetch_one(&result.db.pool)
+    .await
+    .expect("read failed chat run");
+    let mut artifacts = String::new();
+    for entry in std::fs::read_dir(&run.0).expect("read failed chat run directory") {
+        let path = entry.expect("run artifact entry").path();
+        if path.is_file()
+            && let Ok(content) = std::fs::read_to_string(&path)
+        {
+            artifacts.push_str(&content);
+        }
+    }
+    for path in [run.1.as_deref(), run.2.as_deref()].into_iter().flatten() {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            artifacts.push_str(&content);
+        }
+    }
+    let persisted_surface = serde_json::to_string(&serde_json::json!({
+        "messages": messages,
+        "queue_failures": queue_failures,
+        "inbox_items": inbox_items,
+        "retention_summary": run.3,
+        "artifacts": artifacts,
+    }))
+    .expect("serialize persisted chat surfaces");
+
+    for (label, surface) in [
+        ("returned error", result.error.as_str()),
+        ("tracing", result.tracing.as_str()),
+        ("stream events", event_surface.as_str()),
+        ("persisted chat records", persisted_surface.as_str()),
+    ] {
+        assert!(
+            !surface.contains(CANONICAL_MCP_SECRET),
+            "{label} leaked the canonical MCP secret: {surface}"
+        );
+        assert!(
+            !surface.contains(ADAPTER_DIAGNOSTIC_SECRET),
+            "{label} leaked the adapter diagnostic secret: {surface}"
+        );
+        assert!(
+            surface.contains(&expected_hash),
+            "{label} omitted the safe MCP hash"
+        );
+        assert!(
+            surface.contains("mcp_server_count=2"),
+            "{label} omitted the server count"
+        );
+        assert!(
+            surface.contains("local-safe-name"),
+            "{label} omitted a safe server name"
+        );
+        assert!(
+            surface.contains("remote-safe-name"),
+            "{label} omitted a safe server name"
+        );
+    }
+}

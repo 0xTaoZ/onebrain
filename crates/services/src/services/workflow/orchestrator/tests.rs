@@ -1,0 +1,1666 @@
+use chrono::Utc;
+use db::{
+    DBService,
+    models::{
+        chat_session::{ChatSession, CreateChatSession},
+        chat_session_agent::{ChatSessionAgent, ChatSessionAgentState},
+        member_execution_config::MemberExecutionConfig,
+        workflow_event::WorkflowEvent,
+        workflow_execution::{CreateWorkflowExecution, WorkflowExecution},
+        workflow_loop::{CreateWorkflowLoop, WorkflowLoop},
+        workflow_plan::{CreateWorkflowPlan, WorkflowPlan},
+        workflow_plan_revision::{CreateWorkflowPlanRevision, WorkflowPlanRevision},
+        workflow_round::{CreateWorkflowRound, WorkflowRound},
+        workflow_step::{CreateWorkflowStep, WorkflowStep},
+        workflow_step_edge::WorkflowStepEdge,
+        workflow_transcript::{CreateWorkflowTranscript, WorkflowTranscript},
+        workflow_types::*,
+    },
+};
+use sqlx::{SqlitePool, types::Json};
+use uuid::Uuid;
+
+use super::{
+    super::workflow_runtime::{
+        WorkflowAcceptanceResult, WorkflowAcceptanceVerdict, WorkflowRevisionFeedbackSource,
+        workflow_review_attempt_limit_reached,
+    },
+    step_executor::RevisionReviewDetails,
+    step_input::StepFollowUpMode,
+    *,
+};
+
+fn test_session_agent(agent_id: Uuid, member_name: &str) -> ChatSessionAgent {
+    ChatSessionAgent {
+        id: Uuid::new_v4(),
+        session_id: Uuid::new_v4(),
+        agent_id,
+        state: ChatSessionAgentState::Idle,
+        workspace_path: None,
+        pty_session_key: None,
+        agent_session_id: None,
+        agent_message_id: None,
+        project_member_id: None,
+        member_name: member_name.to_string(),
+        execution_config: Json(MemberExecutionConfig::default()),
+        allowed_skill_ids: Json(Vec::new()),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    }
+}
+
+#[test]
+fn workflow_agent_identity_helpers_keep_shared_execution_profiles_distinct() {
+    let shared_agent_id = Uuid::new_v4();
+    let solo_agent_id = Uuid::new_v4();
+    let backend = test_session_agent(shared_agent_id, "BackendMember");
+    let reviewer = test_session_agent(shared_agent_id, "ReviewMember");
+    let solo = test_session_agent(solo_agent_id, "SoloMember");
+    let session_agents = vec![backend.clone(), reviewer.clone(), solo.clone()];
+
+    let valid_agent_ids = workflow_valid_agent_ids(&session_agents);
+    assert!(valid_agent_ids.contains(&backend.id.to_string()));
+    assert!(valid_agent_ids.contains(&reviewer.id.to_string()));
+    assert!(valid_agent_ids.contains(&solo.id.to_string()));
+    assert!(!valid_agent_ids.contains(&shared_agent_id.to_string()));
+    assert!(valid_agent_ids.contains(&solo_agent_id.to_string()));
+
+    let agent_id_map = workflow_agent_id_map(&session_agents);
+    assert_eq!(agent_id_map.get(&backend.id.to_string()), Some(&backend.id));
+    assert_eq!(
+        agent_id_map.get(&reviewer.id.to_string()),
+        Some(&reviewer.id)
+    );
+    assert!(!agent_id_map.contains_key(&shared_agent_id.to_string()));
+    assert_eq!(agent_id_map.get(&solo_agent_id.to_string()), Some(&solo.id));
+
+    let names = workflow_agent_name_lookup(&session_agents);
+    assert_eq!(
+        names.get(&backend.id.to_string()).map(String::as_str),
+        Some("BackendMember")
+    );
+    assert_eq!(
+        names.get(&reviewer.id.to_string()).map(String::as_str),
+        Some("ReviewMember")
+    );
+    assert!(!names.contains_key(&shared_agent_id.to_string()));
+}
+
+#[test]
+fn review_node_assignment_projects_non_lead_member_as_reviewer() {
+    let reviewer_session_agent_id = Uuid::new_v4();
+    let review_assignment = reviewer_session_agent_id.to_string();
+    let compiled_steps = vec![CompiledStep {
+        step_key: "review".to_string(),
+        step_type: WorkflowStepType::Review,
+        title: "Review".to_string(),
+        instructions: "Independently verify outputs".to_string(),
+        assigned_agent_id: Some(review_assignment.clone()),
+        acceptance: None,
+        outputs: None,
+        interruptible: true,
+        max_retry: 1,
+        display_order: 0,
+        loop_key: Some("loop-a".to_string()),
+        review_scope: Some(vec!["task".to_string()]),
+    }];
+
+    assert_eq!(
+        workflow_agent_session_role_for_assignment(
+            &compiled_steps,
+            Some(Uuid::new_v4()),
+            reviewer_session_agent_id,
+            &review_assignment,
+        ),
+        WorkflowAgentSessionRole::Reviewer
+    );
+}
+
+#[test]
+fn lead_assigned_task_skips_default_lead_review() {
+    let lead_session_agent_id = Uuid::new_v4();
+    let worker_session_agent_id = Uuid::new_v4();
+    let lead_assignment = lead_session_agent_id.to_string();
+    let worker_assignment = worker_session_agent_id.to_string();
+    let agent_id_map = HashMap::from([
+        (lead_assignment.clone(), lead_session_agent_id),
+        (worker_assignment.clone(), worker_session_agent_id),
+    ]);
+
+    assert_eq!(
+        default_step_review_requirements(
+            &WorkflowStepType::Task,
+            Some(&lead_assignment),
+            Some(lead_session_agent_id),
+            &agent_id_map,
+        ),
+        (false, true)
+    );
+    assert_eq!(
+        default_step_review_requirements(
+            &WorkflowStepType::Task,
+            None,
+            Some(lead_session_agent_id),
+            &agent_id_map,
+        ),
+        (false, true)
+    );
+    assert_eq!(
+        default_step_review_requirements(
+            &WorkflowStepType::Task,
+            Some(&worker_assignment),
+            Some(lead_session_agent_id),
+            &agent_id_map,
+        ),
+        (true, true)
+    );
+    assert_eq!(
+        default_step_review_requirements(
+            &WorkflowStepType::Review,
+            Some(&worker_assignment),
+            Some(lead_session_agent_id),
+            &agent_id_map,
+        ),
+        (false, false)
+    );
+}
+
+#[tokio::test]
+async fn scheduler_recovery_retries_transient_failure_then_succeeds() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let wake_attempts = Arc::new(AtomicUsize::new(0));
+    let recorded_sleeps = Arc::new(AtomicUsize::new(0));
+    let wake_attempts_for_call = wake_attempts.clone();
+    let recorded_sleeps_for_call = recorded_sleeps.clone();
+
+    let outcome = WorkflowOrchestrator::run_scheduler_recovery(
+        Uuid::new_v4(),
+        || std::future::ready(Ok(Some(WorkflowExecutionStatus::Running))),
+        move || {
+            let attempt = wake_attempts_for_call.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(if attempt == 0 {
+                Err(OrchestratorError::Database(sqlx::Error::PoolTimedOut))
+            } else {
+                Ok(())
+            })
+        },
+        move |_| {
+            recorded_sleeps_for_call.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(())
+        },
+    )
+    .await;
+
+    assert_eq!(outcome, SchedulerRecoveryOutcome::Succeeded);
+    assert_eq!(wake_attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(recorded_sleeps.load(Ordering::SeqCst), 1);
+    assert!(is_retryable_scheduler_error(&OrchestratorError::Runtime(
+        WorkflowRuntimeError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "temporary runtime timeout",
+        ))
+    )));
+}
+
+#[tokio::test]
+async fn scheduler_recovery_exits_on_permanent_error_without_retrying() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let wake_attempts = Arc::new(AtomicUsize::new(0));
+    let wake_attempts_for_call = wake_attempts.clone();
+    let outcome = WorkflowOrchestrator::run_scheduler_recovery(
+        Uuid::new_v4(),
+        || std::future::ready(Ok(Some(WorkflowExecutionStatus::Running))),
+        move || {
+            wake_attempts_for_call.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Err(OrchestratorError::IllegalTransition(
+                "permanent invalid state".to_string(),
+            )))
+        },
+        |_| std::future::ready(()),
+    )
+    .await;
+
+    assert_eq!(outcome, SchedulerRecoveryOutcome::PermanentFailure);
+    assert_eq!(wake_attempts.load(Ordering::SeqCst), 1);
+    assert!(!is_retryable_scheduler_error(&OrchestratorError::NotFound(
+        "missing execution".to_string()
+    )));
+}
+
+#[tokio::test]
+async fn scheduler_recovery_stops_after_transient_retry_limit() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let wake_attempts = Arc::new(AtomicUsize::new(0));
+    let wake_attempts_for_call = wake_attempts.clone();
+    let outcome = WorkflowOrchestrator::run_scheduler_recovery(
+        Uuid::new_v4(),
+        || std::future::ready(Ok(Some(WorkflowExecutionStatus::Running))),
+        move || {
+            wake_attempts_for_call.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Err(OrchestratorError::Database(sqlx::Error::PoolTimedOut)))
+        },
+        |_| std::future::ready(()),
+    )
+    .await;
+
+    assert_eq!(outcome, SchedulerRecoveryOutcome::RetryLimitReached);
+    assert_eq!(
+        wake_attempts.load(Ordering::SeqCst),
+        SCHEDULER_RECOVERY_MAX_ATTEMPTS as usize
+    );
+}
+
+#[tokio::test]
+async fn scheduler_recovery_exits_before_wake_for_terminal_or_missing_execution() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let terminal_wakes = Arc::new(AtomicUsize::new(0));
+    let terminal_wakes_for_call = terminal_wakes.clone();
+    let terminal_outcome = WorkflowOrchestrator::run_scheduler_recovery(
+        Uuid::new_v4(),
+        || std::future::ready(Ok(Some(WorkflowExecutionStatus::Completed))),
+        move || {
+            terminal_wakes_for_call.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(()))
+        },
+        |_| std::future::ready(()),
+    )
+    .await;
+    assert_eq!(
+        terminal_outcome,
+        SchedulerRecoveryOutcome::ExecutionTerminal
+    );
+    assert_eq!(terminal_wakes.load(Ordering::SeqCst), 0);
+
+    let missing_wakes = Arc::new(AtomicUsize::new(0));
+    let missing_wakes_for_call = missing_wakes.clone();
+    let missing_outcome = WorkflowOrchestrator::run_scheduler_recovery(
+        Uuid::new_v4(),
+        || std::future::ready(Ok(None)),
+        move || {
+            missing_wakes_for_call.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(()))
+        },
+        |_| std::future::ready(()),
+    )
+    .await;
+    assert_eq!(missing_outcome, SchedulerRecoveryOutcome::ExecutionMissing);
+    assert_eq!(missing_wakes.load(Ordering::SeqCst), 0);
+}
+
+struct StopFixture {
+    db: DBService,
+    execution: WorkflowExecution,
+    running_step_id: Uuid,
+    review_step_id: Uuid,
+    ready_step_id: Uuid,
+}
+
+async fn seed_workflow_stop_fixture() -> StopFixture {
+    let pool = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("create sqlite memory pool");
+    sqlx::migrate!("../db/migrations")
+        .run(&pool)
+        .await
+        .expect("run migrations");
+    let db = DBService { pool };
+    let session = ChatSession::create(
+        &db.pool,
+        &CreateChatSession {
+            title: Some("stop fixture".to_string()),
+            workspace_path: None,
+            project_id: None,
+            worktree_mode: None,
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create session");
+    let plan_json = serde_json::json!({
+        "version": "1",
+        "title": "Stop fixture",
+        "goal": "Test terminal stop",
+        "agents": { "lead": "lead", "available": [] },
+        "nodes": [],
+        "edges": []
+    })
+    .to_string();
+    let plan = WorkflowPlan::create(
+        &db.pool,
+        &CreateWorkflowPlan {
+            session_id: session.id,
+            source_message_id: None,
+            created_by_session_agent_id: None,
+            title: "Stop fixture".to_string(),
+            summary_text: None,
+            plan_json: plan_json.clone(),
+            plan_schema_version: 1,
+            plan_hash: "stop-fixture".to_string(),
+            validation_status: WorkflowValidationStatus::Valid,
+            validation_errors_json: None,
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create plan");
+    let revision = WorkflowPlanRevision::create(
+        &db.pool,
+        &CreateWorkflowPlanRevision {
+            plan_id: plan.id,
+            revision_no: 1,
+            edited_by: WorkflowRevisionEditor::System,
+            editor_session_agent_id: None,
+            reason: Some("test".to_string()),
+            plan_json,
+            plan_hash: "stop-fixture".to_string(),
+            validation_status: WorkflowValidationStatus::Valid,
+            validation_errors_json: None,
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create revision");
+    let execution = WorkflowExecution::create(
+        &db.pool,
+        &CreateWorkflowExecution {
+            session_id: session.id,
+            plan_id: plan.id,
+            active_revision_id: Some(revision.id),
+            lead_session_agent_id: None,
+            title: "Stop fixture".to_string(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create execution");
+    let round = WorkflowRound::create(
+        &db.pool,
+        &CreateWorkflowRound {
+            execution_id: execution.id,
+            round_index: 1,
+            source_revision_id: Some(revision.id),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create round");
+    let execution = WorkflowExecution::update_active_round(&db.pool, execution.id, round.id, 1)
+        .await
+        .expect("activate round");
+    let execution =
+        WorkflowExecution::update_status(&db.pool, execution.id, WorkflowExecutionStatus::Running)
+            .await
+            .expect("mark execution running");
+
+    async fn create_step(
+        pool: &SqlitePool,
+        execution: &WorkflowExecution,
+        round: &WorkflowRound,
+        revision_id: Uuid,
+        key: &str,
+        display_order: i32,
+        status: WorkflowStepStatus,
+    ) -> WorkflowStep {
+        let step = WorkflowStep::create(
+            pool,
+            &CreateWorkflowStep {
+                execution_id: execution.id,
+                round_id: round.id,
+                compiled_revision_id: Some(revision_id),
+                step_key: key.to_string(),
+                step_type: WorkflowStepType::Task,
+                title: key.to_string(),
+                instructions: key.to_string(),
+                assigned_workflow_agent_session_id: None,
+                max_retry: 1,
+                round_index: 1,
+                display_order,
+                loop_id: None,
+                lead_review_required: Some(false),
+                user_review_required: Some(false),
+                revision_context: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create step");
+        WorkflowStep::update_status(pool, step.id, status)
+            .await
+            .expect("set step status")
+    }
+
+    let running = create_step(
+        &db.pool,
+        &execution,
+        &round,
+        revision.id,
+        "running",
+        0,
+        WorkflowStepStatus::Running,
+    )
+    .await;
+    let review = create_step(
+        &db.pool,
+        &execution,
+        &round,
+        revision.id,
+        "review",
+        1,
+        WorkflowStepStatus::WaitingReview,
+    )
+    .await;
+    let ready = create_step(
+        &db.pool,
+        &execution,
+        &round,
+        revision.id,
+        "ready",
+        2,
+        WorkflowStepStatus::Ready,
+    )
+    .await;
+    WorkflowLoop::create(
+        &db.pool,
+        &CreateWorkflowLoop {
+            execution_id: execution.id,
+            round_id: round.id,
+            loop_key: "manual-completion-loop".to_string(),
+            review_step_id: review.id,
+            member_step_ids_json: serde_json::json!([running.id, ready.id]).to_string(),
+            max_retry: Some(1),
+            user_review_required: Some(true),
+            rejection_reason: None,
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create workflow loop");
+    WorkflowTranscript::create(
+        &db.pool,
+        &CreateWorkflowTranscript {
+            execution_id: execution.id,
+            round_id: Some(round.id),
+            workflow_agent_session_id: None,
+            step_id: Some(review.id),
+            sender_type: "control".to_string(),
+            entry_type: "input_request".to_string(),
+            content: "Need input".to_string(),
+            meta_json: Some(serde_json::json!({ "resolved": false }).to_string()),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create unresolved transcript");
+    StopFixture {
+        db,
+        execution,
+        running_step_id: running.id,
+        review_step_id: review.id,
+        ready_step_id: ready.id,
+    }
+}
+
+#[tokio::test]
+async fn loop_retry_preparation_is_atomic_and_emits_step_status_event() {
+    let fixture = seed_workflow_stop_fixture().await;
+    let recorded = WorkflowStep::record_execution_result(
+        &fixture.db.pool,
+        fixture.ready_step_id,
+        Uuid::new_v4(),
+        Some("old summary".to_string()),
+        Some("old content".to_string()),
+    )
+    .await
+    .expect("record prior result");
+    let completed =
+        WorkflowStep::update_status(&fixture.db.pool, recorded.id, WorkflowStepStatus::Completed)
+            .await
+            .expect("mark completed before loop retry");
+    let retry_count_before = completed.retry_count;
+
+    let retried = reducer::prepare_step_retry(
+        &fixture.db.pool,
+        &fixture.execution,
+        &completed,
+        Some(serde_json::json!({ "reason": "test_loop_retry" })),
+    )
+    .await
+    .expect("prepare loop retry")
+    .entity;
+
+    assert_eq!(retried.status, WorkflowStepStatus::Ready);
+    assert_eq!(retried.retry_count, retry_count_before + 1);
+    assert!(retried.latest_run_id.is_none());
+    assert!(retried.summary_text.is_none());
+    assert!(retried.content.is_none());
+    let events = WorkflowEvent::find_by_execution(&fixture.db.pool, fixture.execution.id)
+        .await
+        .expect("load workflow events");
+    let event = events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.step_id == Some(retried.id)
+                && event.event_type == WorkflowEventType::StepStatusChanged
+        })
+        .expect("retry status event");
+    assert_eq!(event.status_before.as_deref(), Some("completed"));
+    assert_eq!(event.status_after.as_deref(), Some("ready"));
+    assert!(
+        event
+            .detail_json
+            .as_deref()
+            .is_some_and(|detail| detail.contains("test_loop_retry"))
+    );
+}
+
+#[tokio::test]
+async fn workflow_stop_execution_transitions_to_terminal_failed() {
+    let fixture = seed_workflow_stop_fixture().await;
+    let runner = ChatRunner::new(fixture.db.clone());
+    let stopped =
+        WorkflowOrchestrator::stop_execution(&runner, &fixture.db.pool, fixture.execution.id)
+            .await
+            .expect("stop execution");
+    assert_eq!(stopped.status, WorkflowExecutionStatus::Failed);
+    assert!(stopped.completed_at.is_some());
+    assert_eq!(
+        WorkflowStep::find_by_id(&fixture.db.pool, fixture.running_step_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        WorkflowStepStatus::Interrupted,
+    );
+    assert_eq!(
+        WorkflowStep::find_by_id(&fixture.db.pool, fixture.review_step_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        WorkflowStepStatus::Interrupted,
+    );
+    assert_eq!(
+        WorkflowStep::find_by_id(&fixture.db.pool, fixture.ready_step_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        WorkflowStepStatus::Ready,
+    );
+    let latest_event = WorkflowEvent::find_by_execution(&fixture.db.pool, stopped.id)
+        .await
+        .expect("list events")
+        .into_iter()
+        .rev()
+        .find(|event| event.step_id.is_none() && event.status_after.as_deref() == Some("failed"))
+        .expect("execution failed event");
+    assert!(
+        latest_event
+            .detail_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("stopped_by_user")
+    );
+}
+
+#[tokio::test]
+async fn workflow_interrupt_running_step_waits_for_runtime_ack_before_retryable_state() {
+    let fixture = seed_workflow_stop_fixture().await;
+    let runner = ChatRunner::new(fixture.db.clone());
+
+    let requested = WorkflowOrchestrator::interrupt_step(
+        &runner,
+        &fixture.db.pool,
+        fixture.execution.id,
+        fixture.running_step_id,
+    )
+    .await
+    .expect("request running step interrupt");
+    assert_eq!(
+        requested.status,
+        WorkflowStepStatus::InterruptRequested,
+        "the step must not become retryable until the old runtime exits"
+    );
+
+    let interrupted = WorkflowOrchestrator::acknowledge_step_interrupted(
+        &fixture.db.pool,
+        &runner,
+        &fixture.execution,
+        fixture.running_step_id,
+        "step_interrupted",
+    )
+    .await
+    .expect("acknowledge runtime exit");
+    assert_eq!(interrupted.status, WorkflowStepStatus::Interrupted);
+}
+
+#[tokio::test]
+async fn workflow_mark_completed_finishes_execution_round_and_every_step() {
+    let fixture = seed_workflow_stop_fixture().await;
+    let runner = ChatRunner::new(fixture.db.clone());
+    WorkflowExecution::update_status(
+        &fixture.db.pool,
+        fixture.execution.id,
+        WorkflowExecutionStatus::Paused,
+    )
+    .await
+    .expect("pause execution");
+
+    let completed = WorkflowOrchestrator::mark_execution_completed(
+        &runner,
+        &fixture.db.pool,
+        fixture.execution.id,
+    )
+    .await
+    .expect("mark workflow completed");
+
+    assert_eq!(completed.status, WorkflowExecutionStatus::Completed);
+    assert!(completed.completed_at.is_some());
+    let steps = WorkflowStep::find_by_execution(&fixture.db.pool, completed.id)
+        .await
+        .expect("load completed steps");
+    assert!(!steps.is_empty());
+    assert!(steps.iter().all(|step| {
+        step.status == WorkflowStepStatus::Completed && step.completed_at.is_some()
+    }));
+    let rounds = WorkflowRound::find_by_execution(&fixture.db.pool, completed.id)
+        .await
+        .expect("load completed rounds");
+    assert!(
+        rounds
+            .iter()
+            .all(|round| round.status == WorkflowRoundStatus::Accepted)
+    );
+    let loops = WorkflowLoop::find_by_execution(&fixture.db.pool, completed.id)
+        .await
+        .expect("load completed loops");
+    assert!(!loops.is_empty());
+    assert!(
+        loops
+            .iter()
+            .all(|workflow_loop| workflow_loop.status == WorkflowLoopStatus::Completed)
+    );
+    let transcripts = WorkflowTranscript::find_by_execution(&fixture.db.pool, completed.id)
+        .await
+        .expect("load resolved transcripts");
+    assert!(transcripts.iter().all(|transcript| {
+        transcript
+            .meta_json
+            .as_deref()
+            .and_then(|meta| serde_json::from_str::<serde_json::Value>(meta).ok())
+            .and_then(|meta| meta.get("resolved").cloned())
+            .and_then(|resolved| resolved.as_bool())
+            == Some(true)
+    }));
+
+    let events = WorkflowEvent::find_by_execution(&fixture.db.pool, completed.id)
+        .await
+        .expect("load completion events");
+    assert!(events.iter().any(|event| {
+        event.event_type == WorkflowEventType::ExecutionCompleted
+            && event
+                .detail_json
+                .as_deref()
+                .unwrap_or_default()
+                .contains("marked_completed_by_user")
+    }));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.event_type == WorkflowEventType::StepStatusChanged
+                    && event.status_after.as_deref() == Some("completed")
+            })
+            .count(),
+        steps.len()
+    );
+
+    let event_count = events.len();
+    let completed_again = WorkflowOrchestrator::mark_execution_completed(
+        &runner,
+        &fixture.db.pool,
+        fixture.execution.id,
+    )
+    .await
+    .expect("mark completed idempotently");
+    assert_eq!(completed_again.status, WorkflowExecutionStatus::Completed);
+    assert_eq!(
+        WorkflowEvent::find_by_execution(&fixture.db.pool, completed.id)
+            .await
+            .expect("reload completion events")
+            .len(),
+        event_count
+    );
+}
+
+#[tokio::test]
+async fn workflow_mark_completed_rejects_running_execution() {
+    let fixture = seed_workflow_stop_fixture().await;
+    let events_before = WorkflowEvent::find_by_execution(&fixture.db.pool, fixture.execution.id)
+        .await
+        .expect("load events before rejected completion")
+        .len();
+
+    let error = WorkflowOrchestrator::mark_execution_completed(
+        &ChatRunner::new(fixture.db.clone()),
+        &fixture.db.pool,
+        fixture.execution.id,
+    )
+    .await
+    .expect_err("running workflow cannot be manually completed");
+
+    assert!(error.to_string().contains("expected failed or paused"));
+    assert_eq!(
+        WorkflowExecution::find_by_id(&fixture.db.pool, fixture.execution.id)
+            .await
+            .expect("reload execution")
+            .expect("execution exists")
+            .status,
+        WorkflowExecutionStatus::Running,
+    );
+    assert_eq!(
+        WorkflowEvent::find_by_execution(&fixture.db.pool, fixture.execution.id)
+            .await
+            .expect("load events after rejected completion")
+            .len(),
+        events_before,
+    );
+}
+
+#[tokio::test]
+async fn workflow_stop_execution_rejects_non_running_execution() {
+    let completed = seed_workflow_stop_fixture().await;
+    WorkflowExecution::update_status(
+        &completed.db.pool,
+        completed.execution.id,
+        WorkflowExecutionStatus::Completed,
+    )
+    .await
+    .expect("complete execution");
+    let before = WorkflowEvent::find_by_execution(&completed.db.pool, completed.execution.id)
+        .await
+        .unwrap()
+        .len();
+    let error = WorkflowOrchestrator::stop_execution(
+        &ChatRunner::new(completed.db.clone()),
+        &completed.db.pool,
+        completed.execution.id,
+    )
+    .await
+    .expect_err("completed execution cannot stop");
+    assert!(error.to_string().contains("expected running"));
+    assert_eq!(
+        WorkflowEvent::find_by_execution(&completed.db.pool, completed.execution.id)
+            .await
+            .unwrap()
+            .len(),
+        before,
+    );
+
+    let failed = seed_workflow_stop_fixture().await;
+    WorkflowExecution::update_status(
+        &failed.db.pool,
+        failed.execution.id,
+        WorkflowExecutionStatus::Failed,
+    )
+    .await
+    .expect("fail execution");
+    let error = WorkflowOrchestrator::stop_execution(
+        &ChatRunner::new(failed.db.clone()),
+        &failed.db.pool,
+        failed.execution.id,
+    )
+    .await
+    .expect_err("failed execution cannot stop");
+    assert!(error.to_string().contains("expected running"));
+}
+
+#[tokio::test]
+async fn workflow_stop_execution_cannot_resume() {
+    let fixture = seed_workflow_stop_fixture().await;
+    let runner = ChatRunner::new(fixture.db.clone());
+    WorkflowOrchestrator::stop_execution(&runner, &fixture.db.pool, fixture.execution.id)
+        .await
+        .expect("stop execution");
+
+    let events_before = WorkflowEvent::find_by_execution(&fixture.db.pool, fixture.execution.id)
+        .await
+        .expect("list events before resume");
+    let error =
+        WorkflowOrchestrator::resume_execution(&fixture.db.pool, &runner, fixture.execution.id)
+            .await
+            .expect_err("a user-stopped workflow must not resume");
+    assert_eq!(
+        error.to_string(),
+        "状态迁移非法: workflow stopped by user cannot be resumed",
+    );
+    assert_eq!(
+        WorkflowStep::find_by_id(&fixture.db.pool, fixture.ready_step_id)
+            .await
+            .expect("load ready step")
+            .expect("ready step exists")
+            .status,
+        WorkflowStepStatus::Ready,
+    );
+    let events_after = WorkflowEvent::find_by_execution(&fixture.db.pool, fixture.execution.id)
+        .await
+        .expect("list events after resume");
+    assert_eq!(events_after.len(), events_before.len());
+    assert!(
+        !events_after
+            .iter()
+            .skip(events_before.len())
+            .any(|event| { event.status_after.as_deref() == Some("running") })
+    );
+}
+
+#[tokio::test]
+async fn workflow_paused_execution_without_recoverable_steps_cannot_resume() {
+    let fixture = seed_workflow_stop_fixture().await;
+    let runner = ChatRunner::new(fixture.db.clone());
+    for step_id in [
+        fixture.running_step_id,
+        fixture.review_step_id,
+        fixture.ready_step_id,
+    ] {
+        WorkflowStep::update_status(&fixture.db.pool, step_id, WorkflowStepStatus::Completed)
+            .await
+            .expect("complete fixture step");
+    }
+    WorkflowExecution::update_status(
+        &fixture.db.pool,
+        fixture.execution.id,
+        WorkflowExecutionStatus::Paused,
+    )
+    .await
+    .expect("pause execution");
+
+    let error =
+        WorkflowOrchestrator::resume_execution(&fixture.db.pool, &runner, fixture.execution.id)
+            .await
+            .expect_err("paused workflow without recoverable steps must not resume");
+
+    assert_eq!(
+        error.to_string(),
+        "状态迁移非法: workflow has no recoverable steps to resume",
+    );
+}
+
+#[derive(Clone, Copy)]
+enum SimulatedLeadVerdict {
+    Approved,
+    Rejected,
+}
+
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+enum SimulatedUserVerdict {
+    Approved,
+    Rejected,
+    Parked,
+}
+
+fn simulate_step_feedback_trace(
+    lead_verdicts: &[SimulatedLeadVerdict],
+    user_verdict: Option<SimulatedUserVerdict>,
+) -> Vec<WorkflowStepStatus> {
+    let mut trace = vec![WorkflowStepStatus::Running];
+    for (index, verdict) in lead_verdicts.iter().enumerate() {
+        let review_attempt = index as i32 + 1;
+        trace.push(WorkflowStepStatus::WaitingReview);
+        match verdict {
+            SimulatedLeadVerdict::Approved => {
+                if let Some(user_verdict) = user_verdict {
+                    trace.push(WorkflowStepStatus::WaitingInput);
+                    match user_verdict {
+                        SimulatedUserVerdict::Approved => {
+                            trace.push(WorkflowStepStatus::Completed);
+                        }
+                        SimulatedUserVerdict::Rejected => {
+                            trace.push(WorkflowStepStatus::Revising);
+                            trace.push(WorkflowStepStatus::Running);
+                            continue;
+                        }
+                        SimulatedUserVerdict::Parked => {}
+                    }
+                } else {
+                    trace.push(WorkflowStepStatus::Completed);
+                }
+                return trace;
+            }
+            SimulatedLeadVerdict::Rejected => {
+                if workflow_review_attempt_limit_reached(review_attempt, 5) {
+                    trace.push(WorkflowStepStatus::Failed);
+                    return trace;
+                }
+                trace.push(WorkflowStepStatus::Revising);
+                trace.push(WorkflowStepStatus::Running);
+            }
+        }
+    }
+
+    trace
+}
+
+fn sample_step(status: WorkflowStepStatus, summary_text: Option<String>) -> WorkflowStep {
+    let now = Utc::now();
+    WorkflowStep {
+        id: Uuid::new_v4(),
+        execution_id: Uuid::new_v4(),
+        round_id: Uuid::new_v4(),
+        compiled_revision_id: None,
+        step_key: "step-1".to_string(),
+        step_type: WorkflowStepType::Task,
+        title: "Implement fix".to_string(),
+        instructions: "Apply the requested change".to_string(),
+        assigned_workflow_agent_session_id: None,
+        status,
+        retry_count: 0,
+        max_retry: 1,
+        round_index: 1,
+        display_order: 0,
+        latest_run_id: None,
+        summary_text,
+        content: None,
+        loop_id: None,
+        lead_review_required: true,
+        user_review_required: false,
+        revision_context: None,
+        created_at: now,
+        updated_at: now,
+        started_at: None,
+        completed_at: None,
+    }
+}
+
+fn sample_execution_for_scheduler(active_round_id: Uuid) -> WorkflowExecution {
+    let now = Utc::now();
+    WorkflowExecution {
+        id: Uuid::new_v4(),
+        session_id: Uuid::new_v4(),
+        plan_id: Uuid::new_v4(),
+        active_revision_id: None,
+        active_round_id: Some(active_round_id),
+        workflow_card_message_id: None,
+        lead_session_agent_id: None,
+        status: WorkflowExecutionStatus::Running,
+        current_round: 1,
+        title: "Execution".to_string(),
+        compiled_graph_hash: None,
+        started_at: Some(now),
+        completed_at: None,
+        cleaned_at: None,
+        cleaned_reason: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+#[test]
+fn scheduler_edge_repair_skips_compiled_edges_for_missing_materialized_steps() {
+    let round_id = Uuid::new_v4();
+    let execution = sample_execution_for_scheduler(round_id);
+    let mut materialized_step = sample_step(WorkflowStepStatus::Ready, None);
+    materialized_step.execution_id = execution.id;
+    materialized_step.round_id = round_id;
+    materialized_step.step_key = "data_balance_config".to_string();
+
+    let compiled_graph = CompiledGraph {
+        plan_hash: "plan".to_string(),
+        compiled_graph_hash: "graph".to_string(),
+        steps: Vec::new(),
+        edges: vec![CompiledEdge {
+            edge_id: "edge-1".to_string(),
+            from_step_key: "data_setup".to_string(),
+            to_step_key: "data_balance_config".to_string(),
+            edge_kind: WorkflowEdgeKind::Hard,
+        }],
+        ready_step_keys: Vec::new(),
+        loops: None,
+    };
+
+    let repaired = WorkflowOrchestrator::scheduler_step_edges_from_compiled(
+        &execution,
+        &[materialized_step],
+        &Vec::<WorkflowStepEdge>::new(),
+        &compiled_graph,
+    )
+    .expect("missing materialized compiled edge steps should be skipped");
+
+    assert!(repaired.is_empty());
+}
+
+#[test]
+fn derive_failed_step_follow_up_context_prefers_latest_non_user_transcript() {
+    let step = sample_step(
+        WorkflowStepStatus::Failed,
+        Some(
+            serde_json::json!({
+                "summary": "summary fallback",
+                "content": "content fallback"
+            })
+            .to_string(),
+        ),
+    );
+    let source_id = Uuid::new_v4();
+    let transcripts = vec![
+        WorkflowTranscript {
+            id: Uuid::new_v4(),
+            execution_id: step.execution_id,
+            round_id: Some(step.round_id),
+            workflow_agent_session_id: Some(Uuid::new_v4()),
+            step_id: Some(step.id),
+            sender_type: "user".to_string(),
+            entry_type: "message".to_string(),
+            content: "first user reply".to_string(),
+            meta_json: None,
+            created_at: Utc::now().to_rfc3339(),
+        },
+        WorkflowTranscript {
+            id: source_id,
+            execution_id: step.execution_id,
+            round_id: Some(step.round_id),
+            workflow_agent_session_id: Some(Uuid::new_v4()),
+            step_id: Some(step.id),
+            sender_type: "system".to_string(),
+            entry_type: "message".to_string(),
+            content: "Step failed because dependency data was missing.".to_string(),
+            meta_json: None,
+            created_at: Utc::now().to_rfc3339(),
+        },
+    ];
+
+    let context = WorkflowOrchestrator::derive_failed_step_follow_up_context(&step, &transcripts);
+
+    assert_eq!(context.source_transcript_id, Some(source_id));
+    assert_eq!(
+        context.previous_message_content,
+        "Step failed because dependency data was missing."
+    );
+}
+
+#[test]
+fn build_step_follow_up_prompt_mentions_failed_restart() {
+    let step = sample_step(WorkflowStepStatus::Failed, None);
+
+    let prompt = WorkflowOrchestrator::build_step_follow_up_prompt(
+        &step,
+        "Previous attempt ended with an error.",
+        "I have provided the missing dependency data.",
+        StepFollowUpMode::Failed,
+    );
+
+    assert!(prompt.contains("previous attempt"));
+    assert!(prompt.contains("restart the same agent session"));
+    assert!(prompt.contains("Previous attempt ended with an error."));
+    assert!(prompt.contains("I have provided the missing dependency data."));
+    assert!(prompt.contains("Resume from the failed point"));
+}
+
+#[test]
+fn retry_candidate_accepts_failed_and_interrupted_without_retry_budget() {
+    let failed = sample_step(WorkflowStepStatus::Failed, None);
+    assert!(WorkflowOrchestrator::validate_step_retry_candidate(&failed).is_ok());
+
+    let interrupted = sample_step(WorkflowStepStatus::Interrupted, None);
+    assert!(WorkflowOrchestrator::validate_step_retry_candidate(&interrupted).is_ok());
+
+    let running = sample_step(WorkflowStepStatus::Running, None);
+    assert!(WorkflowOrchestrator::validate_step_retry_candidate(&running).is_err());
+}
+
+#[test]
+fn retry_candidate_ignores_max_retry_budget() {
+    let mut step = sample_step(WorkflowStepStatus::Failed, None);
+
+    step.max_retry = 0;
+    step.retry_count = 0;
+    assert!(WorkflowOrchestrator::validate_step_retry_candidate(&step).is_ok());
+
+    step.max_retry = 1;
+    step.retry_count = 0;
+    assert!(WorkflowOrchestrator::validate_step_retry_candidate(&step).is_ok());
+    step.retry_count = 1;
+    assert!(WorkflowOrchestrator::validate_step_retry_candidate(&step).is_ok());
+
+    step.max_retry = 2;
+    step.retry_count = 1;
+    assert!(WorkflowOrchestrator::validate_step_retry_candidate(&step).is_ok());
+    step.retry_count = 2;
+    assert!(WorkflowOrchestrator::validate_step_retry_candidate(&step).is_ok());
+}
+
+#[tokio::test]
+async fn beginning_manual_retry_publishes_active_state_before_agent_execution() {
+    let fixture = seed_workflow_stop_fixture().await;
+    let runner = ChatRunner::new(fixture.db.clone());
+    WorkflowStep::update_status(
+        &fixture.db.pool,
+        fixture.running_step_id,
+        WorkflowStepStatus::Failed,
+    )
+    .await
+    .expect("fail retry target");
+    for step_id in [fixture.review_step_id, fixture.ready_step_id] {
+        WorkflowStep::update_status(&fixture.db.pool, step_id, WorkflowStepStatus::Completed)
+            .await
+            .expect("complete non-target step");
+    }
+    WorkflowExecution::update_status(
+        &fixture.db.pool,
+        fixture.execution.id,
+        WorkflowExecutionStatus::Failed,
+    )
+    .await
+    .expect("fail execution");
+
+    let (execution, step) =
+        WorkflowOrchestrator::begin_step_retry(&fixture.db, &runner, fixture.running_step_id)
+            .await
+            .expect("begin retry");
+
+    assert_eq!(execution.status, WorkflowExecutionStatus::Running);
+    assert_eq!(step.status, WorkflowStepStatus::Ready);
+    let persisted_step = WorkflowStep::find_by_id(&fixture.db.pool, step.id)
+        .await
+        .expect("load retry target")
+        .expect("retry target exists");
+    assert_eq!(persisted_step.status, WorkflowStepStatus::Ready);
+}
+
+#[tokio::test]
+async fn manual_loop_review_retry_is_routed_back_to_loop_scheduler() {
+    let fixture = seed_workflow_stop_fixture().await;
+    let runner = ChatRunner::new(fixture.db.clone());
+    let workflow_loop = WorkflowLoop::find_by_execution(&fixture.db.pool, fixture.execution.id)
+        .await
+        .expect("load loop")
+        .into_iter()
+        .next()
+        .expect("loop exists");
+    WorkflowLoop::update_status(
+        &fixture.db.pool,
+        workflow_loop.id,
+        WorkflowLoopStatus::Failed,
+        Some("previous loop review failed".to_string()),
+    )
+    .await
+    .expect("fail loop");
+    let member_step = WorkflowStep::update_loop_id(
+        &fixture.db.pool,
+        fixture.running_step_id,
+        Some(workflow_loop.id),
+    )
+    .await
+    .expect("attach member step to loop");
+    assert!(
+        !WorkflowOrchestrator::prepare_manual_loop_review_retry(
+            &fixture.db.pool,
+            &fixture.execution,
+            &member_step,
+        )
+        .await
+        .expect("classify loop member retry")
+    );
+    WorkflowStep::update_loop_id(
+        &fixture.db.pool,
+        fixture.review_step_id,
+        Some(workflow_loop.id),
+    )
+    .await
+    .expect("attach review step to loop");
+    WorkflowStep::update_status(
+        &fixture.db.pool,
+        fixture.review_step_id,
+        WorkflowStepStatus::Failed,
+    )
+    .await
+    .expect("fail loop review step");
+
+    let (execution, ready_step) =
+        WorkflowOrchestrator::begin_step_retry(&fixture.db, &runner, fixture.review_step_id)
+            .await
+            .expect("begin loop review retry");
+    let is_loop_review = WorkflowOrchestrator::prepare_manual_loop_review_retry(
+        &fixture.db.pool,
+        &execution,
+        &ready_step,
+    )
+    .await
+    .expect("prepare loop review retry");
+
+    assert!(is_loop_review);
+    let restored_loop = WorkflowLoop::find_by_id(&fixture.db.pool, workflow_loop.id)
+        .await
+        .expect("load restored loop")
+        .expect("restored loop exists");
+    assert_eq!(restored_loop.status, WorkflowLoopStatus::Running);
+    let events = WorkflowEvent::find_by_execution(&fixture.db.pool, execution.id)
+        .await
+        .expect("load retry events");
+    assert!(events.iter().any(|event| {
+        event.event_type == WorkflowEventType::LoopRetrying
+            && event.step_id == Some(fixture.review_step_id)
+    }));
+}
+
+#[test]
+fn completed_like_final_review_invariant_requires_only_completed_terminal_steps() {
+    assert!(!WorkflowOrchestrator::all_steps_completed_like(&[]));
+
+    let steps = vec![
+        sample_step(WorkflowStepStatus::Completed, None),
+        sample_step(WorkflowStepStatus::Skipped, None),
+    ];
+    assert!(WorkflowOrchestrator::all_steps_completed_like(&steps));
+
+    let steps = vec![
+        sample_step(WorkflowStepStatus::Completed, None),
+        sample_step(WorkflowStepStatus::Failed, None),
+    ];
+    assert!(!WorkflowOrchestrator::all_steps_completed_like(&steps));
+}
+
+#[test]
+fn only_interrupted_blocked_and_failed_steps_can_transition_to_skipped() {
+    for status in [
+        WorkflowStepStatus::Interrupted,
+        WorkflowStepStatus::Blocked,
+        WorkflowStepStatus::Failed,
+    ] {
+        assert!(
+            reducer::validate_step_transition(&status, &WorkflowStepStatus::Skipped).is_ok(),
+            "{status:?} must be skippable"
+        );
+    }
+    for status in [
+        WorkflowStepStatus::Pending,
+        WorkflowStepStatus::Ready,
+        WorkflowStepStatus::Running,
+        WorkflowStepStatus::Completed,
+        WorkflowStepStatus::Skipped,
+    ] {
+        assert!(
+            reducer::validate_step_transition(&status, &WorkflowStepStatus::Skipped).is_err(),
+            "{status:?} must not be skippable"
+        );
+    }
+
+    assert!(
+        reducer::validate_step_transition(
+            &WorkflowStepStatus::Skipped,
+            &WorkflowStepStatus::Pending,
+        )
+        .is_err(),
+        "skipped nodes may only reopen through the dedicated user-decision command"
+    );
+}
+
+#[test]
+fn skipped_steps_satisfy_downstream_dependencies() {
+    let skipped = sample_step(WorkflowStepStatus::Skipped, None);
+    let mut downstream = sample_step(WorkflowStepStatus::Pending, None);
+    downstream.execution_id = skipped.execution_id;
+    downstream.round_id = skipped.round_id;
+    downstream.id = Uuid::new_v4();
+    downstream.step_key = "downstream".to_string();
+    let edge = WorkflowStepEdge {
+        id: Uuid::new_v4(),
+        execution_id: skipped.execution_id,
+        compiled_revision_id: None,
+        from_step_id: skipped.id,
+        to_step_id: downstream.id,
+        edge_kind: WorkflowEdgeKind::Hard,
+        created_at: Utc::now(),
+    };
+
+    assert!(WorkflowOrchestrator::are_step_dependencies_completed(
+        &downstream,
+        &[skipped, downstream.clone()],
+        &[edge],
+        &std::collections::HashSet::new(),
+    ));
+}
+
+#[test]
+fn revision_context_round_trips_pending_user_feedback() {
+    let context = WorkflowOrchestrator::merge_revision_context(
+        None,
+        WorkflowRevisionFeedbackSource::User,
+        "请把输出改成中文。",
+        "Current summary",
+        Some("Current full result"),
+        &["src/main.rs".to_string()],
+        2,
+        None,
+    );
+
+    let pending = WorkflowOrchestrator::parse_pending_revision_feedback(Some(&context))
+        .expect("pending feedback");
+
+    assert!(matches!(
+        pending.source,
+        WorkflowRevisionFeedbackSource::User
+    ));
+    assert_eq!(pending.feedback, "请把输出改成中文。");
+    assert_eq!(pending.previous_summary, "Current summary");
+    assert_eq!(
+        pending.previous_content.as_deref(),
+        Some("Current full result")
+    );
+    assert_eq!(pending.previous_outputs, vec!["src/main.rs".to_string()]);
+    assert_eq!(pending.review_round, 2);
+}
+
+#[test]
+fn revision_context_round_trips_complete_lead_review_findings() {
+    let review_details = RevisionReviewDetails {
+        acceptance_results: vec![WorkflowAcceptanceResult {
+            criterion: "类型检查通过".to_string(),
+            level: AcceptanceCriterionLevel::Required,
+            verdict: WorkflowAcceptanceVerdict::Failed,
+            evidence: "pnpm run frontend:check failed".to_string(),
+        }],
+        evidence: vec!["tsc output".to_string()],
+        risks: vec!["无法发布".to_string()],
+        unfinished_items: vec!["修复生成类型".to_string()],
+    };
+    let context = WorkflowOrchestrator::merge_revision_context(
+        None,
+        WorkflowRevisionFeedbackSource::Lead,
+        "类型检查失败。",
+        "Current summary",
+        None,
+        &[],
+        2,
+        Some(&review_details),
+    );
+
+    let pending = WorkflowOrchestrator::parse_pending_revision_feedback(Some(&context))
+        .expect("pending feedback");
+    assert_eq!(
+        pending.review_details.as_ref().unwrap().acceptance_results,
+        review_details.acceptance_results
+    );
+    assert_eq!(
+        pending.review_details.as_ref().unwrap().evidence,
+        review_details.evidence
+    );
+    assert_eq!(
+        pending.review_details.as_ref().unwrap().risks,
+        review_details.risks
+    );
+    assert_eq!(
+        pending.review_details.as_ref().unwrap().unfinished_items,
+        review_details.unfinished_items
+    );
+}
+
+#[test]
+fn clear_pending_revision_feedback_removes_resume_payload() {
+    let context = WorkflowOrchestrator::merge_revision_context(
+        None,
+        WorkflowRevisionFeedbackSource::Lead,
+        "补充测试。",
+        "Summary",
+        None,
+        &[],
+        1,
+        None,
+    );
+
+    let cleared = WorkflowOrchestrator::clear_pending_revision_feedback(Some(&context))
+        .expect("cleared context");
+
+    assert!(WorkflowOrchestrator::parse_pending_revision_feedback(Some(&cleared)).is_none());
+    assert!(cleared.contains("feedback_history"));
+}
+
+#[test]
+fn pending_revision_feedback_identifies_loop_scope() {
+    let loop_context = serde_json::json!({
+        "pending_feedback": {
+            "source": "lead",
+            "scope": "loop",
+            "loop_key": "loop-a",
+            "feedback": "revise this loop member",
+            "previous_summary": "summary",
+            "previous_outputs": [],
+            "review_round": 1
+        }
+    })
+    .to_string();
+    let step_context = WorkflowOrchestrator::merge_revision_context(
+        None,
+        WorkflowRevisionFeedbackSource::Lead,
+        "review feedback",
+        "Summary",
+        None,
+        &[],
+        1,
+        None,
+    );
+
+    assert!(WorkflowOrchestrator::pending_revision_feedback_is_loop(
+        Some(&loop_context)
+    ));
+    assert!(!WorkflowOrchestrator::pending_revision_feedback_is_loop(
+        Some(&step_context)
+    ));
+    assert!(!WorkflowOrchestrator::pending_revision_feedback_is_loop(
+        None
+    ));
+}
+
+#[test]
+fn step_transition_duration_reports_terminal_elapsed_time() {
+    let mut step = sample_step(WorkflowStepStatus::Running, None);
+    step.started_at = Some(Utc::now());
+    step.updated_at =
+        step.started_at.expect("started_at set") + chrono::Duration::milliseconds(2500);
+    step.completed_at =
+        Some(step.started_at.expect("started_at set") + chrono::Duration::milliseconds(3200));
+
+    let duration_ms = step_transition_duration_ms(&step, "completed");
+    assert_eq!(duration_ms, Some(3200));
+}
+
+#[test]
+fn step_transition_duration_uses_updated_at_fallback_for_failed() {
+    let mut step = sample_step(WorkflowStepStatus::Running, None);
+    step.started_at = Some(Utc::now());
+    step.updated_at =
+        step.started_at.expect("started_at set") + chrono::Duration::milliseconds(1800);
+    step.completed_at = None;
+
+    let duration_ms = step_transition_duration_ms(&step, "failed");
+    assert_eq!(duration_ms, Some(1800));
+}
+
+#[test]
+fn step_transition_duration_is_none_for_non_terminal_states() {
+    let mut step = sample_step(WorkflowStepStatus::Running, None);
+    step.started_at = Some(Utc::now());
+
+    assert_eq!(step_transition_duration_ms(&step, "running"), None);
+    assert_eq!(step_transition_duration_ms(&step, "waiting_review"), None);
+}
+
+#[test]
+fn execute_step_with_feedback_trace_direct_passes() {
+    let trace = simulate_step_feedback_trace(&[SimulatedLeadVerdict::Approved], None);
+
+    assert_eq!(
+        trace,
+        vec![
+            WorkflowStepStatus::Running,
+            WorkflowStepStatus::WaitingReview,
+            WorkflowStepStatus::Completed,
+        ]
+    );
+}
+
+#[test]
+fn execute_step_with_feedback_trace_retries_after_lead_rejection() {
+    let trace = simulate_step_feedback_trace(
+        &[
+            SimulatedLeadVerdict::Rejected,
+            SimulatedLeadVerdict::Approved,
+        ],
+        None,
+    );
+
+    assert_eq!(
+        trace,
+        vec![
+            WorkflowStepStatus::Running,
+            WorkflowStepStatus::WaitingReview,
+            WorkflowStepStatus::Revising,
+            WorkflowStepStatus::Running,
+            WorkflowStepStatus::WaitingReview,
+            WorkflowStepStatus::Completed,
+        ]
+    );
+}
+
+#[test]
+fn execute_step_with_feedback_trace_user_rejection_retries_after_waiting_input() {
+    let trace = simulate_step_feedback_trace(
+        &[SimulatedLeadVerdict::Approved],
+        Some(SimulatedUserVerdict::Rejected),
+    );
+
+    assert_eq!(
+        trace,
+        vec![
+            WorkflowStepStatus::Running,
+            WorkflowStepStatus::WaitingReview,
+            WorkflowStepStatus::WaitingInput,
+            WorkflowStepStatus::Revising,
+            WorkflowStepStatus::Running,
+        ]
+    );
+}
+
+#[test]
+fn execute_step_with_feedback_trace_stops_after_fifth_lead_rejection() {
+    let trace = simulate_step_feedback_trace(
+        &[
+            SimulatedLeadVerdict::Rejected,
+            SimulatedLeadVerdict::Rejected,
+            SimulatedLeadVerdict::Rejected,
+            SimulatedLeadVerdict::Rejected,
+            SimulatedLeadVerdict::Rejected,
+            SimulatedLeadVerdict::Rejected,
+        ],
+        None,
+    );
+
+    assert_eq!(
+        trace,
+        vec![
+            WorkflowStepStatus::Running,
+            WorkflowStepStatus::WaitingReview,
+            WorkflowStepStatus::Revising,
+            WorkflowStepStatus::Running,
+            WorkflowStepStatus::WaitingReview,
+            WorkflowStepStatus::Revising,
+            WorkflowStepStatus::Running,
+            WorkflowStepStatus::WaitingReview,
+            WorkflowStepStatus::Revising,
+            WorkflowStepStatus::Running,
+            WorkflowStepStatus::WaitingReview,
+            WorkflowStepStatus::Revising,
+            WorkflowStepStatus::Running,
+            WorkflowStepStatus::WaitingReview,
+            WorkflowStepStatus::Failed,
+        ]
+    );
+}
+
+#[test]
+fn pi_agent_identity_preserved_in_workflow_scheduling() {
+    use executors::executors::BaseCodingAgent;
+    let parsed = "PI".parse::<BaseCodingAgent>();
+    assert!(parsed.is_ok());
+    assert_eq!(parsed.unwrap(), BaseCodingAgent::Pi);
+}
+
+#[test]
+fn pi_workflow_cancel_does_not_bypass_reducer() {
+    use db::models::workflow_types::WorkflowStepStatus;
+
+    assert!(
+        reducer::validate_step_transition(
+            &WorkflowStepStatus::Running,
+            &WorkflowStepStatus::InterruptRequested,
+        )
+        .is_ok()
+    );
+    assert!(
+        reducer::validate_step_transition(
+            &WorkflowStepStatus::Running,
+            &WorkflowStepStatus::Interrupted,
+        )
+        .is_err()
+    );
+    assert!(
+        reducer::validate_step_transition(
+            &WorkflowStepStatus::WaitingReview,
+            &WorkflowStepStatus::InterruptRequested,
+        )
+        .is_ok()
+    );
+    assert!(
+        reducer::validate_step_transition(
+            &WorkflowStepStatus::Revising,
+            &WorkflowStepStatus::Failed,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn pi_workflow_exception_cleanup_removes_runtime_state() {
+    use db::models::workflow_types::WorkflowExecutionStatus;
+
+    use super::super::workflow_runtime::cancel_running_step;
+
+    assert!(
+        reducer::validate_execution_transition(
+            &WorkflowExecutionStatus::Running,
+            &WorkflowExecutionStatus::Failed,
+        )
+        .is_ok()
+    );
+    assert!(
+        reducer::validate_execution_transition(
+            &WorkflowExecutionStatus::Completed,
+            &WorkflowExecutionStatus::Failed,
+        )
+        .is_err()
+    );
+
+    let step_id = Uuid::new_v4();
+    assert!(
+        !cancel_running_step(step_id, 0),
+        "cancel must return false when no running step is registered"
+    );
+}

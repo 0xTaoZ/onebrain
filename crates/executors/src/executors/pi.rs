@@ -1,0 +1,2288 @@
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use async_trait::async_trait;
+use derivative::Derivative;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+use workspace_utils::{msg_store::MsgStore, shell::resolve_executable_path_blocking};
+
+use super::acp::{
+    AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
+    AcpCapabilityProbe, AcpClientServicePolicy, AcpConfigOptionKind, AcpConfigOverride,
+    AcpConfigValue, AcpExecutionOptions,
+    mcp::{AcpMcpPolicy, pin_mcp_run_environment, resolve_isolated_mcp_snapshot},
+};
+use crate::{
+    approvals::ExecutorApprovalService,
+    command::{CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides},
+    env::ExecutionEnv,
+    executors::{
+        AcpModelFallback, AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorPrompt,
+        ExecutorRunCleanup, SpawnedChild, StandardCodingAgentExecutor,
+    },
+    mcp_config::MemberMcpConfig,
+    mcp_run::{McpRunContext, PreparedMcpRun},
+};
+
+mod approval;
+
+pub const PI_ACP_VERSION: &str = "0.0.33";
+pub const PI_CODING_AGENT_VERSION: &str = "0.83.0";
+pub const PI_MCP_ADAPTER_VERSION: &str = "2.18.0";
+pub const PI_ACP_PACKAGE: &str = "pi-acp";
+pub const PI_CODING_AGENT_PACKAGE: &str = "@earendil-works/pi-coding-agent";
+pub const PI_MCP_ADAPTER_PACKAGE: &str = "pi-mcp-adapter";
+
+#[cfg(windows)]
+const NPX_COMMAND: &str = "npx.cmd";
+#[cfg(not(windows))]
+const NPX_COMMAND: &str = "npx";
+
+pub const PI_LAUNCHER_SOURCE: &str = include_str!("pi/launcher.mjs");
+const PI_MCP_EXTENSION_SOURCE: &str = include_str!("pi/mcp_extension.mjs");
+const PI_APPROVAL_EXTENSION_SOURCE: &str = include_str!("pi/approval_extension.mjs");
+// pi-acp 0.0.33 hardcodes its menu instead of querying Pi's
+// get_available_thinking_levels RPC. Keep this in sync with pinned Pi until a
+// released pi-acp version supplies the model-specific options itself.
+const PI_THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+const PI_AUTH_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "OPENROUTER_API_KEY",
+];
+const PI_RUN_ENV_VARS: &[&str] = &[
+    "PI_ACP_PI_COMMAND",
+    "OPENTEAMS_PI_APPROVAL_EXTENSION",
+    "OPENTEAMS_PI_MCP_EXTENSION",
+    "OPENTEAMS_PI_MCP_SNAPSHOT",
+    "OPENTEAMS_PI_ENABLE_MCP_EXTENSION",
+    "OPENTEAMS_PI_SKILL_PATHS_JSON",
+    "OPENTEAMS_PI_DIAGNOSTIC_LOG",
+];
+
+#[derive(Clone)]
+struct PiRuntimeSnapshot {
+    skill_paths: Vec<PathBuf>,
+    mcp_config: serde_json::Value,
+}
+
+impl std::fmt::Debug for PiRuntimeSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PiRuntimeSnapshot")
+            .field("skill_count", &self.skill_paths.len())
+            .field(
+                "mcp_server_count",
+                &self
+                    .mcp_config
+                    .get("mcpServers")
+                    .and_then(serde_json::Value::as_object)
+                    .map_or(0, serde_json::Map::len),
+            )
+            .finish()
+    }
+}
+
+impl PiRuntimeSnapshot {
+    fn empty() -> Self {
+        Self {
+            skill_paths: Vec::new(),
+            mcp_config: serde_json::json!({
+                "mcpServers": {},
+                "settings": {"hostConfigDiscovery": "off"}
+            }),
+        }
+    }
+
+    fn has_mcp_servers(&self) -> bool {
+        self.mcp_config
+            .get("mcpServers")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|servers| !servers.is_empty())
+    }
+}
+
+struct PiRunFiles {
+    launcher_command: PathBuf,
+    launcher_module: Option<PathBuf>,
+    mcp_extension: PathBuf,
+    approval_extension: PathBuf,
+    mcp_snapshot: PathBuf,
+    diagnostic_log: PathBuf,
+    armed: bool,
+}
+
+fn pi_acp_compatible_current_dir(current_dir: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+
+        let mut components = current_dir.components();
+        let Some(Component::Prefix(prefix)) = components.next() else {
+            return current_dir.to_path_buf();
+        };
+        let Prefix::VerbatimDisk(drive) = prefix.kind() else {
+            return current_dir.to_path_buf();
+        };
+        let mut compatible = PathBuf::from(format!("{}:", char::from(drive)));
+        for component in components {
+            compatible.push(component.as_os_str());
+        }
+        compatible
+    }
+    #[cfg(not(windows))]
+    {
+        current_dir.to_path_buf()
+    }
+}
+
+impl PiRunFiles {
+    fn create(current_dir: &Path, snapshot: &PiRuntimeSnapshot) -> Result<Self, ExecutorError> {
+        let directory = current_dir.join(".openteams").join("tmp");
+        fs::create_dir_all(&directory).map_err(ExecutorError::Io)?;
+        let run_id = uuid::Uuid::new_v4();
+        #[cfg(unix)]
+        let (launcher_command, launcher_module) =
+            (directory.join(format!("pi-{run_id}-launcher.mjs")), None);
+        #[cfg(windows)]
+        let (launcher_command, launcher_module) = (
+            directory.join(format!("pi-{run_id}-launcher.cmd")),
+            Some(directory.join(format!("pi-{run_id}-launcher.mjs"))),
+        );
+        #[cfg(not(any(unix, windows)))]
+        let (launcher_command, launcher_module) =
+            (directory.join(format!("pi-{run_id}-launcher.mjs")), None);
+        let files = Self {
+            launcher_command,
+            launcher_module,
+            mcp_extension: directory.join(format!("pi-{run_id}-mcp-extension.ts")),
+            approval_extension: directory.join(format!("pi-{run_id}-approval-extension.mjs")),
+            mcp_snapshot: directory.join(format!("pi-{run_id}-mcp.json")),
+            diagnostic_log: directory.join(format!("pi-{run_id}-diagnostic.log")),
+            armed: true,
+        };
+        let result = (|| {
+            #[cfg(unix)]
+            write_executable_file(&files.launcher_command, PI_LAUNCHER_SOURCE.as_bytes())?;
+            #[cfg(windows)]
+            {
+                let launcher_module = files
+                    .launcher_module
+                    .as_ref()
+                    .expect("Windows Pi launcher module path");
+                write_private_file(launcher_module, PI_LAUNCHER_SOURCE.as_bytes())?;
+                write_private_file(
+                    &files.launcher_command,
+                    windows_launcher_wrapper(launcher_module).as_bytes(),
+                )?;
+            }
+            #[cfg(not(any(unix, windows)))]
+            write_private_file(&files.launcher_command, PI_LAUNCHER_SOURCE.as_bytes())?;
+            write_private_file(&files.mcp_extension, PI_MCP_EXTENSION_SOURCE.as_bytes())?;
+            write_private_file(
+                &files.approval_extension,
+                PI_APPROVAL_EXTENSION_SOURCE.as_bytes(),
+            )?;
+            write_private_file(
+                &files.mcp_snapshot,
+                &serde_json::to_vec(&snapshot.mcp_config)?,
+            )?;
+            write_private_file(&files.diagnostic_log, b"")?;
+            Ok::<(), ExecutorError>(())
+        })();
+        if let Err(error) = result {
+            drop(files);
+            return Err(error);
+        }
+        Ok(files)
+    }
+
+    fn apply_to_env(&self, env: &ExecutionEnv, snapshot: &PiRuntimeSnapshot) -> ExecutionEnv {
+        let mut env = env.clone();
+        env.insert(
+            "PI_ACP_PI_COMMAND",
+            self.launcher_command.to_string_lossy().to_string(),
+        );
+        env.insert(
+            "OPENTEAMS_PI_APPROVAL_EXTENSION",
+            self.approval_extension.to_string_lossy().to_string(),
+        );
+        env.insert(
+            "OPENTEAMS_PI_MCP_EXTENSION",
+            self.mcp_extension.to_string_lossy().to_string(),
+        );
+        env.insert(
+            "OPENTEAMS_PI_MCP_SNAPSHOT",
+            self.mcp_snapshot.to_string_lossy().to_string(),
+        );
+        env.insert(
+            "OPENTEAMS_PI_ENABLE_MCP_EXTENSION",
+            if snapshot.has_mcp_servers() { "1" } else { "0" },
+        );
+        env.insert(
+            "OPENTEAMS_PI_SKILL_PATHS_JSON",
+            serde_json::to_string(&snapshot.skill_paths).unwrap_or_else(|_| "[]".to_string()),
+        );
+        env.insert(
+            "OPENTEAMS_PI_DIAGNOSTIC_LOG",
+            self.diagnostic_log.to_string_lossy().to_string(),
+        );
+        env
+    }
+
+    fn paths(&self) -> Vec<&Path> {
+        let mut paths = vec![self.launcher_command.as_path()];
+        if let Some(module) = self.launcher_module.as_deref() {
+            paths.push(module);
+        }
+        paths.extend([
+            self.mcp_extension.as_path(),
+            self.approval_extension.as_path(),
+            self.mcp_snapshot.as_path(),
+            self.diagnostic_log.as_path(),
+        ]);
+        paths
+    }
+
+    fn enrich_probe_error(&self, error: ExecutorError) -> ExecutorError {
+        let Ok(diagnostics) = fs::read_to_string(&self.diagnostic_log) else {
+            return error;
+        };
+        let diagnostics = diagnostics.trim_end();
+        if diagnostics.is_empty() {
+            return error;
+        }
+        ExecutorError::Io(std::io::Error::other(format!(
+            "{error}\nPi launcher diagnostics:\n{diagnostics}"
+        )))
+    }
+
+    fn into_cleanup(mut self) -> ExecutorRunCleanup {
+        let paths = self.paths().into_iter().map(Path::to_path_buf).collect();
+        self.armed = false;
+        ExecutorRunCleanup::new(paths)
+    }
+}
+
+impl Drop for PiRunFiles {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        for path in self.paths() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn write_executable_file(path: &Path, contents: &[u8]) -> Result<(), ExecutorError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .open(path)
+        .map_err(ExecutorError::Io)?;
+    file.write_all(contents).map_err(ExecutorError::Io)?;
+    file.sync_all().map_err(ExecutorError::Io)
+}
+
+#[cfg(any(windows, test))]
+fn windows_launcher_wrapper(launcher_module: &Path) -> String {
+    let file_name = launcher_module
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("generated Pi launcher module filename is valid UTF-8");
+    format!("@echo off\r\nnode \"%~dp0{file_name}\" %*\r\n")
+}
+
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), ExecutorError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(ExecutorError::Io)?;
+    file.write_all(contents).map_err(ExecutorError::Io)?;
+    file.sync_all().map_err(ExecutorError::Io)
+}
+
+#[derive(Derivative, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
+#[derivative(Debug, PartialEq)]
+pub struct Pi {
+    #[serde(default)]
+    pub append_prompt: AppendPrompt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Exact provider/model value advertised by pi-acp")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp: Option<AcpExecutionOptions>,
+    #[serde(flatten)]
+    pub cmd: CmdOverrides,
+    #[serde(skip)]
+    #[ts(skip)]
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    pub acp_mcp_policy: AcpMcpPolicy,
+    #[serde(skip)]
+    #[ts(skip)]
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    pub approvals: Option<Arc<dyn ExecutorApprovalService>>,
+}
+
+impl Pi {
+    pub fn default_command() -> String {
+        format!(
+            "{NPX_COMMAND} --yes --package {PI_ACP_PACKAGE}@{PI_ACP_VERSION} --package {PI_CODING_AGENT_PACKAGE}@{PI_CODING_AGENT_VERSION} --package {PI_MCP_ADAPTER_PACKAGE}@{PI_MCP_ADAPTER_VERSION} pi-acp"
+        )
+    }
+
+    pub fn version_command() -> String {
+        format!(
+            "{NPX_COMMAND} --yes --package {PI_CODING_AGENT_PACKAGE}@{PI_CODING_AGENT_VERSION} pi"
+        )
+    }
+
+    #[cfg(feature = "qa-mode")]
+    pub fn from_qa_environment() -> Self {
+        let mut pi = Self::default();
+        if let Some(npx_path) = std::env::var_os("OPENTEAMS_PI_QA_NPX_PATH") {
+            pi.cmd.base_command_override = Some(format!(
+                "{} --yes --package {PI_ACP_PACKAGE}@{PI_ACP_VERSION} {PI_ACP_PACKAGE}",
+                npx_path.to_string_lossy()
+            ));
+        }
+        pi
+    }
+
+    fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+        apply_overrides(CommandBuilder::new(Self::default_command()), &self.cmd)
+    }
+
+    async fn acp_harness(&self, env: &ExecutionEnv) -> Result<AcpAgentHarness, ExecutorError> {
+        let options = self.acp.clone().unwrap_or_default();
+        let approval_policy = match options.approval_mode.unwrap_or_default() {
+            AcpApprovalMode::Ask => AcpApprovalPolicy::Ask,
+            AcpApprovalMode::AutoAllow => AcpApprovalPolicy::AutoAllow,
+            AcpApprovalMode::AutoReject => AcpApprovalPolicy::AutoReject,
+        };
+        let additional_directories = options
+            .validated_directories()
+            .await
+            .map_err(ExecutorError::Io)?;
+        let full_access = options.access_mode.unwrap_or_default() == AcpAccessMode::FullAccess;
+        let mut harness = AcpAgentHarness::new()
+            .with_approval_policy(approval_policy)
+            .with_additional_directories(additional_directories)
+            .with_client_services(AcpClientServicePolicy {
+                read_text_file: true,
+                write_text_file: true,
+                terminal: true,
+                full_access,
+                ..AcpClientServicePolicy::default()
+            });
+        if let Some(AcpAuthSelection::MethodId { method_id }) = options.auth {
+            harness = harness.with_auth_method_id(method_id);
+        }
+        let config_overrides = options.config_overrides.as_deref().unwrap_or_default();
+        let has_model_override = config_overrides.iter().any(|selection| {
+            selection.category_snapshot.as_deref() == Some("model")
+                || selection.option_id.eq_ignore_ascii_case("model")
+        });
+        validate_pi_thinking_override(self.model.as_deref(), config_overrides, env)?;
+        if let Some(model) = self
+            .model
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .filter(|_| !has_model_override)
+        {
+            harness = harness.with_model(model);
+        }
+        for selection in config_overrides {
+            harness = harness.with_config_override(selection);
+        }
+        Ok(harness.with_mcp_servers(Vec::new()))
+    }
+}
+
+fn ensure_pi_run_prepared(env: &ExecutionEnv) -> Result<(), ExecutorError> {
+    if PI_RUN_ENV_VARS
+        .iter()
+        .all(|key| env.get(key).is_some_and(|value| !value.trim().is_empty()))
+    {
+        Ok(())
+    } else {
+        Err(ExecutorError::McpIsolationNotImplemented)
+    }
+}
+
+fn map_pi_follow_up_error(error: ExecutorError) -> ExecutorError {
+    if matches!(&error, ExecutorError::Io(io_error) if {
+        let message = io_error.to_string();
+        message.contains("Unknown sessionId") || message.contains("Unknown session ID")
+    }) {
+        ExecutorError::FollowUpNotSupported(format!(
+            "Pi ACP could not reuse the requested session: {error}"
+        ))
+    } else {
+        error
+    }
+}
+
+fn prerequisites_available_on_path(mut resolve: impl FnMut(&str) -> bool) -> bool {
+    resolve("node")
+}
+
+fn semantic_pi_config_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn pi_config_override_value<'a>(
+    config_overrides: &'a [AcpConfigOverride],
+    expected_key: &str,
+) -> Option<&'a str> {
+    config_overrides.iter().find_map(|selection| {
+        let matches = selection
+            .category_snapshot
+            .as_deref()
+            .is_some_and(|category| semantic_pi_config_key(category) == expected_key)
+            || semantic_pi_config_key(&selection.option_id) == expected_key;
+        match (&selection.value, matches) {
+            (AcpConfigValue::ValueId { value }, true) if !value.trim().is_empty() => {
+                Some(value.as_str())
+            }
+            _ => None,
+        }
+    })
+}
+
+fn configured_pi_model<'a>(
+    model: Option<&'a str>,
+    config_overrides: &'a [AcpConfigOverride],
+) -> Option<&'a str> {
+    pi_config_override_value(config_overrides, "model")
+        .or_else(|| model.filter(|value| !value.trim().is_empty()))
+}
+
+fn pi_coding_agent_dir_for_env(env: &ExecutionEnv) -> Option<PathBuf> {
+    pi_coding_agent_dir_from(
+        env.get("PI_CODING_AGENT_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("PI_CODING_AGENT_DIR")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            }),
+        env.get("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir),
+    )
+}
+
+fn load_pi_supported_thinking_levels(model_id: &str, env: &ExecutionEnv) -> Option<Vec<String>> {
+    let models_path = pi_coding_agent_dir_for_env(env)?.join("models.json");
+    let models: serde_json::Value = serde_json::from_slice(&fs::read(models_path).ok()?).ok()?;
+    pi_supported_thinking_levels(&models, model_id)
+}
+
+fn pi_supported_thinking_levels(
+    models: &serde_json::Value,
+    qualified_model_id: &str,
+) -> Option<Vec<String>> {
+    let (provider_id, model_id) = qualified_model_id.split_once('/')?;
+    let model = models
+        .get("providers")?
+        .get(provider_id)?
+        .get("models")?
+        .as_array()?
+        .iter()
+        .find(|model| model.get("id").and_then(serde_json::Value::as_str) == Some(model_id))?;
+    if !model
+        .get("reasoning")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some(vec!["off".to_string()]);
+    }
+
+    let level_map = model
+        .get("thinkingLevelMap")
+        .and_then(serde_json::Value::as_object);
+    Some(
+        PI_THINKING_LEVELS
+            .iter()
+            .filter(|level| {
+                let mapped = level_map.and_then(|mapping| mapping.get(**level));
+                if matches!(**level, "xhigh" | "max") {
+                    mapped.is_some_and(|value| !value.is_null())
+                } else {
+                    mapped.is_none_or(|value| !value.is_null())
+                }
+            })
+            .map(|level| (*level).to_string())
+            .collect(),
+    )
+}
+
+fn validate_pi_thinking_override(
+    model: Option<&str>,
+    config_overrides: &[AcpConfigOverride],
+    env: &ExecutionEnv,
+) -> Result<(), ExecutorError> {
+    let Some(model) = configured_pi_model(model, config_overrides) else {
+        return Ok(());
+    };
+    let Some(thought_level) = pi_config_override_value(config_overrides, "thoughtlevel") else {
+        return Ok(());
+    };
+    let Some(supported) = load_pi_supported_thinking_levels(model, env) else {
+        return Ok(());
+    };
+    if supported.iter().any(|level| level == thought_level) {
+        return Ok(());
+    }
+    Err(ExecutorError::Configuration(format!(
+        "Pi model `{model}` does not support thought level `{thought_level}`; supported values: {}",
+        supported.join(", ")
+    )))
+}
+
+fn filter_pi_thinking_options(
+    probe: &mut AcpCapabilityProbe,
+    configured_model: Option<&str>,
+    env: &ExecutionEnv,
+) {
+    let active_model = configured_model.map(str::to_string).or_else(|| {
+        probe.config_options.iter().find_map(|option| {
+            let is_model = option
+                .category
+                .as_deref()
+                .is_some_and(|category| semantic_pi_config_key(category) == "model")
+                || semantic_pi_config_key(&option.id) == "model";
+            match (&option.kind, is_model) {
+                (AcpConfigOptionKind::Select { current_value, .. }, true) => {
+                    Some(current_value.clone())
+                }
+                _ => None,
+            }
+        })
+    });
+    let Some(supported) = active_model
+        .as_deref()
+        .and_then(|model| load_pi_supported_thinking_levels(model, env))
+    else {
+        return;
+    };
+
+    for option in &mut probe.config_options {
+        let is_thought_level = option
+            .category
+            .as_deref()
+            .is_some_and(|category| semantic_pi_config_key(category) == "thoughtlevel")
+            || semantic_pi_config_key(&option.id) == "thoughtlevel";
+        if !is_thought_level {
+            continue;
+        }
+        if let AcpConfigOptionKind::Select { options, .. } = &mut option.kind {
+            options.retain(|choice| supported.iter().any(|level| level == &choice.value));
+        }
+    }
+}
+
+#[async_trait]
+impl StandardCodingAgentExecutor for Pi {
+    async fn prepare_mcp_for_run(
+        &mut self,
+        canonical: &MemberMcpConfig,
+        context: &McpRunContext,
+        env: &mut ExecutionEnv,
+    ) -> Result<PreparedMcpRun, ExecutorError> {
+        let canonical_value = serde_json::to_value(canonical)?;
+        let mcp_config = resolve_isolated_mcp_snapshot(&canonical_value, &AcpMcpPolicy::default())?;
+        let snapshot = PiRuntimeSnapshot {
+            skill_paths: context.authorized_skill_paths().to_vec(),
+            mcp_config,
+        };
+        let current_dir = pi_acp_compatible_current_dir(context.current_dir());
+        let files = PiRunFiles::create(&current_dir, &snapshot)?;
+        *env = files.apply_to_env(env, &snapshot);
+        for key in PI_RUN_ENV_VARS {
+            let value = env
+                .get(key)
+                .cloned()
+                .expect("Pi run files populate every pinned environment value");
+            pin_mcp_run_environment(env, &mut self.cmd, key, value);
+        }
+        Ok(PreparedMcpRun::new(canonical)?.with_cleanup(files.into_cleanup()))
+    }
+
+    fn overlay_acp_execution_options(&mut self, higher_priority: &AcpExecutionOptions) {
+        let inherited = self.acp.clone().unwrap_or_default();
+        self.acp = Some(inherited.overlay(higher_priority));
+    }
+
+    fn acp_full_access_enabled(&self) -> bool {
+        self.acp
+            .as_ref()
+            .and_then(|options| options.access_mode)
+            .unwrap_or_default()
+            == AcpAccessMode::FullAccess
+    }
+
+    fn acp_model_fallback(&self) -> AcpModelFallback {
+        AcpModelFallback::Disabled
+    }
+
+    fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
+        let env = env.clone().with_profile(&self.cmd);
+        let auth_file_exists = dirs::home_dir()
+            .map(|home| home.join(".pi").join("agent").join("auth.json"))
+            .is_some_and(|path| path.is_file());
+        self.authentication_detected(&env, PI_AUTH_ENV_VARS, auth_file_exists)
+    }
+
+    fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
+        self.approvals = Some(approvals);
+    }
+
+    async fn list_models(
+        &self,
+        current_dir: &Path,
+        env: &ExecutionEnv,
+    ) -> Result<Option<Vec<String>>, ExecutorError> {
+        Ok(self
+            .probe_acp(current_dir, env, None)
+            .await?
+            .and_then(|probe| probe.model_ids()))
+    }
+
+    async fn probe_acp(
+        &self,
+        current_dir: &Path,
+        env: &ExecutionEnv,
+        auth_method_id: Option<&str>,
+    ) -> Result<Option<AcpCapabilityProbe>, ExecutorError> {
+        let configured_auth_method_id = self.acp.as_ref().and_then(|options| match &options.auth {
+            Some(AcpAuthSelection::MethodId { method_id }) => Some(method_id.clone()),
+            _ => None,
+        });
+        let snapshot = PiRuntimeSnapshot::empty();
+        let current_dir = pi_acp_compatible_current_dir(current_dir);
+        let files = PiRunFiles::create(&current_dir, &snapshot)?;
+        let mut runtime_env = files.apply_to_env(env, &snapshot);
+        let mut runtime_cmd = self.cmd.clone();
+        for key in PI_RUN_ENV_VARS {
+            let value = runtime_env
+                .get(key)
+                .cloned()
+                .expect("Pi probe files populate every pinned environment value");
+            pin_mcp_run_environment(&mut runtime_env, &mut runtime_cmd, key, value);
+        }
+        let mut result = super::acp::runtime::probe_acp_command(
+            self.build_command_builder()?.build_initial()?,
+            &current_dir,
+            &runtime_env,
+            &runtime_cmd,
+            auth_method_id
+                .map(str::to_string)
+                .or(configured_auth_method_id),
+        )
+        .await
+        .map_err(|error| files.enrich_probe_error(error))?;
+        let config_overrides = self
+            .acp
+            .as_ref()
+            .and_then(|options| options.config_overrides.as_deref())
+            .unwrap_or_default();
+        filter_pi_thinking_options(
+            &mut result,
+            configured_pi_model(self.model.as_deref(), config_overrides),
+            env,
+        );
+        Ok(Some(result))
+    }
+
+    async fn spawn(
+        &self,
+        current_dir: &Path,
+        prompt: &str,
+        env: &ExecutionEnv,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        ensure_pi_run_prepared(env)?;
+        let current_dir = pi_acp_compatible_current_dir(current_dir);
+        self.acp_harness(env)
+            .await?
+            .spawn_with_command(
+                &current_dir,
+                self.append_prompt.combine_prompt(prompt),
+                self.build_command_builder()?.build_initial()?,
+                env,
+                &self.cmd,
+                approval::wrap(self.approvals.clone()),
+            )
+            .await
+    }
+
+    async fn spawn_follow_up(
+        &self,
+        current_dir: &Path,
+        prompt: &str,
+        session_id: &str,
+        _reset_to_message_id: Option<&str>,
+        env: &ExecutionEnv,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        ensure_pi_run_prepared(env)?;
+        let current_dir = pi_acp_compatible_current_dir(current_dir);
+        self.acp_harness(env)
+            .await?
+            .spawn_follow_up_with_command(
+                &current_dir,
+                self.append_prompt.combine_prompt(prompt),
+                session_id,
+                self.build_command_builder()?.build_follow_up(&[])?,
+                env,
+                &self.cmd,
+                approval::wrap(self.approvals.clone()),
+            )
+            .await
+            .map_err(map_pi_follow_up_error)
+    }
+
+    async fn spawn_structured(
+        &self,
+        current_dir: &Path,
+        prompt: &ExecutorPrompt,
+        env: &ExecutionEnv,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        let mut prompt = prompt.clone();
+        prompt.text = self.append_prompt.combine_prompt(&prompt.text);
+        ensure_pi_run_prepared(env)?;
+        let current_dir = pi_acp_compatible_current_dir(current_dir);
+        self.acp_harness(env)
+            .await?
+            .spawn_structured_with_command(
+                &current_dir,
+                prompt,
+                self.build_command_builder()?.build_initial()?,
+                env,
+                &self.cmd,
+                approval::wrap(self.approvals.clone()),
+            )
+            .await
+    }
+
+    async fn spawn_follow_up_structured(
+        &self,
+        current_dir: &Path,
+        prompt: &ExecutorPrompt,
+        session_id: &str,
+        _reset_to_message_id: Option<&str>,
+        env: &ExecutionEnv,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        let mut prompt = prompt.clone();
+        prompt.text = self.append_prompt.combine_prompt(&prompt.text);
+        ensure_pi_run_prepared(env)?;
+        let current_dir = pi_acp_compatible_current_dir(current_dir);
+        self.acp_harness(env)
+            .await?
+            .spawn_follow_up_structured_with_command(
+                &current_dir,
+                prompt,
+                session_id,
+                self.build_command_builder()?.build_follow_up(&[])?,
+                env,
+                &self.cmd,
+                approval::wrap(self.approvals.clone()),
+            )
+            .await
+            .map_err(map_pi_follow_up_error)
+    }
+
+    fn normalize_logs(&self, msg_store: Arc<MsgStore>, worktree_path: &Path) {
+        super::acp::normalize_logs(msg_store, worktree_path);
+    }
+
+    fn default_runtime_config_path(&self) -> Option<PathBuf> {
+        pi_coding_agent_dir().map(|directory| directory.join("settings.json"))
+    }
+
+    fn default_mcp_config_path(&self) -> Option<PathBuf> {
+        dirs::home_dir().map(|home| home.join(".pi").join("agent").join("mcp.json"))
+    }
+
+    fn native_skill_discovery_roots(&self) -> Vec<PathBuf> {
+        dirs::home_dir()
+            .map(|home| {
+                vec![
+                    home.join(".agents").join("skills"),
+                    home.join(".pi").join("agent").join("skills"),
+                ]
+            })
+            .unwrap_or_default()
+    }
+
+    fn get_availability_info(&self) -> AvailabilityInfo {
+        if prerequisites_available_on_path(|program| {
+            resolve_executable_path_blocking(program).is_some()
+        }) {
+            AvailabilityInfo::InstallationFound
+        } else {
+            AvailabilityInfo::NotFound
+        }
+    }
+}
+
+fn pi_coding_agent_dir() -> Option<PathBuf> {
+    pi_coding_agent_dir_from(
+        std::env::var_os("PI_CODING_AGENT_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+        dirs::home_dir(),
+    )
+}
+
+fn pi_coding_agent_dir_from(
+    configured_directory: Option<PathBuf>,
+    user_home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    configured_directory.or_else(|| user_home.map(|home| home.join(".pi").join("agent")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executors::acp::{AcpConfigChoice, AcpConfigOptionSnapshot, AcpConfigSource};
+
+    fn pi_models_fixture() -> serde_json::Value {
+        serde_json::json!({
+            "providers": {
+                "test-provider": {
+                    "models": [
+                        { "id": "standard", "reasoning": true },
+                        {
+                            "id": "extended",
+                            "reasoning": true,
+                            "thinkingLevelMap": {
+                                "minimal": null,
+                                "xhigh": 32768,
+                                "max": 65536
+                            }
+                        },
+                        { "id": "plain", "reasoning": false }
+                    ]
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn pi_thinking_levels_follow_model_capabilities() {
+        assert_eq!(
+            pi_supported_thinking_levels(&pi_models_fixture(), "test-provider/standard"),
+            Some(
+                ["off", "minimal", "low", "medium", "high"]
+                    .map(str::to_string)
+                    .to_vec()
+            )
+        );
+        assert_eq!(
+            pi_supported_thinking_levels(&pi_models_fixture(), "test-provider/extended"),
+            Some(
+                ["off", "low", "medium", "high", "xhigh", "max"]
+                    .map(str::to_string)
+                    .to_vec()
+            )
+        );
+        assert_eq!(
+            pi_supported_thinking_levels(&pi_models_fixture(), "test-provider/plain"),
+            Some(vec!["off".to_string()])
+        );
+    }
+
+    #[test]
+    fn pi_probe_filters_levels_that_the_selected_model_cannot_activate() {
+        let directory = tempfile::tempdir().expect("temporary Pi agent directory");
+        fs::write(
+            directory.path().join("models.json"),
+            serde_json::to_vec(&pi_models_fixture()).expect("serialize Pi models fixture"),
+        )
+        .expect("write Pi models fixture");
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert(
+            "PI_CODING_AGENT_DIR",
+            directory.path().to_string_lossy().to_string(),
+        );
+        let mut probe = AcpCapabilityProbe {
+            protocol_version: "1".to_string(),
+            agent_name: Some("pi-acp".to_string()),
+            agent_version: Some(PI_ACP_VERSION.to_string()),
+            auth_methods: Vec::new(),
+            supports_session_list: false,
+            supports_session_resume: false,
+            supports_session_load: true,
+            supports_session_close: false,
+            supports_session_delete: false,
+            supports_additional_directories: false,
+            agent_capabilities: serde_json::json!({}),
+            config_source: AcpConfigSource::Stable,
+            config_options: vec![AcpConfigOptionSnapshot {
+                id: "thought_level".to_string(),
+                name: "Thinking".to_string(),
+                description: None,
+                category: Some("thought_level".to_string()),
+                kind: AcpConfigOptionKind::Select {
+                    current_value: "medium".to_string(),
+                    options: ["off", "minimal", "low", "medium", "high", "xhigh"]
+                        .map(|level| AcpConfigChoice {
+                            value: level.to_string(),
+                            name: level.to_string(),
+                            description: None,
+                        })
+                        .to_vec(),
+                },
+            }],
+        };
+
+        filter_pi_thinking_options(&mut probe, Some("test-provider/standard"), &env);
+
+        let AcpConfigOptionKind::Select { options, .. } = &probe.config_options[0].kind else {
+            panic!("Pi thought-level option must remain a select");
+        };
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            ["off", "minimal", "low", "medium", "high"]
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_pi_thinking_override_is_a_configuration_error() {
+        let directory = tempfile::tempdir().expect("temporary Pi agent directory");
+        fs::write(
+            directory.path().join("models.json"),
+            serde_json::to_vec(&pi_models_fixture()).expect("serialize Pi models fixture"),
+        )
+        .expect("write Pi models fixture");
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert(
+            "PI_CODING_AGENT_DIR",
+            directory.path().to_string_lossy().to_string(),
+        );
+        let pi = Pi {
+            model: Some("test-provider/standard".to_string()),
+            acp: Some(AcpExecutionOptions {
+                config_overrides: Some(vec![AcpConfigOverride {
+                    option_id: "thought_level".to_string(),
+                    value: AcpConfigValue::ValueId {
+                        value: "xhigh".to_string(),
+                    },
+                    label_snapshot: Some("Thinking".to_string()),
+                    category_snapshot: Some("thought_level".to_string()),
+                }]),
+                ..AcpExecutionOptions::default()
+            }),
+            ..Pi::default()
+        };
+
+        let Err(error) = pi.acp_harness(&env).await else {
+            panic!("unsupported Pi thinking level must fail before ACP startup");
+        };
+        assert!(matches!(error, ExecutorError::Configuration(_)));
+        let message = error.to_string();
+        assert!(message.contains("test-provider/standard"));
+        assert!(message.contains("thought level `xhigh`"));
+        assert!(message.contains("off, minimal, low, medium, high"));
+    }
+
+    #[test]
+    fn pi_agent_directory_prefers_configured_directory_and_has_default() {
+        let user_home = PathBuf::from("/users/tester");
+        let configured_directory = PathBuf::from("/configured/pi-agent");
+
+        assert_eq!(
+            pi_coding_agent_dir_from(Some(configured_directory.clone()), Some(user_home.clone())),
+            Some(configured_directory)
+        );
+        assert_eq!(
+            pi_coding_agent_dir_from(None, Some(user_home.clone())),
+            Some(user_home.join(".pi").join("agent"))
+        );
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_pi_process_handshake(
+        child: &mut command_group::AsyncGroupChild,
+        pid_file: &Path,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<String>, String> {
+        use tokio::{io::AsyncReadExt, time::Instant};
+
+        async fn stderr_byte_count(child: &mut command_group::AsyncGroupChild) -> usize {
+            let Some(mut stderr) = child.inner().stderr.take() else {
+                return 0;
+            };
+            let mut captured = Vec::new();
+            let _ = stderr.read_to_end(&mut captured).await;
+            captured.len()
+        }
+
+        let deadline = Instant::now() + timeout;
+        let mut observed_pid_file_bytes = 0;
+        loop {
+            match child.inner().try_wait() {
+                Ok(Some(status)) => {
+                    let stderr_bytes = stderr_byte_count(child).await;
+                    return Err(format!(
+                        "launcher exited before Pi PID handshake (exit_code={:?}, stderr_bytes={stderr_bytes})",
+                        status.code()
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(format!(
+                        "launcher status check failed before Pi PID handshake (kind={:?})",
+                        error.kind()
+                    ));
+                }
+            }
+
+            if let Ok(contents) = fs::read_to_string(pid_file) {
+                observed_pid_file_bytes = contents.len();
+                let pids = contents
+                    .lines()
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                if pids.len() == 2 && pids.iter().all(|pid| pid.parse::<u32>().is_ok()) {
+                    return Ok(pids);
+                }
+            }
+
+            if Instant::now() >= deadline {
+                let _ = workspace_utils::process::kill_process_group(child).await;
+                let stderr_bytes = stderr_byte_count(child).await;
+                return Err(format!(
+                    "timed out waiting for Pi PID handshake (timeout_ms={}, pid_file_bytes={observed_pid_file_bytes}, stderr_bytes={stderr_bytes})",
+                    timeout.as_millis()
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    const FAKE_PI_RPC_SOURCE: &str = r#"#!/usr/bin/env node
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { spawn } from "node:child_process";
+import readline from "node:readline";
+
+const sessionFile = process.env.OPENTEAMS_FAKE_PI_SESSION_FILE;
+mkdirSync(dirname(sessionFile), { recursive: true });
+writeFileSync(sessionFile, "");
+let child;
+if (process.env.OPENTEAMS_FAKE_PI_CHILD_PID_FILE) {
+  child = spawn("pi-mcp-adapter", [], { stdio: "ignore" });
+  writeFileSync(process.env.OPENTEAMS_FAKE_PI_CHILD_PID_FILE,
+    JSON.stringify({ pi: process.pid, launcher: process.ppid, mcp: child.pid }));
+}
+const send = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
+const respond = (request, data = {}) => send({ type: "response", id: request.id, success: true, data });
+const state = {
+  sessionId: "pi-offline-session",
+  sessionFile,
+  model: { provider: "offline-provider", id: "offline-model" },
+  thinkingLevel: "off"
+};
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  switch (request.type) {
+    case "get_state":
+      respond(request, state);
+      break;
+    case "get_available_models":
+      respond(request, { models: [{ provider: "offline-provider", id: "offline-model", name: "Offline Model" }] });
+      break;
+    case "get_commands":
+      respond(request, { commands: [] });
+      break;
+    case "get_messages":
+      respond(request, { messages: [] });
+      break;
+    case "prompt":
+      appendFileSync(process.env.OPENTEAMS_FAKE_PI_PROMPTS, `${request.message}\n`);
+      respond(request);
+      if (process.env.OPENTEAMS_FAKE_PI_HANG !== "1") {
+        send({ type: "agent_start" });
+        send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `echo:${request.message}` } });
+        send({ type: "agent_end" });
+        send({ type: "agent_settled" });
+      }
+      break;
+    case "abort":
+      respond(request);
+      send({ type: "agent_settled" });
+      break;
+    default:
+      respond(request);
+  }
+});
+rl.on("close", () => {
+  if (child) child.kill("SIGTERM");
+  process.exit(0);
+});
+"#;
+
+    fn pi() -> Pi {
+        Pi::default()
+    }
+
+    const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pi_acp");
+
+    fn read_fixture(name: &str) -> String {
+        fs::read_to_string(format!("{FIXTURE_DIR}/{name}"))
+            .unwrap_or_else(|_| panic!("read fixture {name}"))
+    }
+
+    #[cfg(unix)]
+    fn install_fake_pi_npx_environment(
+        root: &Path,
+        executable: bool,
+    ) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fake_bin = root.join("bin");
+        let node_modules = root.join("node_modules");
+        let bin = node_modules.join(".bin");
+        let pi_package = node_modules.join(PI_CODING_AGENT_PACKAGE);
+        let mcp_package = node_modules.join(PI_MCP_ADAPTER_PACKAGE);
+        fs::create_dir_all(&fake_bin).expect("fake bin");
+        fs::create_dir_all(&bin).expect("NPX bin");
+        fs::create_dir_all(&pi_package).expect("Pi package");
+        fs::create_dir_all(&mcp_package).expect("MCP package");
+        fs::write(
+            pi_package.join("package.json"),
+            format!(r#"{{"version":"{PI_CODING_AGENT_VERSION}"}}"#),
+        )
+        .expect("Pi metadata");
+        fs::write(
+            mcp_package.join("package.json"),
+            format!(r#"{{"version":"{PI_MCP_ADAPTER_VERSION}"}}"#),
+        )
+        .expect("MCP metadata");
+        fs::write(mcp_package.join("index.ts"), "export default () => {};").expect("MCP entry");
+
+        let mode = if executable { 0o755 } else { 0o644 };
+
+        let fake_npx = fake_bin.join("npx");
+        fs::write(&fake_npx, read_fixture("fake_npx.sh")).expect("fake npx");
+        fs::set_permissions(&fake_npx, fs::Permissions::from_mode(0o755)).expect("fake npx mode");
+
+        let fake_pi_acp = fake_bin.join("pi-acp");
+        fs::write(&fake_pi_acp, read_fixture("fake_pi_acp.mjs")).expect("fake pi-acp");
+        fs::set_permissions(&fake_pi_acp, fs::Permissions::from_mode(mode))
+            .expect("fake pi-acp mode");
+
+        let fake_pi = bin.join("pi");
+        fs::write(&fake_pi, read_fixture("fake_pi.mjs")).expect("fake Pi RPC");
+        fs::set_permissions(&fake_pi, fs::Permissions::from_mode(mode)).expect("fake Pi mode");
+        let fake_mcp = bin.join("pi-mcp-adapter");
+        fs::write(&fake_mcp, read_fixture("fake_pi_mcp_adapter.mjs")).expect("fake MCP adapter");
+        fs::set_permissions(&fake_mcp, fs::Permissions::from_mode(0o755))
+            .expect("fake MCP adapter mode");
+        (
+            fake_bin,
+            bin,
+            root.join("prompts.txt"),
+            root.join("sessions/session.jsonl"),
+        )
+    }
+
+    #[cfg(unix)]
+    fn offline_pi_executor(root: &Path, executable: bool) -> (Pi, ExecutionEnv, PathBuf) {
+        let (fake_bin, bin, prompts, session_file) =
+            install_fake_pi_npx_environment(root, executable);
+        let mut pi = Pi::default();
+        let npx_path = fake_bin.join("npx");
+        pi.cmd.base_command_override = Some(format!(
+            "{} --yes --package pi-acp@0.0.33 pi-acp",
+            npx_path.display()
+        ));
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert(
+            "PATH",
+            format!(
+                "{}:{}:{}",
+                fake_bin.display(),
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        env.insert("HOME", root.join("home").to_string_lossy().to_string());
+        env.insert("NO_UPDATE_NOTIFIER", "1");
+        env.insert(
+            "OPENTEAMS_FAKE_PI_SESSION_FILE",
+            session_file.to_string_lossy().to_string(),
+        );
+        env.insert(
+            "OPENTEAMS_FAKE_PI_PROMPTS",
+            prompts.to_string_lossy().to_string(),
+        );
+        env.insert(
+            "OPENTEAMS_FAKE_PI_CHILD_PID_FILE",
+            root.join("pids.json").to_string_lossy().to_string(),
+        );
+        env.insert(
+            "OPENTEAMS_FAKE_PI_PERMISSION_LOG",
+            root.join("permissions.jsonl").to_string_lossy().to_string(),
+        );
+        env.insert(
+            "OPENTEAMS_FAKE_PI_PROTOCOL_LOG",
+            root.join("protocol.jsonl").to_string_lossy().to_string(),
+        );
+        (pi, env, prompts)
+    }
+
+    #[test]
+    fn exact_versions_are_centralized_and_command_is_fully_pinned() {
+        assert_eq!(PI_ACP_VERSION, "0.0.33");
+        assert_eq!(PI_CODING_AGENT_VERSION, "0.83.0");
+        assert_eq!(PI_MCP_ADAPTER_VERSION, "2.18.0");
+        let command = pi()
+            .build_command_builder()
+            .unwrap()
+            .build_initial()
+            .unwrap();
+        assert_eq!(
+            command.redacted_display(),
+            format!(
+                "{NPX_COMMAND} --yes --package pi-acp@0.0.33 --package @earendil-works/pi-coding-agent@0.83.0 --package pi-mcp-adapter@2.18.0 pi-acp"
+            )
+        );
+        let (program, args) = command.into_parts_for_test();
+        assert_eq!(program, NPX_COMMAND);
+        assert_eq!(
+            args,
+            [
+                "--yes",
+                "--package",
+                "pi-acp@0.0.33",
+                "--package",
+                "@earendil-works/pi-coding-agent@0.83.0",
+                "--package",
+                "pi-mcp-adapter@2.18.0",
+                "pi-acp",
+            ]
+        );
+        assert!(!Pi::default_command().contains("latest"));
+        assert_eq!(
+            Pi::version_command(),
+            format!("{NPX_COMMAND} --yes --package @earendil-works/pi-coding-agent@0.83.0 pi")
+        );
+        assert!(!Pi::version_command().contains("latest"));
+    }
+
+    #[test]
+    fn embedded_runtime_files_are_present_and_never_embed_snapshot_secrets() {
+        assert!(super::PI_LAUNCHER_SOURCE.starts_with("#!/usr/bin/env node\n"));
+        assert!(super::PI_LAUNCHER_SOURCE.contains("--no-skills"));
+        assert!(super::PI_LAUNCHER_SOURCE.contains("--no-extensions"));
+        assert!(super::PI_LAUNCHER_SOURCE.contains("--skill"));
+        assert!(super::PI_LAUNCHER_SOURCE.contains("process.ppid"));
+        assert!(super::PI_LAUNCHER_SOURCE.contains("terminateOrphanedTree"));
+        assert!(super::PI_LAUNCHER_SOURCE.contains("OPENTEAMS_PI_DIAGNOSTIC_LOG"));
+        assert!(super::PI_LAUNCHER_SOURCE.contains("pi_stderr"));
+        assert!(super::PI_LAUNCHER_SOURCE.contains("pi_exit"));
+        assert!(super::PI_MCP_EXTENSION_SOURCE.contains("createMcpAdapter"));
+        assert!(super::PI_APPROVAL_EXTENSION_SOURCE.contains("tool_call"));
+        for source in [
+            super::PI_LAUNCHER_SOURCE,
+            super::PI_MCP_EXTENSION_SOURCE,
+            super::PI_APPROVAL_EXTENSION_SOURCE,
+        ] {
+            assert!(!source.contains("openteams-pi-secret-never-log"));
+        }
+    }
+
+    #[test]
+    fn probe_errors_include_launcher_diagnostics_and_cleanup_log() {
+        let temp = tempfile::tempdir().expect("temporary Pi runtime directory");
+        let files =
+            PiRunFiles::create(temp.path(), &PiRuntimeSnapshot::empty()).expect("Pi runtime files");
+        fs::write(
+            &files.diagnostic_log,
+            "{\"event\":\"pi_stderr\",\"text\":\"inner Pi failure\"}\n",
+        )
+        .expect("write Pi diagnostic log");
+        let diagnostic_log = files.diagnostic_log.clone();
+
+        let error =
+            files.enrich_probe_error(ExecutorError::Io(std::io::Error::other("ACP probe failed")));
+        let message = error.to_string();
+
+        assert!(message.contains("ACP probe failed"));
+        assert!(message.contains("Pi launcher diagnostics"));
+        assert!(message.contains("inner Pi failure"));
+        drop(files);
+        assert!(!diagnostic_log.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pi_acp_current_dir_strips_verbatim_disk_prefix() {
+        assert_eq!(
+            pi_acp_compatible_current_dir(Path::new(r"\\?\E:\workspace\projectSS\openteams-dev")),
+            PathBuf::from(r"E:\workspace\projectSS\openteams-dev")
+        );
+        assert_eq!(
+            pi_acp_compatible_current_dir(Path::new(r"E:\workspace\projectSS\openteams-dev")),
+            PathBuf::from(r"E:\workspace\projectSS\openteams-dev")
+        );
+    }
+
+    #[test]
+    fn windows_launcher_wrapper_is_directly_spawnable_and_forwards_all_arguments() {
+        assert_eq!(
+            windows_launcher_wrapper(Path::new("C:/runtime/pi-run-launcher.mjs")),
+            "@echo off\r\nnode \"%~dp0pi-run-launcher.mjs\" %*\r\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pinned_command_uses_a_spawnable_npx_cmd_shim() {
+        let temp = tempfile::tempdir().expect("temporary NPX shim");
+        let shim = temp.path().join(NPX_COMMAND);
+        fs::write(&shim, "@echo off\r\nexit /b 0\r\n").expect("fake npx.cmd");
+
+        let status = std::process::Command::new(shim)
+            .status()
+            .expect("spawn npx.cmd directly");
+
+        assert!(status.success());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_launcher_executes_pi_javascript_entry_without_cmd_shim() {
+        use std::process::Command;
+
+        let node = resolve_executable_path_blocking("node.exe").expect("Node.js executable");
+        let temp = tempfile::tempdir().expect("temporary NPX environment");
+        let node_modules = temp.path().join("node_modules");
+        let bin = node_modules.join(".bin");
+        let pi_package = node_modules.join(PI_CODING_AGENT_PACKAGE);
+        let mcp_package = node_modules.join(PI_MCP_ADAPTER_PACKAGE);
+        fs::create_dir_all(&bin).expect("NPX bin");
+        fs::create_dir_all(&pi_package).expect("Pi package");
+        fs::create_dir_all(&mcp_package).expect("MCP package");
+        fs::write(
+            pi_package.join("package.json"),
+            format!(r#"{{"version":"{PI_CODING_AGENT_VERSION}","bin":{{"pi":"pi.mjs"}}}}"#),
+        )
+        .expect("Pi package metadata");
+        fs::write(
+            mcp_package.join("package.json"),
+            format!(r#"{{"version":"{PI_MCP_ADAPTER_VERSION}"}}"#),
+        )
+        .expect("MCP package metadata");
+        fs::write(mcp_package.join("index.ts"), "export default () => {};").expect("MCP entry");
+        let args_output = temp.path().join("args.json");
+        let args_output_json = serde_json::to_string(&args_output).expect("serialize args path");
+        fs::write(
+            pi_package.join("pi.mjs"),
+            format!(
+                "import {{ writeFileSync }} from \"node:fs\";\nwriteFileSync({args_output_json}, JSON.stringify(process.argv.slice(2)));\n"
+            ),
+        )
+        .expect("fake Pi entry");
+        let launcher = temp.path().join("launcher.mjs");
+        let approval = temp.path().join("approval_extension.mjs");
+        fs::write(&launcher, PI_LAUNCHER_SOURCE).expect("launcher");
+        fs::write(&approval, "export default () => {};").expect("approval extension");
+        let path = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )))
+        .expect("test PATH");
+
+        let status = Command::new(node)
+            .arg(&launcher)
+            .args(["--mode", "rpc"])
+            .env("PATH", path)
+            .env("OPENTEAMS_PI_SKILL_PATHS_JSON", "[]")
+            .env("OPENTEAMS_PI_APPROVAL_EXTENSION", &approval)
+            .env("OPENTEAMS_PI_ENABLE_MCP_EXTENSION", "0")
+            .status()
+            .expect("run launcher");
+
+        assert!(status.success());
+        let args: Vec<String> =
+            serde_json::from_slice(&fs::read(args_output).expect("captured Pi arguments"))
+                .expect("Pi argument JSON");
+        assert_eq!(
+            args,
+            [
+                "--mode",
+                "rpc",
+                "--no-skills",
+                "--no-extensions",
+                "--extension",
+                approval.to_str().expect("approval path"),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pi_acp_direct_spawn_contract_executes_launcher_and_preserves_arguments() {
+        use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+
+        assert!(resolve_executable_path_blocking("node").is_some());
+        let temp = tempfile::tempdir().expect("temporary NPX environment");
+        let node_modules = temp.path().join("node_modules");
+        let bin = node_modules.join(".bin");
+        let pi_package = node_modules.join(PI_CODING_AGENT_PACKAGE);
+        let mcp_package = node_modules.join(PI_MCP_ADAPTER_PACKAGE);
+        fs::create_dir_all(&bin).expect("NPX bin");
+        fs::create_dir_all(&pi_package).expect("Pi package");
+        fs::create_dir_all(&mcp_package).expect("MCP package");
+        fs::write(
+            pi_package.join("package.json"),
+            format!(r#"{{"version":"{PI_CODING_AGENT_VERSION}"}}"#),
+        )
+        .expect("Pi package metadata");
+        fs::write(
+            mcp_package.join("package.json"),
+            format!(r#"{{"version":"{PI_MCP_ADAPTER_VERSION}"}}"#),
+        )
+        .expect("MCP package metadata");
+        fs::write(mcp_package.join("index.ts"), "export default () => {};").expect("MCP entry");
+        let args_output = temp.path().join("args.json");
+        let fake_pi = bin.join("pi");
+        fs::write(
+            &fake_pi,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                args_output.display()
+            ),
+        )
+        .expect("fake Pi");
+        fs::set_permissions(&fake_pi, fs::Permissions::from_mode(0o700)).expect("Pi mode");
+        let launcher = temp.path().join("launcher.mjs");
+        write_executable_file(&launcher, super::PI_LAUNCHER_SOURCE.as_bytes()).expect("launcher");
+        let approval = temp.path().join("approval_extension.mjs");
+        let mcp = temp.path().join("mcp_extension.mjs");
+        fs::write(&approval, "export default () => {};").expect("approval extension");
+        fs::write(&mcp, "export default () => {};").expect("MCP extension");
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let status = Command::new(&launcher)
+            .args(["--mode", "rpc", "--no-themes"])
+            .env("PATH", path)
+            .env(
+                "OPENTEAMS_PI_SKILL_PATHS_JSON",
+                r#"["/registry/alpha/SKILL.md","/registry/beta/SKILL.md"]"#,
+            )
+            .env("OPENTEAMS_PI_APPROVAL_EXTENSION", &approval)
+            .env("OPENTEAMS_PI_MCP_EXTENSION", &mcp)
+            .env("OPENTEAMS_PI_ENABLE_MCP_EXTENSION", "1")
+            .status()
+            .expect("run launcher");
+        assert!(status.success());
+        let args = fs::read_to_string(args_output).expect("captured arguments");
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            [
+                "--mode",
+                "rpc",
+                "--no-themes",
+                "--no-skills",
+                "--skill",
+                "/registry/alpha/SKILL.md",
+                "--skill",
+                "/registry/beta/SKILL.md",
+                "--no-extensions",
+                "--extension",
+                approval.to_str().expect("approval path"),
+                "--extension",
+                mcp.to_str().expect("MCP path"),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fixed_pi_acp_offline_runs_new_prompt_follow_up_cancel_and_startup_failure() {
+        use std::time::Duration;
+
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        use super::super::acp::{AcpEvent, events::AcpRuntimeEvent};
+
+        async fn prepare_run(
+            pi: &Pi,
+            root: &Path,
+            env: &ExecutionEnv,
+        ) -> Result<(Pi, ExecutionEnv, PreparedMcpRun), ExecutorError> {
+            let mut pi = pi.clone();
+            let mut env = env.clone();
+            let context = McpRunContext::new(root, uuid::Uuid::new_v4(), uuid::Uuid::new_v4())?;
+            let prepared = pi
+                .prepare_mcp_for_run(&MemberMcpConfig::default(), &context, &mut env)
+                .await?;
+            Ok((pi, env, prepared))
+        }
+
+        fn attach_cleanup(mut spawned: SpawnedChild, prepared: PreparedMcpRun) -> SpawnedChild {
+            spawned.cleanup =
+                ExecutorRunCleanup::combine(spawned.cleanup.take(), prepared.into_cleanup());
+            spawned
+        }
+
+        fn prepared_run_paths(env: &ExecutionEnv) -> Vec<PathBuf> {
+            [
+                "PI_ACP_PI_COMMAND",
+                "OPENTEAMS_PI_APPROVAL_EXTENSION",
+                "OPENTEAMS_PI_MCP_EXTENSION",
+                "OPENTEAMS_PI_MCP_SNAPSHOT",
+                "OPENTEAMS_PI_DIAGNOSTIC_LOG",
+            ]
+            .into_iter()
+            .map(|key| {
+                PathBuf::from(
+                    env.get(key)
+                        .unwrap_or_else(|| panic!("missing prepared Pi run path: {key}")),
+                )
+            })
+            .collect()
+        }
+
+        async fn spawn_prepared(
+            pi: &Pi,
+            root: &Path,
+            prompt: &str,
+            env: &ExecutionEnv,
+        ) -> Result<(SpawnedChild, Vec<PathBuf>), ExecutorError> {
+            let (pi, env, prepared) = prepare_run(pi, root, env).await?;
+            let paths = prepared_run_paths(&env);
+            let spawned = pi.spawn(root, prompt, &env).await?;
+            Ok((attach_cleanup(spawned, prepared), paths))
+        }
+
+        async fn spawn_prepared_follow_up(
+            pi: &Pi,
+            root: &Path,
+            prompt: &str,
+            session_id: &str,
+            env: &ExecutionEnv,
+        ) -> Result<(SpawnedChild, Vec<PathBuf>), ExecutorError> {
+            let (pi, env, prepared) = prepare_run(pi, root, env).await?;
+            let paths = prepared_run_paths(&env);
+            let spawned = pi
+                .spawn_follow_up(root, prompt, session_id, None, &env)
+                .await?;
+            Ok((attach_cleanup(spawned, prepared), paths))
+        }
+
+        async fn finish_turn(
+            mut spawned: SpawnedChild,
+        ) -> (Vec<AcpEvent>, crate::executors::ExecutorExitResult) {
+            let stdout = spawned.take_stdout().expect("ACP runtime stdout");
+            let mut lines = BufReader::new(stdout).lines();
+            let mut events = Vec::new();
+            loop {
+                let line = tokio::time::timeout(Duration::from_secs(15), lines.next_line())
+                    .await
+                    .expect("ACP output timeout")
+                    .expect("ACP output read");
+                let Some(line) = line else {
+                    break;
+                };
+                let event = serde_json::from_str::<AcpRuntimeEvent>(&line)
+                    .expect("typed ACP runtime event")
+                    .payload;
+                let done = matches!(event, AcpEvent::Done(_));
+                events.push(event);
+                if done {
+                    break;
+                }
+            }
+            let exit = spawned.exit_signal.take().expect("ACP exit signal");
+            let result = tokio::time::timeout(Duration::from_secs(15), exit)
+                .await
+                .expect("ACP exit timeout")
+                .expect("ACP exit result");
+            workspace_utils::process::kill_process_group(&mut spawned.child)
+                .await
+                .expect("reap fixed pi-acp process tree");
+            (events, result)
+        }
+
+        async fn assert_recorded_tree_terminated(path: &Path) {
+            let pids = {
+                let mut bytes = None;
+                for _ in 0..100 {
+                    if let Ok(data) = fs::read(path) {
+                        bytes = Some(data);
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                let bytes = bytes.unwrap_or_else(|| {
+                    panic!("recorded Pi topology not found: {}", path.display())
+                });
+                serde_json::from_slice::<serde_json::Value>(&bytes).expect("Pi topology JSON")
+            };
+            let pids = ["launcher", "pi", "mcp"].map(|name| {
+                pids[name]
+                    .as_u64()
+                    .expect("recorded process ID")
+                    .to_string()
+            });
+            for _ in 0..100 {
+                let any_alive = pids.iter().any(|pid| {
+                    std::process::Command::new("/bin/kill")
+                        .args(["-0", pid])
+                        .status()
+                        .is_ok_and(|status| status.success())
+                });
+                if !any_alive {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("fixed NPX/launcher/Pi/MCP process tree survived cleanup: {pids:?}");
+        }
+
+        let temp = tempfile::tempdir().expect("offline pi-acp workspace");
+        let (pi, env, prompts) = offline_pi_executor(temp.path(), true);
+
+        let (first, first_runtime_files) = spawn_prepared(&pi, temp.path(), "first", &env)
+            .await
+            .expect("fixed pi-acp session/new and prompt");
+        assert_eq!(first_runtime_files.len(), 5);
+        assert!(first_runtime_files.iter().all(|path| path.exists()));
+        let (first_events, first_exit) = finish_turn(first).await;
+        assert!(matches!(
+            first_exit,
+            crate::executors::ExecutorExitResult::Success
+        ));
+        let session_id = first_events
+            .iter()
+            .find_map(|event| match event {
+                AcpEvent::SessionStart(id) => Some(id.clone()),
+                _ => None,
+            })
+            .expect("Pi ACP session id");
+        assert_eq!(session_id, "pi-offline-session");
+        assert!(first_events.iter().any(|event| {
+            matches!(event, AcpEvent::Message(message) if format!("{message:?}").contains("echo:first"))
+        }));
+        assert!(first_runtime_files.iter().all(|path| !path.exists()));
+        assert_recorded_tree_terminated(&temp.path().join("pids.json")).await;
+
+        let (follow_up, follow_up_runtime_files) =
+            spawn_prepared_follow_up(&pi, temp.path(), "second", &session_id, &env)
+                .await
+                .expect("fixed pi-acp session/load follow-up");
+        let (follow_up_events, follow_up_exit) = finish_turn(follow_up).await;
+        assert!(matches!(
+            follow_up_exit,
+            crate::executors::ExecutorExitResult::Success
+        ));
+        assert!(follow_up_events.iter().any(|event| {
+            matches!(event, AcpEvent::Message(message) if format!("{message:?}").contains("echo:second"))
+        }));
+        assert!(follow_up_runtime_files.iter().all(|path| !path.exists()));
+        assert_recorded_tree_terminated(&temp.path().join("pids.json")).await;
+        assert_eq!(
+            fs::read_to_string(&prompts)
+                .expect("captured Pi prompts")
+                .lines()
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+
+        let mut error_env = env.clone();
+        error_env.insert("OPENTEAMS_FAKE_PI_ERROR", "1");
+        let (failed, failed_runtime_files) =
+            spawn_prepared(&pi, temp.path(), "provider-error", &error_env)
+                .await
+                .expect("fixed pi-acp provider error prompt");
+        let (failed_events, failed_exit) = finish_turn(failed).await;
+        assert!(
+            matches!(failed_exit, crate::executors::ExecutorExitResult::Failure),
+            "unexpected Pi provider error result: {failed_exit:?}, events: {failed_events:?}"
+        );
+        assert!(failed_events.iter().any(|event| {
+            matches!(event, AcpEvent::Error(message) if message.contains("Pi provider connection failed"))
+        }));
+        assert!(
+            !failed_events
+                .iter()
+                .any(|event| matches!(event, AcpEvent::Done(_)))
+        );
+        assert!(failed_runtime_files.iter().all(|path| !path.exists()));
+        assert_recorded_tree_terminated(&temp.path().join("pids.json")).await;
+
+        let mut cancel_env = env.clone();
+        cancel_env.insert("OPENTEAMS_FAKE_PI_HANG", "1");
+        let (mut cancelled, cancelled_runtime_files) =
+            spawn_prepared(&pi, temp.path(), "cancel-me", &cancel_env)
+                .await
+                .expect("fixed pi-acp cancellable prompt");
+        cancelled
+            .cancel
+            .as_ref()
+            .expect("ACP cancellation token")
+            .cancel();
+        let cancelled_exit = cancelled.exit_signal.take().expect("cancel exit signal");
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(15), cancelled_exit)
+                .await
+                .expect("cancel timeout")
+                .expect("cancel result"),
+            crate::executors::ExecutorExitResult::Success
+        ));
+        workspace_utils::process::kill_process_group(&mut cancelled.child)
+            .await
+            .expect("reap cancelled pi-acp tree");
+        drop(cancelled);
+        assert_recorded_tree_terminated(&temp.path().join("pids.json")).await;
+        assert!(cancelled_runtime_files.iter().all(|path| !path.exists()));
+
+        let failed_temp = tempfile::tempdir().expect("offline startup failure workspace");
+        let (failed_pi, failed_env, _) = offline_pi_executor(failed_temp.path(), false);
+        let (failed_pi, failed_env, failed_prepared) =
+            prepare_run(&failed_pi, failed_temp.path(), &failed_env)
+                .await
+                .expect("prepare startup failure run");
+        let failed_runtime_files = prepared_run_paths(&failed_env);
+        let error = tokio::time::timeout(
+            Duration::from_secs(15),
+            failed_pi.spawn(failed_temp.path(), "must fail", &failed_env),
+        )
+        .await
+        .expect("startup failure timeout")
+        .expect_err("non-executable Pi must fail session/new");
+        assert!(error.to_string().contains("ACP startup failed"));
+        drop(failed_prepared.into_cleanup());
+        assert!(
+            failed_runtime_files.iter().all(|path| !path.exists()),
+            "startup failure must clean every owned Pi run file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pi_process_handshake_is_bounded_and_redacts_early_exit_stderr() {
+        use std::{process::Stdio, time::Duration};
+
+        use command_group::AsyncCommandGroup;
+        use tokio::process::Command;
+
+        let temp = tempfile::tempdir().expect("handshake diagnostics");
+        let secret = "pi-handshake-secret-never-log";
+        let mut early_exit = Command::new("/bin/sh");
+        early_exit
+            .args(["-c", "printf '%s' \"$HANDSHAKE_SECRET\" >&2; exit 17"])
+            .env("HANDSHAKE_SECRET", secret)
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = early_exit.group_spawn().expect("spawn early exit");
+        let error = wait_for_pi_process_handshake(
+            &mut child,
+            &temp.path().join("missing-pids"),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect_err("early exit must fail the handshake");
+        assert!(error.contains("exit_code=Some(17)"));
+        assert!(error.contains("stderr_bytes="));
+        assert!(!error.contains(secret));
+
+        let mut stalled = Command::new("/bin/sh");
+        stalled
+            .args(["-c", "sleep 60"])
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = stalled.group_spawn().expect("spawn stalled launcher");
+        let error = wait_for_pi_process_handshake(
+            &mut child,
+            &temp.path().join("still-missing-pids"),
+            Duration::from_millis(100),
+        )
+        .await
+        .expect_err("stalled startup must time out");
+        assert!(error.contains("timed out"));
+        assert!(error.contains("timeout_ms=100"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_group_cancellation_terminates_launcher_pi_and_pi_children() {
+        use std::{fs, os::unix::fs::PermissionsExt, process::Stdio};
+
+        use command_group::AsyncCommandGroup;
+        use tokio::{
+            process::Command,
+            time::{Duration, sleep},
+        };
+
+        assert!(resolve_executable_path_blocking("node").is_some());
+        let temp = tempfile::tempdir().expect("temporary NPX environment");
+        let node_modules = temp.path().join("node_modules");
+        let bin = node_modules.join(".bin");
+        let pi_package = node_modules.join(PI_CODING_AGENT_PACKAGE);
+        let mcp_package = node_modules.join(PI_MCP_ADAPTER_PACKAGE);
+        fs::create_dir_all(&bin).expect("NPX bin");
+        fs::create_dir_all(&pi_package).expect("Pi package");
+        fs::create_dir_all(&mcp_package).expect("MCP package");
+        fs::write(
+            pi_package.join("package.json"),
+            format!(r#"{{"version":"{PI_CODING_AGENT_VERSION}"}}"#),
+        )
+        .expect("Pi metadata");
+        fs::write(
+            mcp_package.join("package.json"),
+            format!(r#"{{"version":"{PI_MCP_ADAPTER_VERSION}"}}"#),
+        )
+        .expect("MCP metadata");
+        fs::write(mcp_package.join("index.ts"), "export default () => {};").expect("MCP entry");
+        let pid_file = temp.path().join("pids");
+        let fake_pi = bin.join("pi");
+        fs::write(
+            &fake_pi,
+            format!(
+                "#!/bin/sh\nsleep 60 &\nprintf '%s\\n%s\\n' \"$$\" \"$!\" > '{}'\nwait\n",
+                pid_file.display()
+            ),
+        )
+        .expect("fake Pi");
+        fs::set_permissions(&fake_pi, fs::Permissions::from_mode(0o700)).expect("Pi mode");
+        let launcher = temp.path().join("launcher.mjs");
+        let approval = temp.path().join("approval_extension.mjs");
+        let mcp = temp.path().join("mcp_extension.ts");
+        write_executable_file(&launcher, PI_LAUNCHER_SOURCE.as_bytes()).expect("launcher");
+        fs::write(&approval, "export default () => {};").expect("approval");
+        fs::write(&mcp, "export default () => {};").expect("MCP");
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut command = Command::new(&launcher);
+        command
+            .env("PATH", path)
+            .env("OPENTEAMS_PI_SKILL_PATHS_JSON", "[]")
+            .env("OPENTEAMS_PI_APPROVAL_EXTENSION", &approval)
+            .env("OPENTEAMS_PI_MCP_EXTENSION", &mcp)
+            .env("OPENTEAMS_PI_ENABLE_MCP_EXTENSION", "0")
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.group_spawn().expect("spawn launcher group");
+        let pids = wait_for_pi_process_handshake(&mut child, &pid_file, Duration::from_secs(15))
+            .await
+            .expect("Pi process startup handshake");
+
+        workspace_utils::process::kill_process_group(&mut child)
+            .await
+            .expect("kill process group");
+        for _ in 0..100 {
+            let any_alive = pids.iter().any(|pid| {
+                std::process::Command::new("/bin/kill")
+                    .args(["-0", pid])
+                    .status()
+                    .is_ok_and(|status| status.success())
+            });
+            if !any_alive {
+                return;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        panic!("Pi process tree survived cancellation: {pids:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn launcher_terminates_pi_tree_when_acp_parent_exits_abnormally() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+
+        use command_group::AsyncCommandGroup;
+        use tokio::{
+            process::Command,
+            time::{Duration, sleep},
+        };
+
+        assert!(resolve_executable_path_blocking("node").is_some());
+        let temp = tempfile::tempdir().expect("temporary NPX environment");
+        let node_modules = temp.path().join("node_modules");
+        let bin = node_modules.join(".bin");
+        let pi_package = node_modules.join(PI_CODING_AGENT_PACKAGE);
+        let mcp_package = node_modules.join(PI_MCP_ADAPTER_PACKAGE);
+        fs::create_dir_all(&bin).expect("NPX bin");
+        fs::create_dir_all(&pi_package).expect("Pi package");
+        fs::create_dir_all(&mcp_package).expect("MCP package");
+        fs::write(
+            pi_package.join("package.json"),
+            format!(r#"{{"version":"{PI_CODING_AGENT_VERSION}"}}"#),
+        )
+        .expect("Pi metadata");
+        fs::write(
+            mcp_package.join("package.json"),
+            format!(r#"{{"version":"{PI_MCP_ADAPTER_VERSION}"}}"#),
+        )
+        .expect("MCP metadata");
+        fs::write(mcp_package.join("index.ts"), "export default () => {};").expect("MCP entry");
+        let pid_file = temp.path().join("pids");
+        let fake_pi = bin.join("pi");
+        fs::write(
+            &fake_pi,
+            format!(
+                "#!/bin/sh\nsleep 60 &\nprintf '%s\\n%s\\n' \"$$\" \"$!\" > '{}'\nwait\n",
+                pid_file.display()
+            ),
+        )
+        .expect("fake Pi");
+        fs::set_permissions(&fake_pi, fs::Permissions::from_mode(0o700)).expect("Pi mode");
+        let launcher = temp.path().join("launcher.mjs");
+        let approval = temp.path().join("approval_extension.mjs");
+        write_executable_file(&launcher, PI_LAUNCHER_SOURCE.as_bytes()).expect("launcher");
+        fs::write(&approval, "export default () => {};").expect("approval");
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "\"$PI_LAUNCHER\" & while [ ! -f \"$PI_PID_FILE\" ]; do sleep 0.02; done; exit 23",
+            ])
+            .env("PI_LAUNCHER", &launcher)
+            .env("PI_PID_FILE", &pid_file)
+            .env("PATH", path)
+            .env("OPENTEAMS_PI_SKILL_PATHS_JSON", "[]")
+            .env("OPENTEAMS_PI_APPROVAL_EXTENSION", &approval)
+            .env("OPENTEAMS_PI_ENABLE_MCP_EXTENSION", "0")
+            .kill_on_drop(true);
+        let mut parent = command.group_spawn().expect("spawn fake ACP parent");
+        let group_id = parent.inner().id().expect("parent process ID");
+        let status = parent.wait().await.expect("wait for abnormal parent exit");
+        assert_eq!(status.code(), Some(23));
+        let pids = fs::read_to_string(&pid_file)
+            .expect("Pi child PIDs")
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+
+        for _ in 0..200 {
+            let any_alive = pids.iter().any(|pid| {
+                std::process::Command::new("/bin/kill")
+                    .args(["-0", pid])
+                    .status()
+                    .is_ok_and(|status| status.success())
+            });
+            if !any_alive {
+                return;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-KILL", &format!("-{group_id}")])
+            .status();
+        panic!("Pi process tree survived abnormal ACP parent exit: {pids:?}");
+    }
+
+    #[test]
+    fn availability_requires_node_and_ignores_npx_and_global_pi() {
+        let mut queried_programs = Vec::new();
+        assert!(prerequisites_available_on_path(|program| {
+            queried_programs.push(program.to_string());
+            matches!(program, "node" | "npx" | "pi")
+        }));
+        assert_eq!(queried_programs, ["node"]);
+
+        let mut missing_node_queries = Vec::new();
+        assert!(!prerequisites_available_on_path(|program| {
+            missing_node_queries.push(program.to_string());
+            matches!(program, "npx" | "pi")
+        }));
+        assert_eq!(missing_node_queries, ["node"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_snapshots_are_private_secret_safe_and_cleaned_on_drop() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("runtime directory");
+        let secret = "openteams-pi-secret-never-log";
+        let snapshot = PiRuntimeSnapshot {
+            skill_paths: vec![PathBuf::from("/registry/only/SKILL.md")],
+            mcp_config: serde_json::json!({
+                "mcpServers": {"only": {"command": "/bin/echo", "env": {"TOKEN": secret}}},
+                "settings": {"hostConfigDiscovery": "off"}
+            }),
+        };
+        assert!(!format!("{snapshot:?}").contains(secret));
+        let files = PiRunFiles::create(temp.path(), &snapshot).expect("runtime files");
+        let paths = files
+            .paths()
+            .into_iter()
+            .map(Path::to_path_buf)
+            .collect::<Vec<_>>();
+        for path in &paths {
+            let expected_mode = if path == &files.launcher_command {
+                0o700
+            } else {
+                0o600
+            };
+            assert_eq!(
+                fs::metadata(path).expect("metadata").permissions().mode() & 0o777,
+                expected_mode
+            );
+        }
+        let cleanup = files.into_cleanup();
+        for path in &paths {
+            assert!(
+                path.exists(),
+                "{} was cleaned before run end",
+                path.display()
+            );
+        }
+        drop(cleanup);
+        for path in paths {
+            assert!(!path.exists(), "{} was not cleaned", path.display());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_acp_startup_removes_all_pi_runtime_files() {
+        let temp = tempfile::tempdir().expect("runtime directory");
+        let mut pi = Pi::default();
+        pi.cmd.base_command_override = Some("/bin/sh -c 'exit 7'".to_string());
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        let context = McpRunContext::new(temp.path(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+            .expect("run context");
+        let prepared = pi
+            .prepare_mcp_for_run(&MemberMcpConfig::default(), &context, &mut env)
+            .await
+            .expect("Pi preparation");
+
+        pi.spawn(temp.path(), "test", &env)
+            .await
+            .expect_err("ACP startup must fail");
+        drop(prepared.into_cleanup());
+
+        let runtime_dir = temp.path().join(".openteams").join("tmp");
+        let remaining = fs::read_dir(runtime_dir)
+            .expect("runtime directory")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("runtime files");
+        assert!(
+            remaining.is_empty(),
+            "Pi runtime files survived startup failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_run_preparation_freezes_the_member_snapshot() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let skill_path = workspace.path().join("registry/skill/SKILL.md");
+        let context =
+            McpRunContext::new(workspace.path(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+                .expect("run context")
+                .with_authorized_skill_paths(vec![skill_path.clone()]);
+        let canonical = MemberMcpConfig {
+            mcp_servers: [(
+                "member-only".to_string(),
+                serde_json::json!({"command": "/bin/echo"}),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        let mut pi = Pi {
+            acp_mcp_policy: AcpMcpPolicy {
+                allowed_server_names: Some(Default::default()),
+                disabled_server_names: Default::default(),
+            },
+            ..Pi::default()
+        };
+
+        let prepared = pi
+            .prepare_mcp_for_run(&canonical, &context, &mut env)
+            .await
+            .expect("Pi preparation");
+        let snapshot_path = PathBuf::from(
+            env.get("OPENTEAMS_PI_MCP_SNAPSHOT")
+                .expect("Pi MCP snapshot path"),
+        );
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&fs::read(&snapshot_path).expect("read Pi MCP snapshot"))
+                .expect("parse Pi MCP snapshot");
+
+        assert_eq!(prepared.server_names(), ["member-only"]);
+        assert_eq!(
+            serde_json::from_str::<Vec<PathBuf>>(
+                env.get("OPENTEAMS_PI_SKILL_PATHS_JSON")
+                    .expect("Pi skill paths")
+            )
+            .expect("parse Pi skill paths"),
+            [skill_path]
+        );
+        assert!(snapshot["mcpServers"].get("member-only").is_some());
+        assert_eq!(snapshot["settings"]["hostConfigDiscovery"], "off");
+        assert_eq!(
+            env.get("OPENTEAMS_PI_ENABLE_MCP_EXTENSION")
+                .map(String::as_str),
+            Some("1")
+        );
+
+        drop(prepared.into_cleanup());
+        assert!(!snapshot_path.exists());
+    }
+
+    #[tokio::test]
+    async fn spawn_without_public_preparation_fails_closed() {
+        let temp = tempfile::tempdir().expect("workspace");
+        let pi = Pi::default();
+        let env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        assert!(matches!(
+            pi.spawn(temp.path(), "must-not-start", &env).await,
+            Err(ExecutorError::McpIsolationNotImplemented)
+        ));
+    }
+
+    #[test]
+    fn unknown_pi_follow_up_session_uses_the_existing_compatibility_error() {
+        let error = map_pi_follow_up_error(ExecutorError::Io(std::io::Error::other(
+            "ACP startup failed: Unknown sessionId: missing",
+        )));
+        assert!(matches!(error, ExecutorError::FollowUpNotSupported(_)));
+
+        let unrelated = map_pi_follow_up_error(ExecutorError::Io(std::io::Error::other(
+            "ACP startup failed: transport closed",
+        )));
+        assert!(matches!(unrelated, ExecutorError::Io(_)));
+    }
+
+    #[test]
+    fn approval_extension_uses_one_identical_gate_for_native_and_mcp_tools() {
+        use std::process::Command;
+
+        let Some(node) = resolve_executable_path_blocking("node") else {
+            panic!("node is required for the Pi approval extension test");
+        };
+        let extension =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/executors/pi/approval_extension.mjs");
+        let script = r#"
+          const { default: install } = await import(process.argv[1]);
+          const handlers = {};
+          install({ on(name, fn) { handlers[name] = fn; } });
+          const calls = [];
+          for (const [toolName, allowed] of [['bash', true], ['docs_lookup', false]]) {
+            let confirms = 0;
+            let prompt;
+            const result = await handlers.tool_call(
+              {
+                toolName,
+                toolCallId: `${toolName}-id`,
+                input: toolName === 'bash'
+                  ? { command: 'cargo test -p executors --features qa-mode pi' }
+                  : { value: 1 },
+              },
+              { ui: { async confirm(title, message) {
+                confirms += 1;
+                prompt = { title, message: JSON.parse(message) };
+                return allowed;
+              } } },
+            );
+            calls.push({ toolName, confirms, prompt, blocked: result?.block === true });
+          }
+          const notifications = [];
+          const ctx = { ui: { notify(message, level) { notifications.push({ message, level }); } } };
+          await handlers.agent_end({
+            willRetry: true,
+            messages: [{ role: 'assistant', stopReason: 'error', errorMessage: 'Connection error.' }],
+          }, ctx);
+          await handlers.agent_end({
+            willRetry: false,
+            messages: [
+              { role: 'assistant', stopReason: 'error', errorMessage: 'Connection error.' },
+              { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'recovered' }] },
+            ],
+          }, ctx);
+          await handlers.agent_end({
+            willRetry: false,
+            messages: [{ role: 'assistant', stopReason: 'error', errorMessage: 'Connection error.' }],
+          }, ctx);
+          await handlers.agent_end({
+            willRetry: false,
+            messages: [{ role: 'assistant', stopReason: 'error', errorMessage: 'secret-value' }],
+          }, ctx);
+          process.stdout.write(JSON.stringify({ calls, notifications }));
+        "#;
+        let output = Command::new(node)
+            .args(["--input-type=module", "--eval", script])
+            .arg(extension)
+            .output()
+            .expect("run extension test");
+        assert!(output.status.success());
+        let result: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("extension result");
+        let calls = &result["calls"];
+        assert_eq!(calls[0]["confirms"], 1);
+        assert_eq!(calls[0]["blocked"], false);
+        assert_eq!(calls[0]["prompt"]["message"]["toolName"], "bash");
+        assert_eq!(
+            calls[0]["prompt"]["message"]["input"]["command"],
+            "cargo test -p executors --features qa-mode pi"
+        );
+        assert_eq!(calls[1]["confirms"], 1);
+        assert_eq!(calls[1]["blocked"], true);
+        let notifications = &result["notifications"];
+        assert_eq!(notifications.as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            notifications[0]["message"],
+            "Pi provider connection failed."
+        );
+        assert_eq!(notifications[0]["level"], "error");
+        assert_eq!(notifications[1]["message"], "Pi provider request failed.");
+        assert!(
+            !output
+                .stdout
+                .windows(12)
+                .any(|bytes| bytes == b"secret-value")
+        );
+    }
+}

@@ -1,0 +1,105 @@
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
+
+use thiserror::Error;
+
+pub mod editor;
+pub(crate) mod preset_loader;
+pub mod team_template_catalog;
+mod versions;
+
+pub use editor::EditorOpenError;
+pub use team_template_catalog::{
+    TeamTemplateCatalogError, TeamTemplateCatalogService, TeamTemplateCatalogSyncResult,
+};
+
+pub const DEFAULT_PR_DESCRIPTION_PROMPT: &str = r#"Update the PR that was just created with a better title and description.
+The PR number is #{pr_number} and the URL is {pr_url}.
+
+Analyze the changes in this branch and write:
+1. A concise, descriptive title that summarizes the changes, postfixed with "(openteams)"
+2. A detailed description that explains:
+   - What changes were made
+   - Why they were made (based on the task context)
+   - Any important implementation details
+   - At the end, include a note: "This PR was written using [openteams](https://openteams.com)"
+
+Use the appropriate CLI tool to update the PR (gh pr edit for GitHub, az repos pr update for Azure DevOps)."#;
+
+pub const DEFAULT_COMMIT_REMINDER_PROMPT: &str = "There are uncommitted changes. Please stage and commit them now with a descriptive commit message.";
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error("Validation error: {0}")]
+    ValidationError(String),
+}
+
+pub type Config = versions::v10::Config;
+pub type NotificationConfig = versions::v10::NotificationConfig;
+pub type NotificationInboxSourcesConfig = versions::v10::NotificationInboxSourcesConfig;
+pub type NotificationInboxSource = versions::v10::NotificationInboxSource;
+pub type EditorConfig = versions::v10::EditorConfig;
+pub type ThemeMode = versions::v10::ThemeMode;
+pub type SoundFile = versions::v10::SoundFile;
+pub type EditorType = versions::v10::EditorType;
+pub type GitHubConfig = versions::v10::GitHubConfig;
+pub type UiLanguage = versions::v10::UiLanguage;
+pub type ShowcaseState = versions::v10::ShowcaseState;
+pub type SendMessageShortcut = versions::v10::SendMessageShortcut;
+pub type ChatMemberPreset = versions::v10::ChatMemberPreset;
+pub type ChatTeamPreset = versions::v10::ChatTeamPreset;
+pub type ChatTeamTemplateTier = versions::v10::ChatTeamTemplateTier;
+pub type ChatPresetsConfig = versions::v10::ChatPresetsConfig;
+pub type ChatWorkflowStep = versions::v10::ChatWorkflowStep;
+pub type ChatBubbleFontSize = versions::v10::ChatBubbleFontSize;
+pub type ChatCompressionConfig = versions::v10::ChatCompressionConfig;
+pub type KeyboardShortcutsConfig = versions::v10::KeyboardShortcutsConfig;
+pub type KeyboardShortcutBinding = versions::v10::KeyboardShortcutBinding;
+pub type KeyboardShortcutOverride = versions::v10::KeyboardShortcutOverride;
+
+/// Will always return config, trying old schemas or eventually returning default
+pub async fn load_config_from_file(config_path: &PathBuf) -> Config {
+    match std::fs::read_to_string(config_path) {
+        Ok(raw_config) => Config::from(raw_config),
+        Err(_) => {
+            tracing::info!("No config file found, creating one");
+            Config::default()
+        }
+    }
+}
+
+/// Saves the config to the given path
+pub async fn save_config_to_file(
+    config: &Config,
+    config_path: &PathBuf,
+) -> Result<(), ConfigError> {
+    let raw_config = serde_json::to_string_pretty(config)?;
+    std::fs::write(config_path, raw_config)?;
+    Ok(())
+}
+
+/// Saves the config via a same-directory temporary file and atomic replace.
+pub async fn save_config_to_file_atomic(
+    config: &Config,
+    config_path: &Path,
+) -> Result<(), ConfigError> {
+    let raw_config = serde_json::to_string_pretty(config)?;
+
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let temp_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut temp_file = tempfile::NamedTempFile::new_in(temp_dir)?;
+    temp_file.write_all(raw_config.as_bytes())?;
+    temp_file.as_file_mut().sync_all()?;
+    temp_file.persist(config_path).map_err(|err| err.error)?;
+
+    Ok(())
+}

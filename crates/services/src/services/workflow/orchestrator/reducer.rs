@@ -1,0 +1,1326 @@
+//! State reducer for workflow execution, step, and agent-session transitions.
+//!
+//! All workflow state writes should go through this module so that transition
+//! validation and audit-event emission stay consistent.
+
+use db::models::{
+    workflow_agent_session::WorkflowAgentSession,
+    workflow_event::{CreateWorkflowEvent, WorkflowEvent},
+    workflow_execution::WorkflowExecution,
+    workflow_loop::WorkflowLoop,
+    workflow_step::WorkflowStep,
+    workflow_transcript::WorkflowTranscript,
+    workflow_types::{to_workflow_wire_value, *},
+};
+use sqlx::{SqliteConnection, SqlitePool};
+use uuid::Uuid;
+
+#[derive(Debug, thiserror::Error)]
+pub enum TransitionError {
+    #[error("非法 execution 状态迁移: {from} -> {to}")]
+    IllegalExecutionTransition { from: String, to: String },
+    #[error("非法 step 状态迁移: {from} -> {to}")]
+    IllegalStepTransition { from: String, to: String },
+    #[error("非法 agent session 状态迁移: {from} -> {to}")]
+    IllegalAgentSessionTransition { from: String, to: String },
+    #[error("过期状态迁移 (已被另一个调用者变更): {entity_id}")]
+    StaleTransition { entity_id: String },
+    #[error("数据库错误: {0}")]
+    Database(String),
+}
+
+impl From<sqlx::Error> for TransitionError {
+    fn from(e: sqlx::Error) -> Self {
+        TransitionError::Database(e.to_string())
+    }
+}
+
+#[derive(Debug)]
+pub struct TransitionResult<T> {
+    pub entity: T,
+    pub event: WorkflowEvent,
+}
+
+fn is_step_waiting(status: &WorkflowStepStatus) -> bool {
+    matches!(
+        status,
+        WorkflowStepStatus::PreCompleted
+            | WorkflowStepStatus::WaitingInput
+            | WorkflowStepStatus::WaitingReview
+    )
+}
+
+fn is_step_completed_like(status: &WorkflowStepStatus) -> bool {
+    matches!(
+        status,
+        WorkflowStepStatus::Completed | WorkflowStepStatus::Skipped
+    )
+}
+
+fn is_step_ready_like(status: &WorkflowStepStatus) -> bool {
+    matches!(
+        status,
+        WorkflowStepStatus::Pending
+            | WorkflowStepStatus::Ready
+            | WorkflowStepStatus::Blocked
+            | WorkflowStepStatus::Revising
+    )
+}
+
+fn is_step_failed_like(status: &WorkflowStepStatus) -> bool {
+    matches!(
+        status,
+        WorkflowStepStatus::Failed
+            | WorkflowStepStatus::InterruptRequested
+            | WorkflowStepStatus::Interrupted
+    )
+}
+
+pub fn derive_execution_status(
+    _current: &WorkflowExecutionStatus,
+    step_statuses: &[WorkflowStepStatus],
+) -> WorkflowExecutionStatus {
+    use WorkflowExecutionStatus as E;
+
+    if step_statuses.is_empty() {
+        return E::Pending;
+    }
+
+    if step_statuses
+        .iter()
+        .all(|status| matches!(status, WorkflowStepStatus::Pending))
+    {
+        return E::Pending;
+    }
+
+    if step_statuses.iter().all(is_step_completed_like) {
+        // All steps done → Waiting for user final review, not auto-complete.
+        return E::Waiting;
+    }
+
+    if step_statuses
+        .iter()
+        .any(|status| matches!(status, WorkflowStepStatus::Running))
+    {
+        return E::Running;
+    }
+
+    if step_statuses.iter().any(is_step_waiting)
+        && step_statuses.iter().all(|status| {
+            is_step_waiting(status) || is_step_completed_like(status) || is_step_ready_like(status)
+        })
+    {
+        return E::Waiting;
+    }
+
+    if step_statuses.iter().any(is_step_failed_like) {
+        return E::Paused;
+    }
+
+    if step_statuses
+        .iter()
+        .all(|status| is_step_ready_like(status) || is_step_completed_like(status))
+    {
+        return E::Paused;
+    }
+
+    E::Paused
+}
+
+pub fn derive_agent_session_state(
+    current: &WorkflowAgentSessionState,
+    step_statuses: &[WorkflowStepStatus],
+) -> WorkflowAgentSessionState {
+    use WorkflowAgentSessionState as A;
+
+    if *current == A::Expired {
+        return A::Expired;
+    }
+
+    if step_statuses.is_empty() {
+        return A::Idle;
+    }
+
+    if step_statuses
+        .iter()
+        .any(|status| matches!(status, WorkflowStepStatus::Running))
+    {
+        return A::Running;
+    }
+
+    if step_statuses.iter().any(|status| {
+        matches!(
+            status,
+            WorkflowStepStatus::PreCompleted
+                | WorkflowStepStatus::WaitingInput
+                | WorkflowStepStatus::WaitingReview
+        )
+    }) {
+        return A::Paused;
+    }
+
+    if step_statuses.iter().any(is_step_failed_like) {
+        return A::Failed;
+    }
+
+    if step_statuses.iter().all(is_step_completed_like) {
+        return A::Completed;
+    }
+
+    A::Idle
+}
+
+fn is_agent_session_derived_state(state: &WorkflowAgentSessionState) -> bool {
+    matches!(
+        state,
+        WorkflowAgentSessionState::Idle
+            | WorkflowAgentSessionState::Running
+            | WorkflowAgentSessionState::Paused
+            | WorkflowAgentSessionState::Failed
+            | WorkflowAgentSessionState::Completed
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Execution transitions
+// ---------------------------------------------------------------------------
+
+pub fn validate_execution_transition(
+    from: &WorkflowExecutionStatus,
+    to: &WorkflowExecutionStatus,
+) -> Result<(), TransitionError> {
+    use WorkflowExecutionStatus::*;
+
+    let allowed = match from {
+        Pending => matches!(
+            to,
+            Running | Failed | Paused | Recompiling | Completed | Waiting
+        ),
+        Running => matches!(to, Failed | Paused | Recompiling | Completed | Waiting),
+        Failed => matches!(to, Running | Paused | Recompiling | Waiting),
+        Paused => matches!(to, Running | Failed | Recompiling | Completed | Waiting),
+        Recompiling => matches!(to, Running | Failed | Paused | Completed | Waiting),
+        Waiting => matches!(to, Running | Failed | Paused | Recompiling | Completed),
+        Completed => false,
+    };
+
+    if allowed {
+        Ok(())
+    } else {
+        tracing::warn!(from = ?from, to = ?to, "非法 execution 状态迁移被拒绝");
+        Err(TransitionError::IllegalExecutionTransition {
+            from: format!("{:?}", from),
+            to: format!("{:?}", to),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Step transitions
+// ---------------------------------------------------------------------------
+
+pub fn validate_step_transition(
+    from: &WorkflowStepStatus,
+    to: &WorkflowStepStatus,
+) -> Result<(), TransitionError> {
+    use WorkflowStepStatus::*;
+
+    let allowed = match from {
+        Pending => matches!(to, Ready | Blocked),
+        Ready => matches!(to, Running),
+        Running => matches!(
+            to,
+            PreCompleted | WaitingInput | WaitingReview | InterruptRequested | Completed | Failed
+        ),
+        PreCompleted => matches!(to, WaitingReview | Revising | Completed | Failed),
+        WaitingInput => matches!(
+            to,
+            Ready | Revising | PreCompleted | Failed | InterruptRequested
+        ),
+        WaitingReview => matches!(
+            to,
+            Ready | Revising | Completed | Failed | WaitingInput | InterruptRequested
+        ),
+        InterruptRequested => matches!(to, Interrupted | Failed),
+        Interrupted => matches!(to, Ready | Failed | Skipped),
+        Blocked => matches!(to, Ready | Skipped),
+        Revising => matches!(to, Ready | Running | Failed),
+        Failed => matches!(to, Ready | Skipped),
+        Completed => matches!(to, Ready),
+        Skipped => false,
+    };
+
+    if allowed {
+        Ok(())
+    } else {
+        tracing::warn!(from = ?from, to = ?to, "非法 step 状态迁移被拒绝");
+        Err(TransitionError::IllegalStepTransition {
+            from: format!("{:?}", from),
+            to: format!("{:?}", to),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Agent session transitions
+// ---------------------------------------------------------------------------
+
+pub fn validate_agent_session_transition(
+    from: &WorkflowAgentSessionState,
+    to: &WorkflowAgentSessionState,
+) -> Result<(), TransitionError> {
+    let allowed = match from {
+        WorkflowAgentSessionState::Expired => false,
+        _ => is_agent_session_derived_state(to) && from != to,
+    };
+
+    if allowed {
+        Ok(())
+    } else {
+        tracing::warn!(from = ?from, to = ?to, "非法 agent session 状态迁移被拒绝");
+        Err(TransitionError::IllegalAgentSessionTransition {
+            from: format!("{:?}", from),
+            to: format!("{:?}", to),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-layer compatibility
+// ---------------------------------------------------------------------------
+
+pub fn validate_step_in_execution(
+    execution_status: &WorkflowExecutionStatus,
+    step_status: &WorkflowStepStatus,
+) -> bool {
+    use WorkflowExecutionStatus as E;
+    use WorkflowStepStatus as S;
+
+    match execution_status {
+        E::Pending => matches!(step_status, S::Pending | S::Ready | S::Blocked | S::Skipped),
+        E::Running => true,
+        E::Failed => !matches!(step_status, S::Running),
+        E::Paused => matches!(
+            step_status,
+            S::Pending
+                | S::Ready
+                | S::Blocked
+                | S::Completed
+                | S::Failed
+                | S::Skipped
+                | S::InterruptRequested
+                | S::Interrupted
+        ),
+        E::Recompiling => !matches!(step_status, S::Running),
+        E::Completed => matches!(step_status, S::Completed | S::Skipped),
+        E::Waiting => matches!(
+            step_status,
+            S::WaitingInput
+                | S::WaitingReview
+                | S::PreCompleted
+                | S::Revising
+                | S::Ready
+                | S::Completed
+                | S::Failed
+                | S::Skipped
+                | S::InterruptRequested
+                | S::Interrupted
+        ),
+    }
+}
+
+pub fn validate_agent_session_in_execution(
+    execution_status: &WorkflowExecutionStatus,
+    session_state: &WorkflowAgentSessionState,
+) -> bool {
+    use WorkflowAgentSessionState as A;
+    use WorkflowExecutionStatus as E;
+
+    match execution_status {
+        E::Pending => matches!(session_state, A::Idle),
+        E::Running => matches!(
+            session_state,
+            A::Idle | A::Running | A::Paused | A::Completed | A::Failed
+        ),
+        E::Failed => matches!(
+            session_state,
+            A::Idle | A::Paused | A::Completed | A::Failed
+        ),
+        E::Paused => matches!(
+            session_state,
+            A::Idle | A::Completed | A::Paused | A::Failed
+        ),
+        E::Recompiling => matches!(
+            session_state,
+            A::Idle | A::Paused | A::Completed | A::Failed
+        ),
+        E::Completed => matches!(session_state, A::Idle | A::Completed | A::Expired),
+        E::Waiting => matches!(session_state, A::Idle | A::Paused | A::Completed),
+    }
+}
+
+fn execution_event_type(to: &WorkflowExecutionStatus) -> WorkflowEventType {
+    use WorkflowExecutionStatus::*;
+
+    match to {
+        Pending => WorkflowEventType::ExecutionCreated,
+        Running => WorkflowEventType::ExecutionRunning,
+        Failed => WorkflowEventType::ExecutionFailed,
+        Paused => WorkflowEventType::ExecutionPaused,
+        Recompiling => WorkflowEventType::PlanRecompiled,
+        Completed => WorkflowEventType::ExecutionCompleted,
+        Waiting => WorkflowEventType::ExecutionWaiting,
+    }
+}
+
+pub async fn transition_execution(
+    pool: &SqlitePool,
+    execution: &WorkflowExecution,
+    to: WorkflowExecutionStatus,
+) -> Result<TransitionResult<WorkflowExecution>, TransitionError> {
+    let from = &execution.status;
+    validate_execution_transition(from, &to)?;
+
+    let from_str = to_workflow_wire_value(from);
+    let to_str = to_workflow_wire_value(&to);
+    let event_type = execution_event_type(&to);
+
+    let updated = WorkflowExecution::update_status(pool, execution.id, to).await?;
+
+    let event = WorkflowEvent::create(
+        pool,
+        &CreateWorkflowEvent {
+            execution_id: execution.id,
+            round_id: None,
+            step_id: None,
+            agent_session_id: None,
+            event_type,
+            status_before: Some(from_str.clone()),
+            status_after: Some(to_str.clone()),
+            detail_json: None,
+        },
+        Uuid::new_v4(),
+    )
+    .await?;
+
+    tracing::info!(
+        execution_id = %execution.id,
+        from = %from_str,
+        to = %to_str,
+        "execution 状态迁移完成"
+    );
+
+    Ok(TransitionResult {
+        entity: updated,
+        event,
+    })
+}
+
+pub async fn transition_execution_with_context(
+    pool: &SqlitePool,
+    execution: &WorkflowExecution,
+    to: WorkflowExecutionStatus,
+    round_id: Option<Uuid>,
+    detail: Option<&str>,
+) -> Result<TransitionResult<WorkflowExecution>, TransitionError> {
+    let from = &execution.status;
+    validate_execution_transition(from, &to)?;
+
+    let from_str = to_workflow_wire_value(from);
+    let to_str = to_workflow_wire_value(&to);
+    let event_type = execution_event_type(&to);
+
+    let updated = WorkflowExecution::update_status(pool, execution.id, to).await?;
+
+    let detail_json = detail.map(|message| {
+        serde_json::json!({
+            "message": message,
+            "execution_id": execution.id.to_string(),
+            "compiled_graph_hash": execution.compiled_graph_hash,
+        })
+        .to_string()
+    });
+
+    let event = WorkflowEvent::create(
+        pool,
+        &CreateWorkflowEvent {
+            execution_id: execution.id,
+            round_id,
+            step_id: None,
+            agent_session_id: None,
+            event_type,
+            status_before: Some(from_str.clone()),
+            status_after: Some(to_str.clone()),
+            detail_json,
+        },
+        Uuid::new_v4(),
+    )
+    .await?;
+
+    tracing::info!(
+        execution_id = %execution.id,
+        from = %from_str,
+        to = %to_str,
+        "execution 状态迁移完成"
+    );
+
+    Ok(TransitionResult {
+        entity: updated,
+        event,
+    })
+}
+
+pub async fn transition_step(
+    pool: &SqlitePool,
+    execution: &WorkflowExecution,
+    step: &WorkflowStep,
+    to: WorkflowStepStatus,
+) -> Result<TransitionResult<WorkflowStep>, TransitionError> {
+    validate_step_transition(&step.status, &to)?;
+
+    if !validate_step_in_execution(&execution.status, &to) {
+        tracing::warn!(
+            execution_status = ?execution.status,
+            step_status = ?to,
+            step_id = %step.id,
+            "step 状态与 execution 状态组合约束冲突"
+        );
+        return Err(TransitionError::IllegalStepTransition {
+            from: format!("{:?}", step.status),
+            to: format!("{:?} (execution 状态 {:?} 下不允许)", to, execution.status),
+        });
+    }
+
+    let from_str = to_workflow_wire_value(&step.status);
+    let to_str = to_workflow_wire_value(&to);
+
+    let updated = WorkflowStep::update_status(pool, step.id, to).await?;
+
+    let event = WorkflowEvent::create(
+        pool,
+        &CreateWorkflowEvent {
+            execution_id: execution.id,
+            round_id: Some(step.round_id),
+            step_id: Some(step.id),
+            agent_session_id: step.assigned_workflow_agent_session_id,
+            event_type: WorkflowEventType::StepStatusChanged,
+            status_before: Some(from_str.clone()),
+            status_after: Some(to_str.clone()),
+            detail_json: Some(
+                serde_json::json!({
+                    "step_key": step.step_key,
+                    "step_title": step.title,
+                })
+                .to_string(),
+            ),
+        },
+        Uuid::new_v4(),
+    )
+    .await?;
+
+    tracing::info!(
+        execution_id = %execution.id,
+        step_id = %step.id,
+        step_key = %step.step_key,
+        from = %from_str,
+        to = %to_str,
+        "step 状态迁移完成"
+    );
+
+    Ok(TransitionResult {
+        entity: updated,
+        event,
+    })
+}
+
+/// Atomically transition a step using compare-and-swap at the DB level.
+/// Returns `Err(StaleTransition)` if the step's current DB status no longer
+/// matches `step.status`, meaning another caller already changed it.
+pub async fn guarded_transition_step(
+    pool: &SqlitePool,
+    execution: &WorkflowExecution,
+    step: &WorkflowStep,
+    to: WorkflowStepStatus,
+) -> Result<TransitionResult<WorkflowStep>, TransitionError> {
+    validate_step_transition(&step.status, &to)?;
+
+    if !validate_step_in_execution(&execution.status, &to) {
+        return Err(TransitionError::IllegalStepTransition {
+            from: format!("{:?}", step.status),
+            to: format!("{:?} (execution 状态 {:?} 下不允许)", to, execution.status),
+        });
+    }
+
+    let from_str = to_workflow_wire_value(&step.status);
+    let to_str = to_workflow_wire_value(&to);
+
+    let updated = WorkflowStep::update_status_if_current(pool, step.id, step.status.clone(), to)
+        .await?
+        .ok_or_else(|| {
+            tracing::warn!(
+                step_id = %step.id,
+                expected = ?step.status,
+                "step CAS 失败: 行已被修改"
+            );
+            TransitionError::StaleTransition {
+                entity_id: step.id.to_string(),
+            }
+        })?;
+
+    let event = WorkflowEvent::create(
+        pool,
+        &CreateWorkflowEvent {
+            execution_id: execution.id,
+            round_id: Some(step.round_id),
+            step_id: Some(step.id),
+            agent_session_id: step.assigned_workflow_agent_session_id,
+            event_type: WorkflowEventType::StepStatusChanged,
+            status_before: Some(from_str.clone()),
+            status_after: Some(to_str.clone()),
+            detail_json: Some(
+                serde_json::json!({
+                    "step_key": step.step_key,
+                    "step_title": step.title,
+                    "guarded": true,
+                })
+                .to_string(),
+            ),
+        },
+        Uuid::new_v4(),
+    )
+    .await?;
+
+    tracing::info!(
+        execution_id = %execution.id,
+        step_id = %step.id,
+        step_key = %step.step_key,
+        from = %from_str,
+        to = %to_str,
+        "step 状态迁移完成 (guarded)"
+    );
+
+    Ok(TransitionResult {
+        entity: updated,
+        event,
+    })
+}
+
+/// Transactional variant used by review resolution so the transcript claim,
+/// state transition and audit event commit or roll back together.
+pub async fn transition_step_in_transaction(
+    connection: &mut SqliteConnection,
+    execution: &WorkflowExecution,
+    step: &WorkflowStep,
+    to: WorkflowStepStatus,
+    detail: Option<serde_json::Value>,
+) -> Result<TransitionResult<WorkflowStep>, TransitionError> {
+    validate_step_transition(&step.status, &to)?;
+    if !validate_step_in_execution(&execution.status, &to) {
+        return Err(TransitionError::IllegalStepTransition {
+            from: format!("{:?}", step.status),
+            to: format!("{:?} (execution 状态 {:?} 下不允许)", to, execution.status),
+        });
+    }
+
+    let from_str = to_workflow_wire_value(&step.status);
+    let to_str = to_workflow_wire_value(&to);
+    let updated = WorkflowStep::update_status_if_current_in_transaction(
+        connection,
+        step.id,
+        step.status.clone(),
+        to,
+    )
+    .await?
+    .ok_or_else(|| TransitionError::StaleTransition {
+        entity_id: step.id.to_string(),
+    })?;
+    let event = WorkflowEvent::create_in_transaction(
+        connection,
+        &CreateWorkflowEvent {
+            execution_id: execution.id,
+            round_id: Some(step.round_id),
+            step_id: Some(step.id),
+            agent_session_id: step.assigned_workflow_agent_session_id,
+            event_type: WorkflowEventType::StepStatusChanged,
+            status_before: Some(from_str),
+            status_after: Some(to_str),
+            detail_json: Some(
+                detail
+                    .unwrap_or_else(|| serde_json::json!({ "transactional": true }))
+                    .to_string(),
+            ),
+        },
+        Uuid::new_v4(),
+    )
+    .await?;
+
+    Ok(TransitionResult {
+        entity: updated,
+        event,
+    })
+}
+
+/// Atomically clears a completed/failed loop step for retry, moves it to
+/// `ready` through the reducer state machine, and records StepStatusChanged.
+pub async fn prepare_step_retry(
+    pool: &SqlitePool,
+    execution: &WorkflowExecution,
+    step: &WorkflowStep,
+    detail: Option<serde_json::Value>,
+) -> Result<TransitionResult<WorkflowStep>, TransitionError> {
+    validate_step_transition(&step.status, &WorkflowStepStatus::Ready)?;
+    if !validate_step_in_execution(&execution.status, &WorkflowStepStatus::Ready) {
+        return Err(TransitionError::IllegalStepTransition {
+            from: format!("{:?}", step.status),
+            to: format!("Ready (execution 状态 {:?} 下不允许)", execution.status),
+        });
+    }
+
+    let mut transaction = pool.begin().await?;
+    let prepared = WorkflowStep::prepare_retry_if_current_in_transaction(
+        &mut transaction,
+        step.id,
+        step.status.clone(),
+    )
+    .await?
+    .ok_or_else(|| TransitionError::StaleTransition {
+        entity_id: step.id.to_string(),
+    })?;
+    let transitioned = transition_step_in_transaction(
+        &mut transaction,
+        execution,
+        &prepared,
+        WorkflowStepStatus::Ready,
+        detail.or_else(|| Some(serde_json::json!({ "reason": "loop_step_retry_prepared" }))),
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(transitioned)
+}
+
+/// The only legal skipped -> pending transition. It is tied to a concrete,
+/// unresolved skipped-retry decision and verifies loop ownership before CAS.
+pub async fn reopen_skipped_step_by_user(
+    connection: &mut SqliteConnection,
+    execution: &WorkflowExecution,
+    workflow_loop: &WorkflowLoop,
+    step: &WorkflowStep,
+    decision_transcript: &WorkflowTranscript,
+    superseded_revision_context: Option<String>,
+) -> Result<TransitionResult<WorkflowStep>, TransitionError> {
+    if workflow_loop.status != WorkflowLoopStatus::WaitingUser
+        || step.status != WorkflowStepStatus::Skipped
+        || step.execution_id != execution.id
+        || step.loop_id != Some(workflow_loop.id)
+        || decision_transcript.execution_id != execution.id
+        || decision_transcript.entry_type != "loop_review"
+    {
+        return Err(TransitionError::IllegalStepTransition {
+            from: format!("{:?}", step.status),
+            to: "pending (invalid skipped retry decision context)".to_string(),
+        });
+    }
+    let meta = decision_transcript
+        .meta_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .unwrap_or_default();
+    if meta.get("review_kind").and_then(|value| value.as_str())
+        != Some("loop_skipped_retry_decision")
+        || meta.get("resolved").and_then(|value| value.as_bool()) == Some(true)
+    {
+        return Err(TransitionError::IllegalStepTransition {
+            from: "skipped".to_string(),
+            to: "pending (resolved or invalid decision transcript)".to_string(),
+        });
+    }
+    let member_ids = serde_json::from_str::<Vec<Uuid>>(&workflow_loop.member_step_ids_json)
+        .map_err(|error| TransitionError::Database(error.to_string()))?;
+    if !member_ids.contains(&step.id) {
+        return Err(TransitionError::IllegalStepTransition {
+            from: "skipped".to_string(),
+            to: "pending (step is not a loop member)".to_string(),
+        });
+    }
+
+    let updated = WorkflowStep::reopen_skipped_for_user_in_transaction(
+        connection,
+        step.id,
+        superseded_revision_context,
+    )
+    .await?
+    .ok_or_else(|| TransitionError::StaleTransition {
+        entity_id: step.id.to_string(),
+    })?;
+    let event = WorkflowEvent::create_in_transaction(
+        connection,
+        &CreateWorkflowEvent {
+            execution_id: execution.id,
+            round_id: Some(step.round_id),
+            step_id: Some(step.id),
+            agent_session_id: step.assigned_workflow_agent_session_id,
+            event_type: WorkflowEventType::StepStatusChanged,
+            status_before: Some("skipped".to_string()),
+            status_after: Some("pending".to_string()),
+            detail_json: Some(
+                serde_json::json!({
+                    "reason": "loop_skipped_step_restarted_by_user",
+                    "loop_id": workflow_loop.id,
+                    "decision_transcript_id": decision_transcript.id,
+                    "guarded": true,
+                })
+                .to_string(),
+            ),
+        },
+        Uuid::new_v4(),
+    )
+    .await?;
+
+    Ok(TransitionResult {
+        entity: updated,
+        event,
+    })
+}
+
+/// Complete a step as an explicit user override, regardless of its current
+/// non-completed runtime state. This path is reserved for the workflow-level
+/// "mark completed" command and still uses CAS plus the normal audit stream.
+pub async fn force_complete_step(
+    pool: &SqlitePool,
+    execution: &WorkflowExecution,
+    step: &WorkflowStep,
+    reason: &str,
+) -> Result<Option<TransitionResult<WorkflowStep>>, TransitionError> {
+    if step.status == WorkflowStepStatus::Completed {
+        return Ok(None);
+    }
+
+    let from_str = to_workflow_wire_value(&step.status);
+    let to_str = to_workflow_wire_value(&WorkflowStepStatus::Completed);
+    let updated = WorkflowStep::mark_completed_if_current(pool, step.id, step.status.clone())
+        .await?
+        .ok_or_else(|| TransitionError::StaleTransition {
+            entity_id: step.id.to_string(),
+        })?;
+    let event = WorkflowEvent::create(
+        pool,
+        &CreateWorkflowEvent {
+            execution_id: execution.id,
+            round_id: Some(step.round_id),
+            step_id: Some(step.id),
+            agent_session_id: step.assigned_workflow_agent_session_id,
+            event_type: WorkflowEventType::StepStatusChanged,
+            status_before: Some(from_str.clone()),
+            status_after: Some(to_str.clone()),
+            detail_json: Some(
+                serde_json::json!({
+                    "step_key": step.step_key,
+                    "step_title": step.title,
+                    "forced": true,
+                    "reason": reason,
+                })
+                .to_string(),
+            ),
+        },
+        Uuid::new_v4(),
+    )
+    .await?;
+
+    tracing::info!(
+        execution_id = %execution.id,
+        step_id = %step.id,
+        from = %from_str,
+        to = %to_str,
+        reason,
+        "step manually marked completed"
+    );
+
+    Ok(Some(TransitionResult {
+        entity: updated,
+        event,
+    }))
+}
+
+pub async fn recover_orphaned_running_step(
+    pool: &SqlitePool,
+    execution: &WorkflowExecution,
+    step: &WorkflowStep,
+) -> Result<Option<TransitionResult<WorkflowStep>>, TransitionError> {
+    if step.status != WorkflowStepStatus::Running {
+        return Ok(None);
+    }
+
+    let to = WorkflowStepStatus::Ready;
+    if !validate_step_in_execution(&execution.status, &to) {
+        return Err(TransitionError::IllegalStepTransition {
+            from: format!("{:?}", step.status),
+            to: format!("{:?} (execution 状态 {:?} 下不允许)", to, execution.status),
+        });
+    }
+
+    let from_str = to_workflow_wire_value(&step.status);
+    let to_str = to_workflow_wire_value(&to);
+
+    let Some(updated) = WorkflowStep::recover_orphaned_running(pool, step.id).await? else {
+        tracing::warn!(
+            step_id = %step.id,
+            expected = ?step.status,
+            "orphaned workflow step recovery skipped: row no longer running"
+        );
+        return Ok(None);
+    };
+
+    let event = WorkflowEvent::create(
+        pool,
+        &CreateWorkflowEvent {
+            execution_id: execution.id,
+            round_id: Some(step.round_id),
+            step_id: Some(step.id),
+            agent_session_id: step.assigned_workflow_agent_session_id,
+            event_type: WorkflowEventType::StepStatusChanged,
+            status_before: Some(from_str.clone()),
+            status_after: Some(to_str.clone()),
+            detail_json: Some(
+                serde_json::json!({
+                    "step_key": step.step_key,
+                    "step_title": step.title,
+                    "recovery": "startup_orphan_recovery",
+                })
+                .to_string(),
+            ),
+        },
+        Uuid::new_v4(),
+    )
+    .await?;
+
+    tracing::info!(
+        execution_id = %execution.id,
+        step_id = %step.id,
+        step_key = %step.step_key,
+        from = %from_str,
+        to = %to_str,
+        "orphaned workflow step recovered"
+    );
+
+    Ok(Some(TransitionResult {
+        entity: updated,
+        event,
+    }))
+}
+
+/// Atomically transition an execution using compare-and-swap at the DB level.
+/// Returns `Err(StaleTransition)` if the execution's current DB status no
+/// longer matches `execution.status`.
+pub async fn guarded_transition_execution(
+    pool: &SqlitePool,
+    execution: &WorkflowExecution,
+    to: WorkflowExecutionStatus,
+) -> Result<TransitionResult<WorkflowExecution>, TransitionError> {
+    let from = &execution.status;
+    validate_execution_transition(from, &to)?;
+
+    let from_str = to_workflow_wire_value(from);
+    let to_str = to_workflow_wire_value(&to);
+    let event_type = execution_event_type(&to);
+
+    let updated = WorkflowExecution::update_status_if_current(pool, execution.id, from.clone(), to)
+        .await?
+        .ok_or_else(|| {
+            tracing::warn!(
+                execution_id = %execution.id,
+                expected = ?from,
+                "execution CAS 失败: 行已被修改"
+            );
+            TransitionError::StaleTransition {
+                entity_id: execution.id.to_string(),
+            }
+        })?;
+
+    let event = WorkflowEvent::create(
+        pool,
+        &CreateWorkflowEvent {
+            execution_id: execution.id,
+            round_id: None,
+            step_id: None,
+            agent_session_id: None,
+            event_type,
+            status_before: Some(from_str.clone()),
+            status_after: Some(to_str.clone()),
+            detail_json: None,
+        },
+        Uuid::new_v4(),
+    )
+    .await?;
+
+    tracing::info!(
+        execution_id = %execution.id,
+        from = %from_str,
+        to = %to_str,
+        "execution 状态迁移完成 (guarded)"
+    );
+
+    Ok(TransitionResult {
+        entity: updated,
+        event,
+    })
+}
+
+pub async fn transition_agent_session(
+    pool: &SqlitePool,
+    execution: &WorkflowExecution,
+    session: &WorkflowAgentSession,
+    to: WorkflowAgentSessionState,
+) -> Result<TransitionResult<WorkflowAgentSession>, TransitionError> {
+    validate_agent_session_transition(&session.state, &to)?;
+
+    if !validate_agent_session_in_execution(&execution.status, &to) {
+        tracing::warn!(
+            execution_status = ?execution.status,
+            session_state = ?to,
+            session_id = %session.id,
+            "agent session 状态与 execution 状态组合约束冲突"
+        );
+        return Err(TransitionError::IllegalAgentSessionTransition {
+            from: format!("{:?}", session.state),
+            to: format!("{:?} (execution 状态 {:?} 下不允许)", to, execution.status),
+        });
+    }
+
+    let from_str = to_workflow_wire_value(&session.state);
+    let to_str = to_workflow_wire_value(&to);
+
+    let updated = WorkflowAgentSession::update_state(pool, session.id, to).await?;
+
+    let event = WorkflowEvent::create(
+        pool,
+        &CreateWorkflowEvent {
+            execution_id: execution.id,
+            round_id: None,
+            step_id: None,
+            agent_session_id: Some(session.id),
+            event_type: WorkflowEventType::AgentSessionStateChanged,
+            status_before: Some(from_str.clone()),
+            status_after: Some(to_str.clone()),
+            detail_json: None,
+        },
+        Uuid::new_v4(),
+    )
+    .await?;
+
+    tracing::info!(
+        execution_id = %execution.id,
+        session_id = %session.id,
+        from = %from_str,
+        to = %to_str,
+        "agent session 状态迁移完成"
+    );
+
+    Ok(TransitionResult {
+        entity: updated,
+        event,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_transition_matrix_matches_simplified_states() {
+        assert!(
+            validate_execution_transition(
+                &WorkflowExecutionStatus::Pending,
+                &WorkflowExecutionStatus::Paused,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_execution_transition(
+                &WorkflowExecutionStatus::Paused,
+                &WorkflowExecutionStatus::Running,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_execution_transition(
+                &WorkflowExecutionStatus::Running,
+                &WorkflowExecutionStatus::Waiting,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_execution_transition(
+                &WorkflowExecutionStatus::Failed,
+                &WorkflowExecutionStatus::Running,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_execution_transition(
+                &WorkflowExecutionStatus::Completed,
+                &WorkflowExecutionStatus::Running,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn derive_execution_status_prioritizes_running_then_pauses_on_failed_steps() {
+        assert_eq!(
+            derive_execution_status(
+                &WorkflowExecutionStatus::Paused,
+                &[
+                    WorkflowStepStatus::Completed,
+                    WorkflowStepStatus::Running,
+                    WorkflowStepStatus::Failed,
+                ],
+            ),
+            WorkflowExecutionStatus::Running
+        );
+
+        assert_eq!(
+            derive_execution_status(
+                &WorkflowExecutionStatus::Paused,
+                &[WorkflowStepStatus::Completed, WorkflowStepStatus::Failed],
+            ),
+            WorkflowExecutionStatus::Paused
+        );
+
+        assert_eq!(
+            derive_execution_status(
+                &WorkflowExecutionStatus::Running,
+                &[WorkflowStepStatus::Failed, WorkflowStepStatus::Failed],
+            ),
+            WorkflowExecutionStatus::Paused
+        );
+    }
+
+    #[test]
+    fn derive_execution_status_maps_waiting_and_paused_rules() {
+        assert_eq!(
+            derive_execution_status(
+                &WorkflowExecutionStatus::Running,
+                &[
+                    WorkflowStepStatus::WaitingInput,
+                    WorkflowStepStatus::WaitingReview,
+                    WorkflowStepStatus::Completed,
+                ],
+            ),
+            WorkflowExecutionStatus::Waiting
+        );
+
+        assert_eq!(
+            derive_execution_status(
+                &WorkflowExecutionStatus::Running,
+                &[
+                    WorkflowStepStatus::Pending,
+                    WorkflowStepStatus::Ready,
+                    WorkflowStepStatus::Completed,
+                ],
+            ),
+            WorkflowExecutionStatus::Paused
+        );
+    }
+
+    #[test]
+    fn derive_execution_status_recomputes_recompiling_from_steps() {
+        assert_eq!(
+            derive_execution_status(
+                &WorkflowExecutionStatus::Recompiling,
+                &[WorkflowStepStatus::Ready],
+            ),
+            WorkflowExecutionStatus::Paused
+        );
+    }
+
+    #[test]
+    fn derive_agent_session_state_follows_step_state() {
+        assert_eq!(
+            derive_agent_session_state(
+                &WorkflowAgentSessionState::Idle,
+                &[WorkflowStepStatus::Running],
+            ),
+            WorkflowAgentSessionState::Running
+        );
+        assert_eq!(
+            derive_agent_session_state(
+                &WorkflowAgentSessionState::Idle,
+                &[WorkflowStepStatus::WaitingInput],
+            ),
+            WorkflowAgentSessionState::Paused
+        );
+        assert_eq!(
+            derive_agent_session_state(
+                &WorkflowAgentSessionState::Idle,
+                &[WorkflowStepStatus::WaitingReview],
+            ),
+            WorkflowAgentSessionState::Paused
+        );
+        assert_eq!(
+            derive_agent_session_state(
+                &WorkflowAgentSessionState::Idle,
+                &[WorkflowStepStatus::Failed],
+            ),
+            WorkflowAgentSessionState::Failed
+        );
+        assert_eq!(
+            derive_agent_session_state(
+                &WorkflowAgentSessionState::Idle,
+                &[WorkflowStepStatus::Completed],
+            ),
+            WorkflowAgentSessionState::Completed
+        );
+        assert_eq!(
+            derive_agent_session_state(
+                &WorkflowAgentSessionState::Completed,
+                &[WorkflowStepStatus::Ready],
+            ),
+            WorkflowAgentSessionState::Idle
+        );
+        assert_eq!(
+            derive_agent_session_state(
+                &WorkflowAgentSessionState::Expired,
+                &[WorkflowStepStatus::Running],
+            ),
+            WorkflowAgentSessionState::Expired
+        );
+    }
+
+    #[test]
+    fn agent_session_transition_matrix_follows_derived_states() {
+        assert!(
+            validate_agent_session_transition(
+                &WorkflowAgentSessionState::Idle,
+                &WorkflowAgentSessionState::Paused,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_agent_session_transition(
+                &WorkflowAgentSessionState::Failed,
+                &WorkflowAgentSessionState::Paused,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_agent_session_transition(
+                &WorkflowAgentSessionState::Interrupted,
+                &WorkflowAgentSessionState::Completed,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_agent_session_transition(
+                &WorkflowAgentSessionState::Running,
+                &WorkflowAgentSessionState::Paused,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_agent_session_transition(
+                &WorkflowAgentSessionState::Completed,
+                &WorkflowAgentSessionState::Completed,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_agent_session_transition(
+                &WorkflowAgentSessionState::Expired,
+                &WorkflowAgentSessionState::Idle,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn execution_step_compatibility_matches_new_rules() {
+        assert!(validate_step_in_execution(
+            &WorkflowExecutionStatus::Running,
+            &WorkflowStepStatus::Running,
+        ));
+        assert!(validate_step_in_execution(
+            &WorkflowExecutionStatus::Waiting,
+            &WorkflowStepStatus::WaitingReview,
+        ));
+        assert!(validate_step_in_execution(
+            &WorkflowExecutionStatus::Waiting,
+            &WorkflowStepStatus::Failed,
+        ));
+        assert!(!validate_step_in_execution(
+            &WorkflowExecutionStatus::Paused,
+            &WorkflowStepStatus::Running,
+        ));
+        assert!(!validate_step_in_execution(
+            &WorkflowExecutionStatus::Failed,
+            &WorkflowStepStatus::Running,
+        ));
+    }
+
+    #[test]
+    fn execution_agent_compatibility_matches_new_rules() {
+        assert!(validate_agent_session_in_execution(
+            &WorkflowExecutionStatus::Waiting,
+            &WorkflowAgentSessionState::Paused,
+        ));
+        assert!(validate_agent_session_in_execution(
+            &WorkflowExecutionStatus::Paused,
+            &WorkflowAgentSessionState::Idle,
+        ));
+        assert!(!validate_agent_session_in_execution(
+            &WorkflowExecutionStatus::Paused,
+            &WorkflowAgentSessionState::Running,
+        ));
+        assert!(validate_agent_session_in_execution(
+            &WorkflowExecutionStatus::Recompiling,
+            &WorkflowAgentSessionState::Paused,
+        ));
+        assert!(!validate_agent_session_in_execution(
+            &WorkflowExecutionStatus::Completed,
+            &WorkflowAgentSessionState::Failed,
+        ));
+    }
+
+    #[test]
+    fn execution_event_type_matches_new_states() {
+        assert_eq!(
+            execution_event_type(&WorkflowExecutionStatus::Pending),
+            WorkflowEventType::ExecutionCreated
+        );
+        assert_eq!(
+            execution_event_type(&WorkflowExecutionStatus::Waiting),
+            WorkflowEventType::ExecutionWaiting
+        );
+        assert_eq!(
+            execution_event_type(&WorkflowExecutionStatus::Recompiling),
+            WorkflowEventType::PlanRecompiled
+        );
+    }
+
+    #[test]
+    fn wire_format_produces_expected_values() {
+        assert_eq!(
+            to_workflow_wire_value(&WorkflowExecutionStatus::Waiting),
+            "waiting"
+        );
+        assert_eq!(
+            to_workflow_wire_value(&WorkflowExecutionStatus::Recompiling),
+            "recompiling"
+        );
+        assert_eq!(
+            to_workflow_wire_value(&WorkflowStepStatus::WaitingInput),
+            "waiting_input"
+        );
+        assert_eq!(
+            to_workflow_wire_value(&WorkflowAgentSessionState::Paused),
+            "paused"
+        );
+    }
+
+    #[test]
+    fn interrupted_steps_can_be_retried() {
+        assert!(
+            validate_step_transition(&WorkflowStepStatus::Interrupted, &WorkflowStepStatus::Ready)
+                .is_ok()
+        );
+    }
+}

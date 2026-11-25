@@ -1,0 +1,3782 @@
+import {
+  ArrowLeft,
+  Bot,
+  Box,
+  Bug,
+  ChevronRight,
+  Code2,
+  FileJson,
+  Flame,
+  Megaphone,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  Rocket,
+  Save,
+  Settings,
+  TrendingUp,
+  Trash2,
+  Upload,
+  Workflow,
+  X,
+} from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { AgentMarkdown } from "@/components/AgentMarkdown";
+import { useConfirmationDialogKeyboard } from "@/components/useConfirmationDialogKeyboard";
+import {
+  DropdownSelect,
+  type DropdownSelectOption,
+} from "@/components/DropdownSelect";
+import { useWorkspace } from "@/context/WorkspaceContext";
+import {
+  agentRuntimeApi,
+  chatAgentsApi,
+  chatSessionsApi,
+  projectApi,
+  sessionAgentsApi,
+  skillsApi,
+  teamPresetsApi,
+} from "@/lib/api";
+import {
+  buildTemplateMemberSpecs,
+  firstAvailableRuntime,
+  runtimeConfiguredModel,
+  type TemplateMemberBuild,
+} from "@/lib/teamTemplateRuntime";
+import {
+  getRuntimeDisplayState,
+  getRunnerLabel,
+} from "@/pages/agent-runtime/agentRuntimeViewModel";
+import {
+  memberMcpServersJson,
+  parseMemberMcpServers,
+  presentMemberMcpError,
+} from "@/pages/team/memberMcpConfig";
+import type {
+  AgentRuntimeStatus,
+  BackendChatSkill,
+  UpdateChatSession,
+} from "@/types";
+import { ProjectMemberType } from "../../../shared/types";
+import type {
+  ChatMemberPreset,
+  ChatTeamTemplateTier,
+  ChatTeamPreset,
+  CreateTeamPresetRequest,
+  JsonValue,
+  MemberExecutionConfig,
+  ProjectMemberWithRuntime,
+  TeamPresetSummary,
+  UpdateTeamPresetRequest,
+} from "../../../shared/types";
+
+export { buildTemplateMemberSpecs };
+export type { TemplateMemberBuild };
+
+type TranslateFn = (
+  key: string,
+  replacements?: Record<string, string | number>,
+) => string;
+
+const translateWithFallback = (
+  t: TranslateFn,
+  key: string,
+  fallback: string,
+  replacements?: Record<string, string | number>,
+): string => {
+  const translated = t(key, replacements);
+  return translated && translated !== key ? translated : fallback;
+};
+
+type WorkflowStepForm = {
+  title: string;
+  description: string;
+};
+
+type MemberForm = {
+  id: string;
+  name: string;
+  description: string;
+  executionConfig?: MemberExecutionConfig;
+  mcpConfigText: string;
+  runnerType: string;
+  recommendedModel: string;
+  systemPrompt: string;
+  selectedSkillIdsText: string;
+  toolsEnabledText: string;
+};
+
+type TeamPresetForm = {
+  id: string;
+  name: string;
+  description: string;
+  leadMemberId: string;
+  tier: ChatTeamTemplateTier;
+  workflowSteps: WorkflowStepForm[];
+  teamProtocol: string;
+  enabled: boolean;
+  members: MemberForm[];
+};
+
+type EditorMode = "create" | "edit" | null;
+
+type DraftCommitOptions = {
+  autoSave?: boolean;
+  validateMcp?: boolean;
+  validateTools?: boolean;
+};
+
+type FormValidationIssue = {
+  fieldKey?: string;
+  memberId?: string;
+  message: string;
+};
+
+const emptyToolsEnabledText = "{}";
+const blankMcpConfigText = memberMcpServersJson({ id: "" });
+const defaultRunnerOptionId = "__default_runner";
+const defaultModelOptionId = "__default_model";
+
+const jsonValueToText = (value: JsonValue | null | undefined): string => {
+  if (value === null || value === undefined) return emptyToolsEnabledText;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return emptyToolsEnabledText;
+  }
+};
+
+const createUniqueTemplateId = (): string =>
+  `custom_${Date.now().toString(36)}_${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+
+const blankMember = (index: number, t?: TranslateFn): MemberForm => ({
+  id: index === 0 ? "lead" : `member_${index + 1}`,
+  name:
+    index === 0
+      ? t
+        ? translateWithFallback(t, "teamTemplates.members.defaultLeadName", "Lead")
+        : "Lead"
+      : t
+        ? translateWithFallback(t, "teamTemplates.members.defaultMemberName", "Member {count}", { count: index + 1 })
+        : `Member ${index + 1}`,
+  description: "",
+  mcpConfigText: blankMcpConfigText,
+  runnerType: "",
+  recommendedModel: "",
+  systemPrompt: "",
+  selectedSkillIdsText: "",
+  toolsEnabledText: emptyToolsEnabledText,
+});
+
+const blankForm = (t?: TranslateFn): TeamPresetForm => ({
+  id: createUniqueTemplateId(),
+  name: "",
+  description: "",
+  leadMemberId: "lead",
+  tier: "standard",
+  workflowSteps: [],
+  teamProtocol: "",
+  enabled: true,
+  members: [blankMember(0, t)],
+});
+
+const detailToForm = (detail: ChatTeamPreset): TeamPresetForm => ({
+  id: detail.id,
+  name: detail.name,
+  description: detail.description || "",
+  leadMemberId: detail.lead_member_id ?? "",
+  tier: detail.tier,
+  workflowSteps: detail.workflow_steps.map((step) => ({
+    title: step.title,
+    description: step.description,
+  })),
+  teamProtocol: detail.team_protocol || "",
+  enabled: detail.enabled,
+  members: detail.members.map((member) => ({
+    id: member.id,
+    name: member.name,
+    description: member.description || "",
+    executionConfig: member.execution_config
+      ? structuredClone(member.execution_config)
+      : undefined,
+    mcpConfigText: memberMcpServersJson(member),
+    runnerType: member.runner_type ?? "",
+    recommendedModel: member.recommended_model ?? "",
+    systemPrompt: member.system_prompt || "",
+    selectedSkillIdsText: member.selected_skill_ids.join(", "),
+    toolsEnabledText: jsonValueToText(member.tools_enabled),
+  })),
+});
+
+const parseSkillIds = (value: string): string[] =>
+  value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const parseToolsEnabled = (value: string): JsonValue | null => {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return JSON.parse(trimmed) as JsonValue;
+};
+
+const normalizeWorkflowSteps = (
+  steps: WorkflowStepForm[],
+): WorkflowStepForm[] =>
+  steps
+    .map((step) => ({
+      title: step.title.trim(),
+      description: step.description.trim(),
+    }))
+    .filter((step) => step.title || step.description);
+
+// Deep-copy the member's execution config and merge the MCP editor text into
+// its canonical `mcp` slot. Runner/model stay as stored; applying a template
+// later overrides only those two fields from runtime availability.
+const memberFormExecutionConfig = (
+  member: MemberForm,
+): MemberExecutionConfig | undefined => {
+  const base = member.executionConfig
+    ? structuredClone(member.executionConfig)
+    : undefined;
+  try {
+    return {
+      ...base,
+      mcp: { mcpServers: parseMemberMcpServers(member.mcpConfigText) },
+    };
+  } catch {
+    return base;
+  }
+};
+
+const formToPayload = (
+  form: TeamPresetForm,
+): CreateTeamPresetRequest | UpdateTeamPresetRequest => ({
+  id: form.id.trim(),
+  name: form.name.trim(),
+  description: form.description.trim() || null,
+  lead_member_id: form.leadMemberId.trim() || null,
+  tier: form.tier,
+  workflow_steps: normalizeWorkflowSteps(form.workflowSteps),
+  team_protocol: form.teamProtocol.trim() || null,
+  enabled: form.enabled,
+  members: form.members.map((member) => ({
+    id: member.id.trim(),
+    name: member.name.trim(),
+    description: member.description.trim() || null,
+    runner_type: member.runnerType.trim() || null,
+    recommended_model: member.recommendedModel.trim() || null,
+    system_prompt: member.systemPrompt.trim() || null,
+    default_workspace_path: null,
+    selected_skill_ids: parseSkillIds(member.selectedSkillIdsText),
+    tools_enabled: parseToolsEnabled(member.toolsEnabledText),
+    execution_config: memberFormExecutionConfig(member),
+    enabled: true,
+  })),
+});
+
+const validateTeamPresetForm = (
+  form: TeamPresetForm,
+  t?: TranslateFn,
+): { issue: FormValidationIssue; payload?: never } | {
+  issue?: never;
+  payload: CreateTeamPresetRequest | UpdateTeamPresetRequest;
+} => {
+  if (!form.name.trim()) {
+    return {
+      issue: {
+        fieldKey: "team:name",
+        message: t
+          ? translateWithFallback(t, "teamTemplates.validation.nameRequired", "Team name is required.")
+          : "Team name is required.",
+      },
+    };
+  }
+
+  if (form.members.length === 0) {
+    return {
+      issue: {
+        fieldKey: "team:members",
+        message: t
+          ? translateWithFallback(t, "teamTemplates.validation.memberRequired", "At least one member is required.")
+          : "At least one member is required.",
+      },
+    };
+  }
+
+  const memberIds = new Set<string>();
+  for (const member of form.members) {
+    const memberId = member.id.trim();
+    if (!member.name.trim()) {
+      return {
+        issue: {
+          fieldKey: `member:${member.id}:name`,
+          memberId: member.id,
+          message: t
+            ? translateWithFallback(t, "teamTemplates.validation.memberNameRequired", "Member name is required.")
+            : "Member name is required.",
+        },
+      };
+    }
+    if (memberId && memberIds.has(memberId)) {
+      return {
+        issue: {
+          fieldKey: `member:${member.id}:id`,
+          memberId: member.id,
+          message: t
+            ? translateWithFallback(t, "teamTemplates.validation.memberIdUnique", "Member IDs must be unique.")
+            : "Member IDs must be unique.",
+        },
+      };
+    }
+    if (memberId) memberIds.add(memberId);
+  }
+
+  const leadMemberId = form.leadMemberId.trim();
+  if (
+    leadMemberId &&
+    !form.members.some((member) => member.id.trim() === leadMemberId)
+  ) {
+    return {
+      issue: {
+        fieldKey: "team:lead_member_id",
+        message: t
+          ? translateWithFallback(t, "teamTemplates.validation.leadInvalid", "Lead member must reference an existing member.")
+          : "Lead member must reference an existing member.",
+      },
+    };
+  }
+
+  for (const member of form.members) {
+    try {
+      parseToolsEnabled(member.toolsEnabledText);
+    } catch {
+      return {
+        issue: {
+          fieldKey: `member:${member.id}:tools_enabled`,
+          memberId: member.id,
+          message: t
+            ? translateWithFallback(t, "teamTemplates.validation.invalidJson", "Invalid JSON format. Please check your syntax.")
+            : "Invalid JSON format. Please check your syntax.",
+        },
+      };
+    }
+  }
+
+  for (const member of form.members) {
+    const mcpIssue = memberMcpConfigIssue(member, t);
+    if (mcpIssue) {
+      return { issue: mcpIssue };
+    }
+  }
+
+  return { payload: formToPayload(form) };
+};
+
+const validateMemberToolsEnabled = (
+  form: TeamPresetForm,
+  memberId: string,
+  t?: TranslateFn,
+): FormValidationIssue | null => {
+  const member = form.members.find((item) => item.id === memberId);
+  if (!member) return null;
+
+  try {
+    parseToolsEnabled(member.toolsEnabledText);
+    return null;
+  } catch {
+    return {
+      fieldKey: `member:${member.id}:tools_enabled`,
+      memberId: member.id,
+      message: t
+        ? translateWithFallback(t, "teamTemplates.validation.invalidJson", "Invalid JSON format. Please check your syntax.")
+        : "Invalid JSON format. Please check your syntax.",
+    };
+  }
+};
+
+const memberMcpErrorMessages = (t?: TranslateFn) => ({
+  invalidJson: t
+    ? translateWithFallback(t, "teamTemplates.validation.invalidJson", "Invalid JSON format. Please check your syntax.")
+    : "Invalid JSON format. Please check your syntax.",
+  invalidShape: t
+    ? translateWithFallback(t, "teamTemplates.validation.invalidMcpShape", "MCP configuration must be a JSON object with an \"mcpServers\" object.")
+    : "MCP configuration must be a JSON object with an \"mcpServers\" object.",
+});
+
+// Validate the canonical MCP editor JSON. Error text comes from
+// presentMemberMcpError, which never echoes config values.
+const memberMcpConfigIssue = (
+  member: MemberForm,
+  t?: TranslateFn,
+): FormValidationIssue | null => {
+  try {
+    parseMemberMcpServers(member.mcpConfigText);
+    return null;
+  } catch (error) {
+    const messages = memberMcpErrorMessages(t);
+    return {
+      fieldKey: `member:${member.id}:mcp_config`,
+      memberId: member.id,
+      message: presentMemberMcpError(
+        error,
+        messages.invalidJson,
+        messages.invalidShape,
+      ),
+    };
+  }
+};
+
+const validateMemberMcpConfig = (
+  form: TeamPresetForm,
+  memberId: string,
+  t?: TranslateFn,
+): FormValidationIssue | null => {
+  const member = form.members.find((item) => item.id === memberId);
+  if (!member) return null;
+  return memberMcpConfigIssue(member, t);
+};
+
+const errorText = (error: unknown, fallback: string): string =>
+  error instanceof Error && error.message ? error.message : fallback;
+
+export const teamTemplateSessionUpdatePayload = (
+  patch: Partial<UpdateChatSession>,
+): UpdateChatSession => ({
+  title: null,
+  status: null,
+  summary_text: null,
+  archive_ref: null,
+  last_seen_diff_key: null,
+  default_workspace_path: null,
+  ...patch,
+});
+
+const isAgentProjectMember = (member: ProjectMemberWithRuntime): boolean =>
+  member.member_type === ProjectMemberType.agent;
+
+const normalizeMemberIdentity = (value?: string | null): string =>
+  (value ?? "").replace(/^@/, "").trim().toLowerCase();
+
+const resolveProjectActiveTemplate = (
+  projectMembers: ProjectMemberWithRuntime[],
+  templates: TeamPresetSummary[],
+): TeamPresetSummary | null => {
+  const agentMembers = projectMembers.filter(isAgentProjectMember);
+  if (agentMembers.length === 0) return null;
+
+  const projectMemberNames = new Set(
+    agentMembers
+      .map((member) => normalizeMemberIdentity(member.member_name))
+      .filter(Boolean),
+  );
+  if (projectMemberNames.size !== agentMembers.length) return null;
+
+  const projectLeadName = normalizeMemberIdentity(
+    agentMembers.find((member) => member.role === "lead")?.member_name,
+  );
+
+  return (
+    templates.find((template) => {
+      const templateMemberNames = template.members
+        .map((member) => normalizeMemberIdentity(member.name))
+        .filter(Boolean);
+      if (
+        templateMemberNames.length === 0 ||
+        templateMemberNames.length !== projectMemberNames.size
+      ) {
+        return false;
+      }
+      if (!templateMemberNames.every((name) => projectMemberNames.has(name))) {
+        return false;
+      }
+
+      const templateLeadName = normalizeMemberIdentity(
+        template.members.find((member) => member.id === template.lead_member_id)
+          ?.name,
+      );
+      return !templateLeadName || !projectLeadName || templateLeadName === projectLeadName;
+    }) ?? null
+  );
+};
+
+export const groupTeamTemplatesByTier = (
+  templates: TeamPresetSummary[],
+): { standard: TeamPresetSummary[]; advanced: TeamPresetSummary[] } => ({
+  standard: templates.filter((template) => template.tier === "standard"),
+  advanced: templates.filter((template) => template.tier === "advanced"),
+});
+
+export const createLatestRequestGate = () => {
+  let latestRequestId = 0;
+  return {
+    start: () => ++latestRequestId,
+    isLatest: (requestId: number) => requestId === latestRequestId,
+  };
+};
+
+const hairlineSurfaceClassName =
+  "relative overflow-hidden border border-[var(--team-template-border)] bg-[var(--team-template-surface)]";
+
+const interactiveSurfaceClassName =
+  "transition-colors duration-150 ease-out hover:border-[var(--team-template-border-strong)] hover:bg-[var(--team-template-surface-hover)]";
+
+const quietButtonClassName =
+  `inline-flex items-center justify-center rounded-[6px] ${hairlineSurfaceClassName} text-[var(--team-template-title)] ${interactiveSurfaceClassName}`;
+
+const brandPrimaryButtonClassName =
+  "inline-flex items-center justify-center border border-[var(--primary)] bg-[var(--primary)] font-semibold text-white transition-colors duration-150 ease-out hover:border-[var(--primary-hover)] hover:bg-[var(--primary-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary-focus)]/40 disabled:cursor-not-allowed disabled:opacity-60";
+
+const activeSurfaceClassName =
+  "border border-[var(--team-template-border)] bg-[var(--team-template-active-surface)]";
+
+const dangerGhostButtonClassName =
+  "inline-flex items-center justify-center rounded-[6px] text-red-400 transition-colors duration-150 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-50 disabled:hover:bg-transparent";
+
+const recommendedBadgeClassName =
+  "inline-flex text-[var(--team-template-muted)] transition-colors duration-150 group-hover:text-[var(--team-template-accent)]";
+
+const getTemplateIcon = (
+  teamId: string,
+  teamName = "",
+): typeof Box => {
+  const signature = `${teamId} ${teamName}`.toLowerCase();
+
+  if (/(release|launch|deploy|rollout)/.test(signature)) return Rocket;
+  if (/(growth|marketing|funnel|experiment)/.test(signature)) {
+    return TrendingUp;
+  }
+  if (/(campaign|content|copy|brand)/.test(signature)) return Megaphone;
+  if (/(prompt|ai|agent|llm)/.test(signature)) return Bot;
+  if (/(bug|fix|qa|quality|test|review)/.test(signature)) return Bug;
+  if (/(full.?stack|delivery|code|dev|engineer|frontend|backend)/.test(signature)) {
+    return Code2;
+  }
+  return Box;
+};
+
+function TeamTemplatesHeader({
+  onCreate,
+  onImport,
+  t,
+}: {
+  onCreate: () => void;
+  onImport: (file: File) => void;
+  t: TranslateFn;
+}) {
+  const systemBreadcrumbLabel = t("agents.breadcrumb.system");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  return (
+    <header className="flex h-[49px] shrink-0 items-center justify-between border-b border-[var(--team-template-border)] px-[29px]">
+      <nav
+        aria-label={translateWithFallback(t, "teamTemplates.breadcrumb", "Breadcrumb")}
+        className="flex min-w-0 items-center gap-[7px]"
+      >
+        <span
+          role="img"
+          aria-label={systemBreadcrumbLabel}
+          title={systemBreadcrumbLabel}
+          className="flex h-[19px] w-[19px] shrink-0 items-center justify-center text-[var(--primary)]"
+        >
+          <Settings aria-hidden="true" className="h-[17px] w-[17px]" />
+        </span>
+        <ChevronRight
+          aria-hidden="true"
+          className="h-[15px] w-[15px] shrink-0 text-[#8f9298]"
+          strokeWidth={2.4}
+        />
+        <h1 className="truncate text-[16px] font-semibold leading-[1.25] text-[var(--team-template-title)]">
+          {t("page.team-templates")}
+        </h1>
+      </nav>
+
+      <div className="flex items-center gap-2">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".json"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) {
+              onImport(file);
+              e.target.value = "";
+            }
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          className="flex h-7 items-center gap-1.5 rounded-[6px] border border-[var(--team-template-border)] bg-[var(--team-template-surface)] px-2.5 text-[13px] font-medium text-[var(--team-template-muted)] transition-colors hover:border-[var(--team-template-border-strong)] hover:text-[var(--team-template-title)]"
+        >
+          <Upload aria-hidden="true" className="h-3.5 w-3.5" />
+          {translateWithFallback(t, "teamTemplates.import", "Import")}
+        </button>
+        <button
+          type="button"
+          onClick={onCreate}
+          className="flex h-7 items-center gap-1.5 rounded-[6px] border border-[var(--team-template-border)] bg-[var(--team-template-surface)] px-2.5 text-[13px] font-medium text-[var(--team-template-muted)] transition-colors hover:border-[var(--team-template-border-strong)] hover:text-[var(--team-template-title)]"
+        >
+          <Plus aria-hidden="true" className="h-3.5 w-3.5" />
+          {translateWithFallback(t, "teamTemplates.new", "New template")}
+          <kbd className="rounded border border-[var(--team-template-border)] px-1.5 py-px font-mono text-[11px] font-medium text-[var(--team-template-aux)]">
+            N
+          </kbd>
+        </button>
+      </div>
+    </header>
+  );
+}
+
+function FormInput({
+  disabled,
+  error,
+  label,
+  onChange,
+  variant = "default",
+  value,
+}: {
+  disabled?: boolean;
+  error?: string;
+  label: string;
+  onChange: (value: string) => void;
+  variant?: "default" | "bare" | "inline";
+  value: string;
+}) {
+  const bare = variant === "bare";
+  const inline = variant === "inline";
+
+  if (inline) {
+    return (
+      <label className="team-template-compact-field grid grid-cols-[72px_minmax(0,1fr)] items-start gap-2 py-1.5">
+        <span className="pt-1 font-mono text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--team-template-aux)]">
+          {label}
+        </span>
+        <span className="min-w-0">
+          <input
+            disabled={disabled}
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            className={[
+              "team-template-field h-7 w-full rounded-[3px] border-0 bg-transparent px-1 text-[14px] text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] hover:bg-[var(--team-template-row-hover)] focus:bg-[var(--team-template-row-hover)] disabled:cursor-not-allowed disabled:opacity-60",
+              error ? "bg-red-500/10 text-red-200" : "",
+            ].join(" ")}
+          />
+          {error && <p className="mt-1 text-[12px] text-red-400">{error}</p>}
+        </span>
+      </label>
+    );
+  }
+
+  return (
+    <label className="block">
+      <span className="font-mono text-[11px] font-semibold uppercase text-[var(--team-template-muted)]">
+        {label}
+      </span>
+      <input
+        disabled={disabled}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className={[
+          "team-template-field mt-1.5 h-8 w-full border text-[14px] text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] disabled:cursor-not-allowed disabled:opacity-60",
+          bare
+            ? "rounded-none border-x-0 border-t-0 bg-transparent px-0 shadow-none focus:border-[var(--team-template-field-focus)]"
+            : "rounded-[4px] bg-[var(--team-template-field-surface)] px-3 shadow-[inset_0_1px_0_var(--team-template-field-highlight)] focus:border-[var(--team-template-field-focus)] focus:shadow-[inset_0_0_0_1px_var(--team-template-field-focus)]",
+          error ? "border-red-400/70" : "border-[var(--team-template-border)]",
+        ].join(" ")}
+      />
+      {error && <p className="mt-1 text-[12px] text-red-400">{error}</p>}
+    </label>
+  );
+}
+
+function FormTextarea({
+  disabled,
+  error,
+  label,
+  onChange,
+  rows = 3,
+  variant = "default",
+  value,
+}: {
+  disabled?: boolean;
+  error?: string;
+  label: string;
+  onChange: (value: string) => void;
+  rows?: number;
+  variant?: "default" | "bare" | "inline";
+  value: string;
+}) {
+  const bare = variant === "bare";
+  const inline = variant === "inline";
+  const inlineTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (!inline) return;
+    const textarea = inlineTextareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "0px";
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  }, [inline, value]);
+
+  if (inline) {
+    return (
+      <label className="team-template-compact-field grid grid-cols-[72px_minmax(0,1fr)] items-start gap-2 py-1.5">
+        <span className="pt-1 font-mono text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--team-template-aux)]">
+          {label}
+        </span>
+        <span className="min-w-0">
+          <textarea
+            ref={inlineTextareaRef}
+            disabled={disabled}
+            value={value}
+            rows={rows}
+            onChange={(event) => onChange(event.target.value)}
+            className={[
+              "team-template-field min-h-7 w-full resize-none overflow-hidden rounded-[3px] border-0 bg-transparent px-1 py-1 text-[14px] leading-[1.45] text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] hover:bg-[var(--team-template-row-hover)] focus:bg-[var(--team-template-row-hover)] disabled:cursor-not-allowed disabled:opacity-60",
+              error ? "bg-red-500/10 text-red-200" : "",
+            ].join(" ")}
+          />
+          {error && <p className="mt-1 text-[12px] text-red-400">{error}</p>}
+        </span>
+      </label>
+    );
+  }
+
+  return (
+    <label className="block">
+      <span className="font-mono text-[11px] font-semibold uppercase text-[var(--team-template-muted)]">
+        {label}
+      </span>
+      <textarea
+        disabled={disabled}
+        value={value}
+        rows={rows}
+        onChange={(event) => onChange(event.target.value)}
+        className={[
+          "team-template-field mt-1.5 w-full resize-y border text-[14px] leading-relaxed text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] disabled:cursor-not-allowed disabled:opacity-60",
+          bare
+            ? "rounded-none border-x-0 border-t-0 bg-transparent px-0 py-1 shadow-none focus:border-[var(--team-template-field-focus)]"
+            : "rounded-[4px] bg-[var(--team-template-field-surface)] px-3 py-2 shadow-[inset_0_1px_0_var(--team-template-field-highlight)] focus:border-[var(--team-template-field-focus)] focus:shadow-[inset_0_0_0_1px_var(--team-template-field-focus)]",
+          error ? "border-red-400/70" : "border-[var(--team-template-border)]",
+        ].join(" ")}
+      />
+      {error && <p className="mt-1 text-[12px] text-red-400">{error}</p>}
+    </label>
+  );
+}
+
+function AutoGrowingTextarea({
+  disabled,
+  onChange,
+  placeholder,
+  value,
+}: {
+  disabled?: boolean;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  value: string;
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "0px";
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  }, [value]);
+
+  return (
+    <textarea
+      ref={textareaRef}
+      disabled={disabled}
+      value={value}
+      rows={1}
+      placeholder={placeholder}
+      onChange={(event) => onChange(event.target.value)}
+      className="team-template-document-description -mx-1 mt-1.5 w-full resize-none overflow-hidden rounded-[4px] border-0 bg-transparent px-1 py-1 text-[14px] leading-relaxed text-[var(--team-template-muted)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-aux)] hover:bg-[var(--team-template-row-hover)] focus:bg-[var(--team-template-row-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+    />
+  );
+}
+
+function WorkflowStepDescriptionTextarea({
+  disabled,
+  onChange,
+  placeholder,
+  value,
+}: {
+  disabled?: boolean;
+  onChange: (value: string) => void;
+  placeholder: string;
+  value: string;
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "0px";
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  }, [value]);
+
+  return (
+    <textarea
+      ref={textareaRef}
+      disabled={disabled}
+      value={value}
+      rows={1}
+      placeholder={placeholder}
+      onChange={(event) => onChange(event.target.value)}
+      className="team-template-workflow-step-description -mx-1 mt-0.5 min-h-6 w-full resize-none overflow-hidden rounded-[3px] border-0 bg-transparent px-1 py-0.5 text-[13px] leading-[1.45] text-[var(--team-template-member-description)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-aux)] hover:bg-[var(--team-template-row-hover)] focus:bg-[var(--team-template-row-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+    />
+  );
+}
+
+function MarkdownEditableField({
+  compact = false,
+  disabled,
+  editable,
+  onCommit,
+  placeholder,
+  rows = 5,
+  value,
+}: {
+  compact?: boolean;
+  disabled?: boolean;
+  editable: boolean;
+  onCommit: (value: string) => void;
+  placeholder: string;
+  rows?: number;
+  value: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+
+  useEffect(() => {
+    setDraft(value);
+  }, [value]);
+
+  const commitDraft = () => {
+    setEditing(false);
+    if (draft !== value) {
+      onCommit(draft);
+    }
+  };
+
+  if (editable && editing) {
+    return (
+      <textarea
+        autoFocus
+        disabled={disabled}
+        rows={rows}
+        value={draft}
+        placeholder={placeholder}
+        onBlur={commitDraft}
+        onChange={(event) => setDraft(event.target.value)}
+        className={
+          compact
+            ? "team-template-field w-full resize-y rounded-[3px] border border-transparent bg-transparent px-1 py-1 text-[14px] leading-[1.45] text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] hover:bg-white/[0.035] focus:border-[var(--team-template-field-focus)] focus:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-60"
+            : "team-template-field w-full resize-y rounded-[4px] border border-[var(--team-template-border)] bg-[var(--team-template-field-surface)] px-3 py-2 text-[14px] leading-relaxed text-[var(--team-template-title)] shadow-[inset_0_1px_0_var(--team-template-field-highlight)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] focus:border-[var(--team-template-field-focus)] focus:shadow-[inset_0_0_0_1px_var(--team-template-field-focus)] disabled:cursor-not-allowed disabled:opacity-60"
+        }
+      />
+    );
+  }
+
+  return (
+    <div
+      className={[
+        compact
+          ? "min-h-7 max-h-12 overflow-hidden rounded-[3px] border border-transparent bg-transparent px-1 py-1 text-[14px] leading-[1.45] text-[var(--team-template-title)]"
+          : "min-h-[72px] rounded-[4px] border border-[var(--team-template-border)] bg-[var(--team-template-field-surface)] p-3 text-[14px] leading-relaxed text-[var(--team-template-title)] shadow-[inset_0_1px_0_var(--team-template-field-highlight)]",
+        editable && !disabled
+          ? compact
+            ? "cursor-text hover:bg-[var(--team-template-row-hover)] hover:text-[var(--team-template-title)]"
+            : "cursor-text hover:border-[var(--team-template-border-strong)]"
+          : "",
+      ].join(" ")}
+      onClick={() => {
+        if (editable && !disabled) setEditing(true);
+      }}
+    >
+      {value.trim() ? (
+        <AgentMarkdown content={value} fontSize={14} />
+      ) : (
+        <span className="text-[var(--team-template-muted)]">{placeholder}</span>
+      )}
+    </div>
+  );
+}
+
+function RecommendedBadge({ t }: { t: TranslateFn }) {
+  const label = translateWithFallback(t, "teamTemplates.recommendedBadge", "Recommended");
+  return (
+    <span className={recommendedBadgeClassName} aria-label={label} title={label}>
+      <Flame aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.2} />
+    </span>
+  );
+}
+
+const getAvatarInitials = (label: string): string => {
+  const parts = label
+    .replace(/[_-]+/g, " ")
+    .split(/\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const initials = (parts.length > 1 ? parts.slice(0, 2) : parts)
+    .map((part) => part[0]?.toUpperCase())
+    .join("");
+
+  return initials || "AI";
+};
+
+const getTemplateAgentInitials = (template: TeamPresetSummary): string[] => {
+  const source = template.members
+    .map((member) => member.name)
+    .filter(Boolean);
+
+  if (source.length === 0) {
+    return Array.from(
+      { length: Math.min(template.member_count, 3) },
+      (_, index) => `A${index + 1}`,
+    );
+  }
+
+  return source.slice(0, 3).map(getAvatarInitials);
+};
+
+const getTemplateVersionLabel = (template: TeamPresetSummary): string =>
+  template.is_builtin ? "v1.2" : "v1.0";
+
+const memberDotClassNames = [
+  "bg-[#4DAAFB]",
+  "bg-[#C4A7FF]",
+  "bg-[#5DE4A7]",
+  "bg-[#F5B452]",
+] as const;
+
+const memberRoleToneClassNames = [
+  "text-[#6DBBFF]",
+  "text-[#C4A7FF]",
+  "text-[#5DE4A7]",
+  "text-[#F5B452]",
+] as const;
+
+const getMemberToneIndex = (member: ChatMemberPreset, index: number): number => {
+  const signature = [
+    member.id,
+    member.name,
+    member.description ?? "",
+    member.selected_skill_ids.join(" "),
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  if (/(ux|design|copy|writer|brand|content)/.test(signature)) {
+    return 1;
+  }
+  if (/(backend|server|api|data|analytics|qa|test|review)/.test(signature)) {
+    return 2;
+  }
+  if (/(ops|release|growth|research|experiment)/.test(signature)) {
+    return 3;
+  }
+
+  return index % memberDotClassNames.length;
+};
+
+const getMemberDotClassName = (
+  member: ChatMemberPreset,
+  index: number,
+): string => memberDotClassNames[getMemberToneIndex(member, index)];
+
+const getMemberRoleToneClassName = (
+  member: ChatMemberPreset,
+  index: number,
+): string => memberRoleToneClassNames[getMemberToneIndex(member, index)];
+
+const getMemberRoleKey = (member: ChatMemberPreset): string => {
+  const normalized = (member.id || member.name || "agent")
+    .trim()
+    .replace(/[\s-]+/g, "_")
+    .replace(/[^a-zA-Z0-9_]/g, "")
+    .toLowerCase();
+
+  return normalized || "agent";
+};
+
+const memberFallbackValue = "Not configured";
+
+const formatMemberValue = (
+  value?: string | null,
+  fallback = memberFallbackValue,
+): string => {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : fallback;
+};
+
+const formatMemberJsonConfig = (value: JsonValue | null): string | null => {
+  if (value === null) return null;
+  if (
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 0
+  ) {
+    return null;
+  }
+
+  const serialized = JSON.stringify(value, null, 2);
+  return serialized && serialized !== "null" ? serialized : null;
+};
+
+const memberFormToPreset = (member: MemberForm): ChatMemberPreset => {
+  let toolsEnabled: JsonValue | null = null;
+  try {
+    toolsEnabled = parseToolsEnabled(member.toolsEnabledText);
+  } catch {
+    toolsEnabled = null;
+  }
+
+  return {
+    id: member.id,
+    name: member.name,
+    description: member.description,
+    runner_type: member.runnerType.trim() || null,
+    recommended_model: member.recommendedModel.trim() || null,
+    system_prompt: member.systemPrompt,
+    default_workspace_path: null,
+    selected_skill_ids: parseSkillIds(member.selectedSkillIdsText),
+    tools_enabled: toolsEnabled as JsonValue,
+    execution_config: memberFormExecutionConfig(member),
+    is_builtin: false,
+    enabled: true,
+  };
+};
+
+const formToPreviewDetail = (form: TeamPresetForm): ChatTeamPreset => ({
+  id: form.id,
+  name: form.name,
+  description: form.description,
+  members: form.members.map(memberFormToPreset),
+  lead_member_id: form.leadMemberId || null,
+  workflow_steps: form.workflowSteps,
+  team_protocol: form.teamProtocol,
+  is_builtin: false,
+  enabled: form.enabled,
+  tier: form.tier,
+});
+
+export const teamPresetDetailToDraft = detailToForm;
+export const teamPresetDraftToPreviewDetail = formToPreviewDetail;
+
+const formDirtySnapshot = (form: TeamPresetForm): string =>
+  JSON.stringify({
+    name: form.name,
+    description: form.description,
+    leadMemberId: form.leadMemberId,
+    workflowSteps: form.workflowSteps,
+    teamProtocol: form.teamProtocol,
+    enabled: form.enabled,
+    members: form.members.map((member) => ({
+      id: member.id,
+      name: member.name,
+      description: member.description,
+      mcpConfigText: member.mcpConfigText,
+      runnerType: member.runnerType,
+      recommendedModel: member.recommendedModel,
+      systemPrompt: member.systemPrompt,
+      selectedSkillIdsText: member.selectedSkillIdsText,
+      toolsEnabledText: member.toolsEnabledText,
+    })),
+  });
+
+const teamTemplateDraftKey = (templateId: string): string =>
+  `teamTemplateDraft:${templateId}`;
+
+const saveDraftBackup = (templateId: string, form: TeamPresetForm): void => {
+  try {
+    localStorage.setItem(teamTemplateDraftKey(templateId), JSON.stringify(form));
+  } catch {
+    // localStorage may be full or unavailable; silently ignore
+  }
+};
+
+const restoreDraftBackup = (templateId: string): TeamPresetForm | null => {
+  try {
+    const raw = localStorage.getItem(teamTemplateDraftKey(templateId));
+    if (!raw) return null;
+    return JSON.parse(raw) as TeamPresetForm;
+  } catch {
+    return null;
+  }
+};
+
+const clearDraftBackup = (templateId: string): void => {
+  try {
+    localStorage.removeItem(teamTemplateDraftKey(templateId));
+  } catch {
+    // silently ignore
+  }
+};
+
+const nextMemberDraft = (members: MemberForm[], t?: TranslateFn): MemberForm => {
+  const usedIds = new Set(members.map((member) => member.id));
+  let index = members.length + 1;
+  let id = `member_${index}`;
+  while (usedIds.has(id)) {
+    index += 1;
+    id = `member_${index}`;
+  }
+  return {
+    ...blankMember(index - 1, t),
+    id,
+    name: t
+      ? translateWithFallback(t, "teamTemplates.members.defaultMemberName", "Member {count}", { count: index })
+      : `Member ${index}`,
+  };
+};
+
+export const createTeamPresetDraft = (): TeamPresetForm => blankForm();
+
+export const addCustomMemberDraft = (
+  form: TeamPresetForm,
+): { form: TeamPresetForm; selectedMemberId: string } => {
+  const nextMember = nextMemberDraft(form.members);
+  return {
+    form: {
+      ...form,
+      leadMemberId: form.leadMemberId || nextMember.id,
+      members: [...form.members, nextMember],
+    },
+    selectedMemberId: nextMember.id,
+  };
+};
+
+export const commitTeamProtocolDraft = (
+  form: TeamPresetForm,
+  teamProtocol: string,
+): TeamPresetForm => ({ ...form, teamProtocol });
+
+export const commitMemberSystemPromptDraft = (
+  form: TeamPresetForm,
+  memberId: string,
+  systemPrompt: string,
+): TeamPresetForm => ({
+  ...form,
+  members: form.members.map((member) =>
+    member.id === memberId ? { ...member, systemPrompt } : member,
+  ),
+});
+
+export const validateTeamPresetDraft = validateTeamPresetForm;
+export const validateMemberToolsEnabledDraft = validateMemberToolsEnabled;
+export const validateMemberMcpConfigDraft = validateMemberMcpConfig;
+export const teamPresetDraftToPayload = formToPayload;
+
+function MemberInfoSection({
+  children,
+  meta,
+  title,
+}: {
+  children: ReactNode;
+  meta: string;
+  title: string;
+}) {
+  return (
+    <section className="team-template-compact-section">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <h3 className="truncate text-[13px] font-semibold leading-tight text-[var(--team-template-title)]">
+            {title}
+          </h3>
+        </div>
+        <span className="font-mono text-[10px] font-medium tracking-[0.06em] text-[var(--team-template-aux)]">
+          {meta}
+        </span>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function MemberInfoField({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="grid grid-cols-[88px_minmax(0,1fr)] gap-3 py-1.5">
+      <span className="font-mono text-[11px] font-medium uppercase text-[var(--team-template-aux)]">
+        {label}
+      </span>
+      <span className="min-w-0 truncate font-mono text-[13px] text-[var(--team-template-title)]">
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function TemplateMemberInfoPage({
+  disabled = false,
+  editable = false,
+  fieldErrors = {},
+  formMember,
+  index,
+  installedSkills = [],
+  isLead,
+  member,
+  onMemberChange,
+  runtimes = [],
+  t,
+}: {
+  disabled?: boolean;
+  editable?: boolean;
+  fieldErrors?: Record<string, string>;
+  formMember?: MemberForm;
+  index: number;
+  installedSkills?: BackendChatSkill[];
+  isLead: boolean;
+  member: ChatMemberPreset;
+  onMemberChange?: (
+    patch: Partial<MemberForm>,
+    options?: DraftCommitOptions,
+  ) => void;
+  runtimes?: AgentRuntimeStatus[];
+  t: TranslateFn;
+}) {
+  const roleKey = getMemberRoleKey(member);
+  const roleDescription = formatMemberValue(
+    member.description,
+    translateWithFallback(t, "teamTemplates.member.noDescription", "No role description."),
+  );
+  const systemPrompt = formatMemberValue(
+    member.system_prompt,
+    roleDescription,
+  );
+  const mcpServerCount = Object.keys(
+    member.execution_config?.mcp?.mcpServers ?? {},
+  ).length;
+  const mcpConfig = mcpServerCount > 0 ? memberMcpServersJson(member) : null;
+  const toolsConfig = formatMemberJsonConfig(member.tools_enabled);
+  const memberKey = formMember?.id ?? member.id;
+  const selectedSkillIds = useMemo(
+    () => parseSkillIds(formMember?.selectedSkillIdsText ?? ""),
+    [formMember?.selectedSkillIdsText],
+  );
+  const currentRunnerType = formMember?.runnerType.trim() ?? "";
+  const currentModel = formMember?.recommendedModel.trim() ?? "";
+  const availableRuntimes = useMemo(
+    () =>
+      runtimes.filter(
+        (runtime) => getRuntimeDisplayState(runtime) === "available",
+      ),
+    [runtimes],
+  );
+  const runtimeOptions = useMemo<DropdownSelectOption[]>(() => {
+    const options: DropdownSelectOption[] = [
+      {
+        id: defaultRunnerOptionId,
+        label: translateWithFallback(t, "teamTemplates.member.defaultRuntime", "Default runtime"),
+        description: translateWithFallback(t, "teamTemplates.member.defaultRuntimeDesc", "Use the first available runtime"),
+      },
+      ...availableRuntimes.map((runtime) => ({
+        id: runtime.runner_type,
+        label: getRunnerLabel(runtime.runner_type),
+        description:
+          runtime.discovered_models.length > 0
+            ? translateWithFallback(t, "teamTemplates.member.availableModels", "{count} available models", { count: runtime.discovered_models.length })
+            : translateWithFallback(t, "teamTemplates.member.noModels", "No models found"),
+        group: translateWithFallback(t, "teamTemplates.member.availableRuntimes", "Available runtimes"),
+      })),
+    ];
+
+    if (
+      currentRunnerType &&
+      !options.some((option) => option.id === currentRunnerType)
+    ) {
+      options.push({
+        id: currentRunnerType,
+        label: getRunnerLabel(currentRunnerType),
+        description: translateWithFallback(t, "teamTemplates.member.runtimeUnavailable", "Current value; runtime is unavailable"),
+        group: translateWithFallback(t, "teamTemplates.member.currentConfig", "Current configuration"),
+      });
+    }
+
+    return options;
+  }, [availableRuntimes, currentRunnerType, t]);
+  const runtimeForModels = useMemo(
+    () =>
+      currentRunnerType
+        ? runtimes.find((runtime) => runtime.runner_type === currentRunnerType)
+        : firstAvailableRuntime(availableRuntimes),
+    [availableRuntimes, currentRunnerType, runtimes],
+  );
+  const effectiveRunnerType =
+    currentRunnerType || runtimeForModels?.runner_type || "";
+  const [runtimeSkills, setRuntimeSkills] = useState<BackendChatSkill[]>([]);
+  const [runtimeSkillsLoading, setRuntimeSkillsLoading] = useState(false);
+  const [runtimeSkillsError, setRuntimeSkillsError] = useState<string | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (!editable || !effectiveRunnerType) {
+      setRuntimeSkills([]);
+      setRuntimeSkillsLoading(false);
+      setRuntimeSkillsError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setRuntimeSkillsLoading(true);
+    setRuntimeSkillsError(null);
+    void skillsApi
+      .listNative(effectiveRunnerType)
+      .then((items) => {
+        if (!cancelled) setRuntimeSkills(items.map((item) => item.skill));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setRuntimeSkills([]);
+        setRuntimeSkillsError(
+          errorText(error, translateWithFallback(t, "teamTemplates.member.skillsLoadError", "Could not load skills for this runtime.")),
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setRuntimeSkillsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [editable, effectiveRunnerType, t]);
+  const modelOptions = useMemo<DropdownSelectOption[]>(() => {
+    const options: DropdownSelectOption[] = [
+      {
+        id: defaultModelOptionId,
+        label: translateWithFallback(t, "teamTemplates.member.defaultModel", "Default model"),
+        description: runtimeForModels
+          ? translateWithFallback(t, "teamTemplates.member.followRuntime", "Follow {runtime} configuration", { runtime: getRunnerLabel(runtimeForModels.runner_type) })
+          : translateWithFallback(t, "teamTemplates.member.selectRuntimeForModel", "Select a runtime to use its default model"),
+      },
+    ];
+    const modelNames = [
+      runtimeConfiguredModel(runtimeForModels),
+      ...(runtimeForModels?.discovered_models ?? []),
+    ]
+      .map((model) => model.trim())
+      .filter(Boolean);
+
+    for (const modelName of Array.from(new Set(modelNames))) {
+      options.push({
+        id: modelName,
+        label: modelName,
+        description: runtimeForModels
+          ? getRunnerLabel(runtimeForModels.runner_type)
+          : undefined,
+        group: translateWithFallback(t, "teamTemplates.member.availableModelGroup", "Available models"),
+      });
+    }
+
+    if (
+      currentModel &&
+      !options.some((option) => option.id === currentModel)
+    ) {
+      options.push({
+        id: currentModel,
+        label: currentModel,
+        description: translateWithFallback(t, "teamTemplates.member.modelUnavailable", "Current value; not found in the runtime model list"),
+        group: translateWithFallback(t, "teamTemplates.member.currentConfig", "Current configuration"),
+      });
+    }
+
+    return options;
+  }, [currentModel, runtimeForModels, t]);
+  const skillOptions = useMemo<DropdownSelectOption[]>(() => {
+    const options: DropdownSelectOption[] = runtimeSkills.map((skill) => ({
+      id: skill.id,
+      label: skill.name,
+      description: skill.description || skill.id,
+      group: skill.category ?? translateWithFallback(t, "teamTemplates.member.installedSkills", "Installed skills"),
+      hint: skill.enabled ? undefined : translateWithFallback(t, "teamTemplates.member.disabled", "Disabled"),
+    }));
+    const knownSkillIds = new Set(options.map((option) => option.id));
+    for (const skillId of selectedSkillIds) {
+      if (!knownSkillIds.has(skillId)) {
+        const installedSkill = installedSkills.find(
+          (skill) => skill.id === skillId,
+        );
+        options.push({
+          id: skillId,
+          label: installedSkill?.name ?? skillId,
+          description: installedSkill
+            ? translateWithFallback(t, "teamTemplates.member.skillWrongRuntime", "Selected, but not available for this runtime")
+            : translateWithFallback(t, "teamTemplates.member.skillMissing", "Selected, but not found among installed skills"),
+          group: translateWithFallback(t, "teamTemplates.member.currentConfig", "Current configuration"),
+        });
+      }
+    }
+    return options;
+  }, [installedSkills, runtimeSkills, selectedSkillIds, t]);
+  const skillPlaceholder = effectiveRunnerType
+    ? translateWithFallback(t, "teamTemplates.member.selectRuntimeSkills", "Select {runtime} skills", { runtime: getRunnerLabel(effectiveRunnerType) })
+    : translateWithFallback(t, "teamTemplates.member.selectRuntimeForSkills", "Select a runtime to configure skills");
+
+  if (editable && formMember) {
+    return (
+      <aside className="team-template-member-detail flex min-h-0 flex-col p-1 text-[14px] lg:h-full lg:p-0">
+        <header className="flex min-w-0 items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-2.5">
+            <span
+              aria-hidden="true"
+              className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${getMemberDotClassName(member, index)}`}
+            />
+            <div className="min-w-0">
+              <div className="flex min-w-0 items-center gap-2">
+                <h2 className="truncate text-[17px] font-semibold leading-tight text-[var(--team-template-title)]">
+                  {formMember.name || roleKey}
+                </h2>
+                {isLead && (
+                  <span className="inline-flex items-center gap-1 font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--team-template-muted)]">
+                    <span className="h-1 w-1 rounded-full bg-current opacity-70" />
+                    LEAD
+                  </span>
+                )}
+              </div>
+              <p className="mt-1 font-mono text-[12px] text-[var(--team-template-aux)]">
+                {roleKey}
+              </p>
+            </div>
+          </div>
+        </header>
+
+        <div className="team-template-scrollbar min-h-0 flex-1 space-y-6 overflow-y-auto pt-4">
+          <MemberInfoSection meta="MEMBER" title={translateWithFallback(t, "teamTemplates.member.info", "Member information")}>
+            <div>
+              <FormInput
+                disabled={disabled}
+                error={fieldErrors[`member:${memberKey}:name`]}
+                label={translateWithFallback(t, "teamTemplates.member.name", "Member name")}
+                value={formMember.name}
+                variant="inline"
+                onChange={(name) => onMemberChange?.({ name })}
+              />
+              <FormTextarea
+                disabled={disabled}
+                label={translateWithFallback(t, "teamTemplates.member.description", "Member description")}
+                rows={1}
+                value={formMember.description}
+                variant="inline"
+                onChange={(description) => onMemberChange?.({ description })}
+              />
+            </div>
+          </MemberInfoSection>
+
+          <MemberInfoSection meta="MODEL" title={translateWithFallback(t, "teamTemplates.member.modelConfig", "Model configuration")}>
+            <div>
+              <div className="team-template-compact-field grid grid-cols-[72px_minmax(0,1fr)] items-start gap-2 py-1.5">
+                <span className="pt-1 font-mono text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--team-template-aux)]">
+                  {translateWithFallback(t, "teamTemplates.member.runtime", "Runtime")}
+                </span>
+                <DropdownSelect
+                  value={currentRunnerType || defaultRunnerOptionId}
+                  options={runtimeOptions}
+                  placeholder={translateWithFallback(t, "teamTemplates.member.selectRuntime", "Select runtime")}
+                  searchPlaceholder={translateWithFallback(t, "teamTemplates.member.searchRuntimes", "Search runtimes...")}
+                  emptyLabel={translateWithFallback(t, "teamTemplates.member.noRuntimes", "No runtimes available")}
+                  disabled={disabled}
+                  className="w-full [&>button]:h-7 [&>button]:rounded-[3px] [&>button]:border-transparent [&>button]:bg-transparent [&>button]:px-1 [&>button]:py-0 [&>button]:text-[14px] [&>button]:shadow-none [&>button:hover]:bg-[var(--team-template-row-hover)]"
+                  maxPanelHeightClassName="max-h-[180px]"
+                  onChange={(value) =>
+                    onMemberChange?.({
+                      runnerType:
+                        value === defaultRunnerOptionId ? "" : value,
+                      recommendedModel: "",
+                    })
+                  }
+                />
+              </div>
+              <div className="team-template-compact-field grid grid-cols-[72px_minmax(0,1fr)] items-start gap-2 py-1.5">
+                <span className="pt-1 font-mono text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--team-template-aux)]">
+                  {translateWithFallback(t, "teamTemplates.member.model", "Model")}
+                </span>
+                <DropdownSelect
+                  value={currentModel || defaultModelOptionId}
+                  options={modelOptions}
+                  placeholder={translateWithFallback(t, "teamTemplates.member.selectModel", "Select model")}
+                  searchPlaceholder={translateWithFallback(t, "teamTemplates.member.searchModels", "Search models...")}
+                  emptyLabel={translateWithFallback(t, "teamTemplates.member.noAvailableModels", "No models available")}
+                  disabled={disabled || modelOptions.length === 0}
+                  className="w-full [&>button]:h-7 [&>button]:rounded-[3px] [&>button]:border-transparent [&>button]:bg-transparent [&>button]:px-1 [&>button]:py-0 [&>button]:text-[14px] [&>button]:shadow-none [&>button:hover]:bg-[var(--team-template-row-hover)]"
+                  maxPanelHeightClassName="max-h-[180px]"
+                  onChange={(value) =>
+                    onMemberChange?.({
+                      recommendedModel:
+                        value === defaultModelOptionId ? "" : value,
+                    })
+                  }
+                />
+              </div>
+            </div>
+          </MemberInfoSection>
+
+          <MemberInfoSection meta="ROLE" title={translateWithFallback(t, "teamTemplates.member.role", "Role instructions")}>
+            <MarkdownEditableField
+              compact
+              disabled={disabled}
+              editable
+              placeholder={translateWithFallback(t, "teamTemplates.member.rolePlaceholder", "Describe this member's responsibilities...")}
+              rows={4}
+              value={formMember.systemPrompt}
+              onCommit={(systemPrompt) =>
+                onMemberChange?.({ systemPrompt }, { autoSave: true })
+              }
+            />
+          </MemberInfoSection>
+
+          <MemberInfoSection meta="SKILLS" title={translateWithFallback(t, "teamTemplates.member.skills", "Skills configuration")}>
+            <DropdownSelect
+              selectionMode="multiple"
+              values={selectedSkillIds}
+              options={skillOptions}
+              placeholder={skillPlaceholder}
+              searchPlaceholder={translateWithFallback(t, "teamTemplates.member.searchSkills", "Search skills...")}
+              emptyLabel={
+                runtimeSkillsLoading
+                  ? translateWithFallback(t, "teamTemplates.member.loadingSkills", "Loading skills...")
+                  : runtimeSkillsError || translateWithFallback(t, "teamTemplates.member.noRuntimeSkills", "No skills available for this runtime")
+              }
+              disabled={disabled || runtimeSkillsLoading || skillOptions.length === 0}
+              className="w-full [&>button]:min-h-7 [&>button]:rounded-[3px] [&>button]:border-transparent [&>button]:bg-transparent [&>button]:px-1 [&>button]:py-1 [&>button]:text-[14px] [&>button]:shadow-none [&>button:hover]:bg-[var(--team-template-row-hover)]"
+              maxPanelHeightClassName="max-h-[220px]"
+              formatValueLabel={(selectedOptions) => {
+                if (selectedOptions.length === 0) return skillPlaceholder;
+                if (selectedOptions.length === 1) return selectedOptions[0].label;
+                return translateWithFallback(t, "teamTemplates.member.skillCount", "{count} skills", { count: selectedOptions.length });
+              }}
+              onChange={(values) =>
+                onMemberChange?.({ selectedSkillIdsText: values.join(", ") })
+              }
+            />
+          </MemberInfoSection>
+
+          <MemberInfoSection meta="MCP" title={translateWithFallback(t, "teamTemplates.member.mcp", "MCP configuration")}>
+            <label className="relative block">
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute left-3 top-2.5 select-none font-mono text-[11px] leading-relaxed text-[var(--team-template-index)]"
+              >
+                1<br />
+                2<br />
+                3<br />
+                4<br />
+                5<br />
+                6
+              </span>
+              <textarea
+                disabled={disabled}
+                value={formMember.mcpConfigText}
+                rows={6}
+                onBlur={() =>
+                  onMemberChange?.(
+                    { mcpConfigText: formMember.mcpConfigText },
+                    { validateMcp: true },
+                  )
+                }
+                onChange={(event) =>
+                  onMemberChange?.({ mcpConfigText: event.target.value })
+                }
+                className={[
+                  "team-template-field w-full resize-y rounded-[3px] border-x-0 border-t-0 bg-[var(--team-template-code-surface)] py-1.5 pl-10 pr-3 font-mono text-[13px] leading-relaxed text-[var(--team-template-code-text)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] focus:border-[var(--team-template-field-focus)] disabled:cursor-not-allowed disabled:opacity-60",
+                  fieldErrors[`member:${memberKey}:mcp_config`]
+                    ? "border-red-400/70"
+                    : "border-[var(--team-template-code-border)]",
+                ].join(" ")}
+              />
+              {fieldErrors[`member:${memberKey}:mcp_config`] && (
+                <p className="mt-1 text-[12px] text-red-400">
+                  {fieldErrors[`member:${memberKey}:mcp_config`]}
+                </p>
+              )}
+            </label>
+          </MemberInfoSection>
+
+          <MemberInfoSection meta="TOOLS" title={translateWithFallback(t, "teamTemplates.member.tools", "Tools configuration")}>
+            <label className="relative block">
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute left-3 top-2.5 select-none font-mono text-[11px] leading-relaxed text-[var(--team-template-index)]"
+              >
+                1<br />
+                2<br />
+                3<br />
+                4<br />
+                5<br />
+                6
+              </span>
+              <textarea
+                disabled={disabled}
+                value={formMember.toolsEnabledText}
+                rows={6}
+                onBlur={() =>
+                  onMemberChange?.(
+                    { toolsEnabledText: formMember.toolsEnabledText },
+                    { validateTools: true },
+                  )
+                }
+                onChange={(event) =>
+                  onMemberChange?.({ toolsEnabledText: event.target.value })
+                }
+                className={[
+                  "team-template-field w-full resize-y rounded-[3px] border-x-0 border-t-0 bg-[var(--team-template-code-surface)] py-1.5 pl-10 pr-3 font-mono text-[13px] leading-relaxed text-[var(--team-template-code-text)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] focus:border-[var(--team-template-field-focus)] disabled:cursor-not-allowed disabled:opacity-60",
+                  fieldErrors[`member:${memberKey}:tools_enabled`]
+                    ? "border-red-400/70"
+                    : "border-[var(--team-template-code-border)]",
+                ].join(" ")}
+              />
+              {fieldErrors[`member:${memberKey}:tools_enabled`] && (
+                <p className="mt-1 text-[12px] text-red-400">
+                  {fieldErrors[`member:${memberKey}:tools_enabled`]}
+                </p>
+              )}
+            </label>
+          </MemberInfoSection>
+        </div>
+      </aside>
+    );
+  }
+
+  return (
+    <aside
+      className="team-template-member-detail flex min-h-0 flex-col p-1 lg:h-full lg:p-0"
+    >
+      <header className="flex min-w-0 items-start justify-between gap-4">
+        <div className="flex min-w-0 items-start gap-3">
+          <span
+            aria-hidden="true"
+            className={`mt-1 h-2 w-2 shrink-0 rounded-full shadow-[0_0_10px_currentColor] ${getMemberDotClassName(member, index)}`}
+          />
+          <div className="min-w-0">
+            <div className="flex min-w-0 items-center gap-2">
+              <h2 className="truncate text-[17px] font-semibold leading-tight text-[var(--team-template-title)]">
+                {member.name || roleKey}
+              </h2>
+              {isLead && (
+                <span className="rounded-[4px] border border-[var(--team-template-ghost-badge-border)] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[var(--team-template-muted)]">
+                  LEAD
+                </span>
+              )}
+            </div>
+            <p className="mt-1 font-mono text-[12px] text-[var(--team-template-aux)]">
+              {roleKey}
+            </p>
+          </div>
+        </div>
+      </header>
+
+      <div className="team-template-scrollbar min-h-0 flex-1 space-y-7 overflow-y-auto pt-6">
+        <MemberInfoSection meta="MODEL" title={translateWithFallback(t, "teamTemplates.member.modelConfig", "Model configuration")}>
+          <div>
+            <MemberInfoField
+              label="Runtime"
+              value={formatMemberValue(member.runner_type, translateWithFallback(t, "teamTemplates.member.defaultRuntime", "Default runtime"))}
+            />
+            <MemberInfoField
+              label="Model"
+              value={formatMemberValue(member.recommended_model, translateWithFallback(t, "teamTemplates.member.defaultModel", "Default model"))}
+            />
+          </div>
+        </MemberInfoSection>
+
+        <MemberInfoSection meta="ROLE" title={translateWithFallback(t, "teamTemplates.member.role", "Role instructions")}>
+          <div className="team-template-role-markdown mt-3 max-h-[220px] overflow-auto text-[13px] leading-[1.55] text-[var(--team-template-member-description)] ot-scroll-area-styled">
+            <AgentMarkdown content={systemPrompt} fontSize={13} />
+          </div>
+        </MemberInfoSection>
+
+        <MemberInfoSection meta="SKILLS" title={translateWithFallback(t, "teamTemplates.member.skills", "Skills configuration")}>
+          {member.selected_skill_ids.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {member.selected_skill_ids.map((skillId) => (
+                <span
+                  key={skillId}
+                  className="rounded-[4px] border border-[var(--team-template-ghost-badge-border)] bg-[var(--team-template-tag-surface)] px-2 py-1 font-mono text-[11px] font-medium text-[var(--team-template-muted)]"
+                >
+                  {skillId}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="text-[13px] text-[var(--team-template-member-description)]">
+              {translateWithFallback(t, "teamTemplates.member.noSkillsSelected", "No skills selected.")}
+            </p>
+          )}
+        </MemberInfoSection>
+
+        <MemberInfoSection meta="MCP" title={translateWithFallback(t, "teamTemplates.member.mcp", "MCP configuration")}>
+          {mcpConfig ? (
+            <pre className="max-h-[220px] overflow-auto font-mono text-[12px] leading-relaxed text-[var(--team-template-code-text)] ot-scroll-area-styled">
+              {mcpConfig}
+            </pre>
+          ) : (
+            <p className="text-[13px] text-[var(--team-template-member-description)]">
+              {translateWithFallback(t, "teamTemplates.member.noMcp", "No MCP configuration.")}
+            </p>
+          )}
+        </MemberInfoSection>
+
+        <MemberInfoSection meta="TOOLS" title={translateWithFallback(t, "teamTemplates.member.tools", "Tools configuration")}>
+          {toolsConfig ? (
+            <pre className="max-h-[220px] overflow-auto font-mono text-[12px] leading-relaxed text-[var(--team-template-code-text)] ot-scroll-area-styled">
+              {toolsConfig}
+            </pre>
+          ) : (
+            <p className="text-[13px] text-[var(--team-template-member-description)]">
+              {translateWithFallback(t, "teamTemplates.member.noTools", "No tool configuration.")}
+            </p>
+          )}
+        </MemberInfoSection>
+      </div>
+    </aside>
+  );
+}
+
+function AgentAvatarGroup({ template }: { template: TeamPresetSummary }) {
+  const initials = getTemplateAgentInitials(template);
+  const extraCount = Math.max(template.member_count - initials.length, 0);
+
+  return (
+    <div className="flex shrink-0 items-center">
+      {initials.map((label, index) => (
+        <span
+          key={`${label}-${index}`}
+          className={`${index > 0 ? "-ml-1.5" : ""} flex h-5 w-5 items-center justify-center rounded-full bg-[var(--team-template-avatar-surface)] font-mono text-[10px] font-medium text-[var(--team-template-muted)] shadow-[inset_0_0_0_1px_var(--team-template-inner-stroke)]`}
+          style={{ zIndex: initials.length - index }}
+        >
+          {label}
+        </span>
+      ))}
+      {extraCount > 0 && (
+        <span className="-ml-1.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--team-template-tag-surface)] px-1.5 font-mono text-[10px] font-medium text-[var(--team-template-muted)] shadow-[inset_0_0_0_1px_var(--team-template-inner-stroke)]">
+          +{extraCount}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function WorkflowPreview({
+  disabled = false,
+  editable = false,
+  onStepsChange,
+  steps,
+  t,
+}: {
+  disabled?: boolean;
+  editable?: boolean;
+  onStepsChange?: (steps: WorkflowStepForm[]) => void;
+  steps: WorkflowStepForm[];
+  t: TranslateFn;
+}) {
+  const stepCountLabel = String(steps.length).padStart(2, "0");
+  const [litDotCount, setLitDotCount] = useState(0);
+  const [litTextCount, setLitTextCount] = useState(0);
+  const editableSteps = steps as WorkflowStepForm[];
+
+  const updateStep = (index: number, patch: Partial<WorkflowStepForm>) => {
+    onStepsChange?.(
+      editableSteps.map((step, stepIndex) =>
+        stepIndex === index ? { ...step, ...patch } : step,
+      ),
+    );
+  };
+
+  useEffect(() => {
+    setLitDotCount(0);
+    setLitTextCount(0);
+    const timers = steps.map((_, index) => {
+      const stepStart = 240 + index * 850;
+      return window.setTimeout(() => {
+        setLitDotCount(index + 1);
+        setLitTextCount(index + 1);
+      }, stepStart);
+    });
+
+    return () => {
+      timers.forEach(window.clearTimeout);
+    };
+  }, [steps]);
+
+  return (
+    <section
+      className={[
+        "team-template-workflow-preview text-[14px]",
+        editable ? "pt-3" : "border-t border-[var(--team-template-border)] pt-4",
+      ].join(" ")}
+    >
+      <div className="mb-3 flex min-h-7 items-center justify-between gap-3">
+        <h2 className="text-[13px] font-medium tracking-[0.02em] text-[var(--team-template-muted)]">
+          {translateWithFallback(t, "teamTemplates.workflow.title", "Workflow")}
+        </h2>
+        <span className="inline-flex items-center gap-1.5 font-mono text-[10px] font-medium text-[var(--team-template-aux)] tabular-nums">
+          <Workflow aria-hidden="true" className="h-3 w-3" strokeWidth={1.2} />
+          PIPELINE / {stepCountLabel}
+        </span>
+      </div>
+
+      {editable ? (
+        <div className="team-template-deboxed-workflow relative space-y-1 border-l border-[var(--team-template-border)] pl-4">
+          {editableSteps.length === 0 && (
+            <p className="rounded-[4px] border border-dashed border-[var(--team-template-border)] px-3 py-4 text-[13px] text-[var(--team-template-muted)]">
+              {translateWithFallback(t, "teamTemplates.workflow.empty", "No workflow steps defined.")}
+            </p>
+          )}
+          {editableSteps.map((step, index) => (
+            <section
+              key={`workflow-step-${index}`}
+              className="team-template-compact-workflow-step group relative grid grid-cols-[24px_minmax(0,1fr)_24px] gap-2 py-1.5"
+            >
+              <span
+                aria-hidden="true"
+                className="absolute -left-[19px] top-2.5 h-1.5 w-1.5 rounded-full border border-[var(--team-template-pipeline-dot-muted)] bg-[var(--team-template-canvas)]"
+              />
+              <span className="pt-1 font-mono text-[11px] font-semibold tabular-nums text-[var(--team-template-aux)]">
+                {String(index + 1).padStart(2, "0")}
+              </span>
+              <div className="min-w-0">
+                <input
+                  disabled={disabled}
+                  value={step.title}
+                  placeholder={translateWithFallback(t, "teamTemplates.workflow.stepTitle", "Step title")}
+                  onChange={(event) =>
+                    updateStep(index, { title: event.target.value })
+                  }
+                  className="team-template-workflow-step-title -mx-1 h-6 w-full rounded-[3px] border-0 bg-transparent px-1 text-[14px] font-semibold leading-none text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] hover:bg-[var(--team-template-row-hover)] focus:bg-[var(--team-template-row-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                />
+                <WorkflowStepDescriptionTextarea
+                  disabled={disabled}
+                  placeholder={translateWithFallback(t, "teamTemplates.workflow.stepDescription", "Add a step description...")}
+                  value={step.description}
+                  onChange={(description) => updateStep(index, { description })}
+                />
+              </div>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() =>
+                  onStepsChange?.(
+                    editableSteps.filter((_, stepIndex) => stepIndex !== index),
+                  )
+                }
+                className="pointer-events-none flex h-6 w-6 items-center justify-center rounded-[4px] text-[var(--team-template-muted)] opacity-0 transition-all duration-150 hover:bg-red-500/10 hover:text-red-300 group-hover:pointer-events-auto group-hover:opacity-100 focus:pointer-events-auto focus:opacity-100 disabled:opacity-40"
+                aria-label={translateWithFallback(t, "teamTemplates.workflow.removeStep", "Remove workflow step")}
+              >
+                <Trash2 aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.4} />
+              </button>
+            </section>
+          ))}
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() =>
+              onStepsChange?.([...editableSteps, { title: "", description: "" }])
+            }
+            className={`${quietButtonClassName} mt-2 h-7 gap-1.5 px-2.5 text-[12px] font-medium disabled:opacity-50`}
+          >
+            <Plus aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.4} />
+            {translateWithFallback(t, "teamTemplates.workflow.addStep", "Add step")}
+          </button>
+        </div>
+      ) : (
+      <div>
+        {steps.length === 0 ? (
+          <p className="rounded-md border border-dashed border-[var(--team-template-border)] px-3 py-4 text-[13px] text-[var(--team-template-muted)]">
+            {translateWithFallback(t, "teamTemplates.workflow.empty", "No workflow steps defined.")}
+          </p>
+        ) : (
+        <ol className="space-y-3">
+          {steps.map((step, index) => {
+            const isProgressStep = index === steps.length - 1;
+            const dotLit = index < litDotCount;
+            const textLit = index < litTextCount;
+            const trackLit = index < litTextCount;
+
+            return (
+              <li
+                key={`${step.title}-${index}`}
+                className="team-template-workflow-step group relative flex min-w-0 gap-2.5"
+              >
+                <div className="relative flex w-2.5 shrink-0 justify-center pt-[5px]">
+                  <span
+                    aria-label={isProgressStep
+                      ? translateWithFallback(t, "teamTemplates.workflow.inProgress", "In progress")
+                      : translateWithFallback(t, "teamTemplates.workflow.completed", "Completed")}
+                    className={[
+                      "team-template-workflow-dot relative z-10 shrink-0 rounded-full transition-colors duration-150",
+                      dotLit ? "team-template-workflow-dot-lit" : "",
+                      "h-1.5 w-1.5 border border-[var(--team-template-pipeline-dot-muted)] bg-transparent",
+                    ].join(" ")}
+                  />
+                  {index < steps.length - 1 && (
+                    <span
+                      aria-hidden="true"
+                      className={[
+                        "team-template-workflow-track absolute bottom-[-12px] top-[15px] w-px bg-[var(--team-template-pipeline-track)]",
+                        trackLit ? "team-template-workflow-track-lit" : "",
+                      ].join(" ")}
+                    />
+                  )}
+                </div>
+                <div
+                  className={[
+                    "team-template-workflow-copy min-w-0 pb-1",
+                    textLit ? "team-template-workflow-copy-lit" : "",
+                  ].join(" ")}
+                >
+                  <h3 className="truncate text-[13px] font-semibold leading-[1.2] text-[var(--team-template-title)]">
+                    {step.title}
+                  </h3>
+                  <p className="mt-0.5 text-[13px] leading-[1.35] text-[var(--team-template-member-description)]">
+                    {step.description}
+                  </p>
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+        )}
+      </div>
+      )}
+    </section>
+  );
+}
+
+function TemplateDetailView({
+  canEdit,
+  canUseTemplate,
+  detail,
+  detailError,
+  detailLoading,
+  deleting = false,
+  editorMode,
+  fieldErrors = {},
+  form,
+  formError,
+  installedSkills = [],
+  runtimes = [],
+  saving = false,
+  saveStatus = null,
+  selectedEditableMemberId,
+  usingTemplate,
+  onBack,
+  onCancel,
+  onDelete,
+  onEdit,
+  onFormChange,
+  onAutoSave,
+  onEditableMemberSelect,
+  onValidateMemberMcp,
+  onValidateMemberTools,
+  onRetryDetail,
+  onSave,
+  onUseTemplate,
+  t,
+}: {
+  canEdit: boolean;
+  canUseTemplate: boolean;
+  detail: ChatTeamPreset | null;
+  detailError: string | null;
+  detailLoading: boolean;
+  deleting?: boolean;
+  editorMode?: Exclude<EditorMode, null> | null;
+  fieldErrors?: Record<string, string>;
+  form?: TeamPresetForm;
+  formError?: string | null;
+  installedSkills?: BackendChatSkill[];
+  runtimes?: AgentRuntimeStatus[];
+  saving?: boolean;
+  saveStatus?: string | null;
+  selectedEditableMemberId?: string | null;
+  usingTemplate: boolean;
+  onBack: () => void;
+  onCancel?: () => void;
+  onDelete: () => void;
+  onEdit: () => void;
+  onFormChange?: (form: TeamPresetForm, options?: DraftCommitOptions) => void;
+  onAutoSave?: (form: TeamPresetForm) => void;
+  onEditableMemberSelect?: (memberId: string | null) => void;
+  onValidateMemberMcp?: (form: TeamPresetForm, memberId: string) => void;
+  onValidateMemberTools?: (form: TeamPresetForm, memberId: string) => void;
+  onRetryDetail: () => void;
+  onSave?: () => void;
+  onUseTemplate: () => void;
+  t: TranslateFn;
+}) {
+  const [readonlySelectedMemberId, setReadonlySelectedMemberId] = useState<
+    string | null
+  >(null);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportCopied, setExportCopied] = useState(false);
+  const exportJson = useMemo(
+    () => (detail ? JSON.stringify(detail, (key, value) => (key === "id" || key === "is_builtin" ? undefined : value), 2) : ""),
+    [detail],
+  );
+  const isEditing = Boolean(editorMode && form);
+  const viewDetail = isEditing && form ? formToPreviewDetail(form) : detail;
+  const controlsDisabled = saving || deleting;
+
+  useEffect(() => {
+    if (!isEditing) setMoreMenuOpen(false);
+  }, [isEditing]);
+  const selectedMemberId = isEditing
+    ? (selectedEditableMemberId ?? viewDetail?.members[0]?.id ?? null)
+    : readonlySelectedMemberId;
+  const setSelectedMemberId = isEditing
+    ? (memberId: string | null) => onEditableMemberSelect?.(memberId)
+    : setReadonlySelectedMemberId;
+
+  useEffect(() => {
+    if (!viewDetail) {
+      setSelectedMemberId(null);
+      return;
+    }
+
+    const nextSelectedMemberId =
+      selectedMemberId &&
+      viewDetail.members.some((member) => member.id === selectedMemberId)
+        ? selectedMemberId
+        : (viewDetail.members[0]?.id ?? null);
+    if (nextSelectedMemberId !== selectedMemberId) {
+      setSelectedMemberId(nextSelectedMemberId);
+    }
+  }, [isEditing, selectedMemberId, setSelectedMemberId, viewDetail]);
+
+  const selectedMember = useMemo(
+    () =>
+      viewDetail?.members.find((member) => member.id === selectedMemberId) ??
+      viewDetail?.members[0] ??
+      null,
+    [viewDetail, selectedMemberId],
+  );
+  const selectedMemberIndex = useMemo(
+    () =>
+      selectedMember && viewDetail
+        ? Math.max(
+            viewDetail.members.findIndex(
+              (member) => member.id === selectedMember.id,
+            ),
+            0,
+          )
+        : 0,
+    [viewDetail, selectedMember],
+  );
+
+  if (!isEditing && detailLoading) {
+    return (
+      <div className="w-full p-6 md:p-8 lg:p-10 animate-pulse">
+        <div className="mb-8 h-6 w-32 rounded bg-[var(--team-template-surface-hover)]"></div>
+        <div className="flex gap-6">
+           <div className="h-16 w-16 rounded-lg bg-[var(--team-template-surface-hover)]"></div>
+           <div className="flex-1 space-y-3 pt-2">
+             <div className="h-8 w-64 rounded bg-[var(--team-template-surface-hover)]"></div>
+             <div className="h-4 w-full max-w-2xl rounded bg-[var(--team-template-surface)]"></div>
+             <div className="h-4 w-96 rounded bg-[var(--team-template-surface)]"></div>
+           </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isEditing && (detailError || !viewDetail)) {
+    return (
+      <div className="mx-auto w-full max-w-[1280px] p-6 pt-24 text-center md:p-8 lg:p-10">
+        <h2 className="text-[16px] font-medium text-[var(--team-template-title)]">
+          {translateWithFallback(t, "teamTemplates.detail.loadError", "Could not load template details")}
+        </h2>
+        <p className="mt-2 text-[14px] text-[var(--team-template-muted)]">
+          {detailError || translateWithFallback(t, "teamTemplates.unknownError", "Unknown error occurred.")}
+        </p>
+        <div className="mt-6 flex justify-center gap-3">
+          <button
+            onClick={onBack}
+            className={`${quietButtonClassName} px-4 py-2 text-[14px] font-medium`}
+          >
+            {translateWithFallback(t, "teamTemplates.backToList", "Back to list")}
+          </button>
+          <button
+            onClick={onRetryDetail}
+            className={`${brandPrimaryButtonClassName} rounded-[6px] px-4 py-2 text-[14px] font-medium`}
+          >
+            {translateWithFallback(t, "teamTemplates.retry", "Retry")}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!viewDetail) return null;
+
+  const DetailCategoryIcon = getTemplateIcon(viewDetail.id, viewDetail.name);
+  const workflowSteps = isEditing && form ? form.workflowSteps : viewDetail.workflow_steps;
+  const selectedFormMemberIndex =
+    form?.members.findIndex((member) => member.id === selectedMemberId) ?? -1;
+  const selectedFormMember =
+    form && selectedFormMemberIndex >= 0
+      ? form.members[selectedFormMemberIndex]
+      : (form?.members[0] ?? null);
+
+  const commitFormChange = (
+    nextForm: TeamPresetForm,
+    options?: DraftCommitOptions,
+  ) => {
+    onFormChange?.(nextForm, options);
+    if (options?.validateTools && selectedFormMember?.id) {
+      onValidateMemberTools?.(nextForm, selectedFormMember.id);
+    } else if (options?.validateMcp && selectedFormMember?.id) {
+      onValidateMemberMcp?.(nextForm, selectedFormMember.id);
+    } else if (options?.autoSave) {
+      onAutoSave?.(nextForm);
+    }
+  };
+
+  const updateSelectedFormMember = (
+    patch: Partial<MemberForm>,
+    options?: DraftCommitOptions,
+  ) => {
+    if (!form || !selectedFormMember) return;
+    const targetIndex =
+      selectedFormMemberIndex >= 0 ? selectedFormMemberIndex : 0;
+    const previousId = form.members[targetIndex]?.id;
+    const members = form.members.map((member, index) =>
+      index === targetIndex ? { ...member, ...patch } : member,
+    );
+    const nextId = members[targetIndex]?.id ?? previousId;
+    const nextForm = {
+      ...form,
+      leadMemberId:
+        previousId && form.leadMemberId === previousId && nextId
+          ? nextId
+          : form.leadMemberId,
+      members,
+    };
+    commitFormChange(nextForm, options);
+    if (patch.id && patch.id !== selectedMemberId) {
+      setSelectedMemberId(patch.id);
+    }
+  };
+
+  const addCustomMember = () => {
+    if (!form) return;
+    const nextMember = nextMemberDraft(form.members, t);
+    const nextForm = {
+      ...form,
+      leadMemberId: form.leadMemberId || nextMember.id,
+      members: [...form.members, nextMember],
+    };
+    commitFormChange(nextForm);
+    setSelectedMemberId(nextMember.id);
+  };
+
+  const removeFormMember = (memberId: string) => {
+    if (!form) return;
+    const members = form.members.filter((member) => member.id !== memberId);
+    const nextForm = {
+      ...form,
+      leadMemberId: members.some((member) => member.id === form.leadMemberId)
+        ? form.leadMemberId
+        : (members[0]?.id ?? ""),
+      members,
+    };
+    commitFormChange(nextForm);
+    if (selectedMemberId === memberId) {
+      setSelectedMemberId(members[0]?.id ?? null);
+    }
+  };
+
+  return (
+    <div
+      className={[
+        "grid h-auto min-h-full w-full grid-cols-1 lg:h-full lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_minmax(360px,30vw)] 2xl:grid-cols-[minmax(0,1fr)_480px]",
+        isEditing ? "team-template-compact-editor text-[14px]" : "",
+      ].join(" ")}
+    >
+      <div className="team-template-scrollbar min-w-0 p-5 md:p-7 lg:min-h-0 lg:overflow-y-auto lg:p-8">
+      <div className="mx-auto w-full max-w-[920px]">
+      <button
+        type="button"
+        onClick={isEditing ? (onCancel ?? onBack) : onBack}
+        className="mb-5 flex items-center gap-2 text-[13px] font-medium text-[var(--team-template-muted)] transition-colors duration-150 hover:text-[var(--team-template-title)]"
+      >
+        <ArrowLeft className="h-3.5 w-3.5" strokeWidth={1.2} />{" "}
+        {isEditing
+          ? translateWithFallback(t, "teamTemplates.exit", "Exit")
+          : translateWithFallback(t, "teamTemplates.back", "Back to templates")}
+      </button>
+
+      <header
+        className={[
+          "relative border-b border-[var(--team-template-border)]",
+          isEditing ? "pb-4" : "pb-6",
+        ].join(" ")}
+      >
+        <div className="flex min-w-0 flex-col gap-5 md:flex-row md:items-start md:justify-between">
+          <div className="flex min-w-0 items-start gap-3">
+            <div
+              className={[
+                "flex shrink-0 items-center justify-center text-[var(--team-template-icon)]",
+                isEditing ? "mt-0.5 h-8 w-8" : "h-6 w-6",
+              ].join(" ")}
+            >
+              <DetailCategoryIcon
+                className={isEditing ? "h-5 w-5" : "h-4 w-4"}
+                strokeWidth={1.2}
+              />
+            </div>
+            <div className="min-w-0 flex-1">
+              {isEditing && form ? (
+                <div className="team-template-document-head min-w-0 max-w-3xl pr-28 md:pr-40">
+                  <input
+                    disabled={controlsDisabled}
+                    value={form.name}
+                    placeholder={translateWithFallback(t, "teamTemplates.untitled", "Untitled template")}
+                    onChange={(event) =>
+                      onFormChange?.({ ...form, name: event.target.value })
+                    }
+                    className={[
+                      "team-template-document-title -mx-1 w-full rounded-[4px] border-0 bg-transparent px-1 py-0.5 text-[28px] font-semibold leading-tight text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] hover:bg-[var(--team-template-row-hover)] focus:bg-[var(--team-template-row-hover)] disabled:cursor-not-allowed disabled:opacity-60",
+                      fieldErrors["team:name"]
+                        ? "bg-red-500/10 text-red-200"
+                        : "",
+                    ].join(" ")}
+                  />
+                  {fieldErrors["team:name"] && (
+                    <p className="mt-1 text-[12px] text-red-400">
+                      {fieldErrors["team:name"]}
+                    </p>
+                  )}
+                  <AutoGrowingTextarea
+                    disabled={controlsDisabled}
+                    placeholder={translateWithFallback(t, "teamTemplates.descriptionPlaceholder", "Add a description...")}
+                    value={form.description}
+                    onChange={(description) =>
+                      onFormChange?.({ ...form, description })
+                    }
+                  />
+                </div>
+              ) : (
+                <>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <h1 className="truncate text-[22px] font-semibold leading-tight text-[var(--team-template-title)]">
+                      {viewDetail.name}
+                    </h1>
+                    {viewDetail.is_builtin && <RecommendedBadge t={t} />}
+                  </div>
+                  <p className="mt-3 max-w-2xl text-[14px] leading-relaxed text-[var(--team-template-muted)]">
+                    {viewDetail.description || translateWithFallback(t, "teamTemplates.noDescription", "No description provided for this template.")}
+                  </p>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div
+            className={[
+              isEditing
+                ? "absolute right-0 top-0 z-20 flex shrink-0 items-start justify-end"
+                : "flex shrink-0 flex-wrap items-center gap-2",
+            ].join(" ")}
+          >
+            {isEditing && (
+              <div className="flex flex-col items-end gap-2">
+                {formError && (
+                  <p className="max-w-[360px] text-right text-[13px] leading-snug text-red-400">
+                    {formError}
+                  </p>
+                )}
+                <div className="flex items-center gap-2">
+                  {saveStatus && (
+                    <span className="font-mono text-[11px] font-medium text-[var(--team-template-aux)] opacity-80">
+                      {saveStatus}
+                    </span>
+                  )}
+                  {editorMode === "create" && (
+                    <button
+                      type="button"
+                      disabled={controlsDisabled}
+                      onClick={onSave ?? (() => undefined)}
+                      className={`${brandPrimaryButtonClassName} h-8 gap-1.5 rounded-[4px] px-3.5 text-[13px]`}
+                    >
+                      <Save aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.5} />
+                      {saving
+                        ? translateWithFallback(t, "teamTemplates.saving", "Saving...")
+                        : translateWithFallback(t, "teamTemplates.create", "Create")}
+                    </button>
+                  )}
+                  {editorMode === "edit" && (
+                    <div className="relative">
+                      <button
+                        type="button"
+                        disabled={controlsDisabled}
+                        onClick={() => setMoreMenuOpen((open) => !open)}
+                        className="flex h-7 w-7 items-center justify-center rounded-[4px] text-[var(--team-template-aux)] transition-colors duration-150 hover:bg-[var(--team-template-row-hover)] hover:text-[var(--team-template-title)] disabled:cursor-not-allowed disabled:opacity-50"
+                        aria-label={translateWithFallback(t, "teamTemplates.moreActions", "More actions")}
+                        aria-expanded={moreMenuOpen}
+                      >
+                        <MoreHorizontal aria-hidden="true" className="h-4 w-4" strokeWidth={1.6} />
+                      </button>
+                      {moreMenuOpen && (
+                        <div className="absolute right-0 top-full z-40 mt-2 w-44 overflow-hidden rounded-[8px] border border-[var(--team-template-border-strong)] bg-[var(--team-template-surface)] p-1 shadow-2xl">
+                          <button
+                            type="button"
+                            disabled={controlsDisabled}
+                            onClick={() => {
+                              setMoreMenuOpen(false);
+                              onDelete();
+                            }}
+                            className="flex h-8 w-full items-center gap-2 rounded-[6px] px-2.5 text-left text-[13px] font-medium text-red-300/90 transition-colors duration-150 hover:bg-red-500/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <Trash2 aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.4} />
+                            {deleting
+                              ? translateWithFallback(t, "teamTemplates.deleting", "Deleting...")
+                              : translateWithFallback(t, "teamTemplates.deleteTemplate", "Delete template")}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+            {canEdit && !isEditing && (
+              <>
+                <button
+                  type="button"
+                  disabled={deleting || !detail}
+                  onClick={() => setShowExportModal(true)}
+                  className="inline-flex h-8 items-center justify-center gap-1.5 bg-transparent px-2 text-[13px] font-medium text-[var(--team-template-muted)] transition-colors duration-150 hover:text-[var(--team-template-title)] disabled:opacity-50"
+                >
+                  <FileJson aria-hidden="true" className="h-3.5 w-3.5 text-[var(--team-template-muted)]" strokeWidth={1.2} />
+                  {translateWithFallback(t, "teamTemplates.export", "Export")}
+                </button>
+                <button
+                  type="button"
+                  disabled={deleting}
+                  onClick={onEdit}
+                  className="inline-flex h-8 items-center justify-center gap-1.5 bg-transparent px-2 text-[13px] font-medium text-[var(--team-template-muted)] transition-colors duration-150 hover:text-[var(--team-template-title)] disabled:opacity-50"
+                >
+                  <Pencil aria-hidden="true" className="h-3.5 w-3.5 text-[var(--team-template-muted)]" strokeWidth={1.2} />
+                  {translateWithFallback(t, "teamTemplates.edit", "Edit")}
+                </button>
+                <button
+                  type="button"
+                  disabled={deleting}
+                  onClick={onDelete}
+                  className={`${dangerGhostButtonClassName} h-8 gap-1.5 px-3 text-[13px] font-medium`}
+                >
+                  <Trash2 aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.2} />
+                  {deleting
+                    ? translateWithFallback(t, "teamTemplates.deleting", "Deleting...")
+                    : translateWithFallback(t, "teamTemplates.delete", "Delete")}
+                </button>
+              </>
+            )}
+            {canUseTemplate && !isEditing && (
+              <button
+                type="button"
+                onClick={onUseTemplate}
+                disabled={usingTemplate || deleting}
+                className={`${brandPrimaryButtonClassName} h-8 gap-2 rounded-[6px] px-3 text-[13px]`}
+              >
+                {usingTemplate
+                  ? translateWithFallback(t, "teamTemplates.applying", "Applying...")
+                  : translateWithFallback(t, "teamTemplates.use", "Use template")}
+                <kbd className="rounded-[3px] border border-white/25 bg-white/10 px-1.5 py-px font-mono text-[10px] font-semibold leading-none text-white/75">
+                  ⌘ Enter
+                </kbd>
+              </button>
+            )}
+          </div>
+        </div>
+      </header>
+
+      <div
+        className={[
+          "grid lg:grid-cols-[minmax(220px,0.9fr)_minmax(0,2fr)]",
+          isEditing ? "gap-8" : "gap-12",
+        ].join(" ")}
+      >
+        <WorkflowPreview
+          disabled={controlsDisabled}
+          editable={isEditing}
+          steps={workflowSteps}
+          t={t}
+          onStepsChange={(workflowSteps) => {
+            if (form) commitFormChange({ ...form, workflowSteps });
+          }}
+        />
+
+        <section
+          className={
+            isEditing ? "pt-3" : "border-t border-[var(--team-template-border)] pt-4"
+          }
+        >
+          <header className="mb-2 flex min-h-7 items-center justify-between gap-3">
+            <h2 className="text-[13px] font-medium tracking-[0.02em] text-[var(--team-template-muted)]">
+              {translateWithFallback(t, "teamTemplates.members.title", "Members")}
+            </h2>
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-[10px] font-medium text-[var(--team-template-aux)] tabular-nums">
+                MEMBERS / {String(viewDetail.members.length).padStart(2, "0")}
+              </span>
+              {isEditing && (
+                <button
+                  type="button"
+                  disabled={controlsDisabled}
+                  onClick={addCustomMember}
+                  className={`${quietButtonClassName} h-7 gap-1.5 px-2.5 text-[12px] font-medium disabled:opacity-50`}
+                >
+                  <Plus aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.4} />
+                  {translateWithFallback(t, "teamTemplates.members.add", "Add member")}
+                </button>
+              )}
+            </div>
+          </header>
+
+          <div>
+              {viewDetail.members.length === 0 && (
+                <p className="rounded-[4px] border border-dashed border-[var(--team-template-border)] px-3 py-4 text-[13px] text-[var(--team-template-muted)]">
+                  {translateWithFallback(t, "teamTemplates.members.empty", "No members added yet.")}
+                </p>
+              )}
+              {viewDetail.members.map((member, index) => {
+                const isLead = member.id === viewDetail.lead_member_id;
+                const active = selectedMember?.id === member.id;
+                const roleKey = getMemberRoleKey(member);
+                const description =
+                  member.description ||
+                  member.system_prompt ||
+                  translateWithFallback(t, "teamTemplates.member.noDescription", "No role description.");
+
+                const rowClassName = [
+                  "team-template-member-row group grid min-h-[38px] w-full grid-cols-1 gap-1 border-b border-[var(--team-template-border)] px-1.5 py-1.5 text-left text-[14px] transition-colors duration-150 last:border-b-0 md:grid-cols-[minmax(140px,0.72fr)_minmax(0,1fr)_auto] md:items-center md:gap-2",
+                  active
+                    ? "bg-[var(--team-template-row-active)] shadow-[inset_2px_0_0_var(--team-template-border-strong)]"
+                    : "hover:bg-[var(--team-template-row-hover)]",
+                ].join(" ");
+                const rowContent = (
+                  <>
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span
+                        aria-hidden="true"
+                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${getMemberDotClassName(member, index)}`}
+                      />
+                      {isEditing && form ? (
+                        <input
+                          type="radio"
+                          disabled={controlsDisabled}
+                          checked={isLead}
+                          onChange={(event) => {
+                            event.stopPropagation();
+                            commitFormChange({ ...form, leadMemberId: member.id });
+                          }}
+                          onClick={(event) => event.stopPropagation()}
+                          className="h-3.5 w-3.5 shrink-0 border-[var(--team-template-border-strong)] bg-[var(--team-template-field-surface)] text-[var(--primary)] focus:ring-[var(--primary)] disabled:opacity-60"
+                          aria-label={translateWithFallback(t, "teamTemplates.members.setLead", "Set lead member")}
+                        />
+                      ) : null}
+                      <span
+                        className={`min-w-0 truncate font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--team-template-code-text)] transition-colors duration-150 group-hover:text-[var(--team-template-title)] ${getMemberRoleToneClassName(member, index)}`}
+                        title={roleKey}
+                      >
+                        {roleKey}
+                      </span>
+                      {isLead && (
+                        <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap font-mono text-[10px] font-semibold uppercase tracking-[0.04em] text-[var(--team-template-muted)]">
+                          <span className="h-1 w-1 rounded-full bg-current opacity-70" />
+                          {translateWithFallback(t, "teamTemplates.members.lead", "Lead")}
+                        </span>
+                      )}
+                    </span>
+
+                    <span
+                      className="min-w-0 text-[13px] leading-[1.4] text-[var(--team-template-member-description)] md:truncate"
+                      title={description}
+                    >
+                      {description}
+                    </span>
+
+                    <span className="inline-flex items-center gap-2 md:justify-self-end">
+                      {member.selected_skill_ids.length > 0 && (
+                        <span
+                          className="inline-flex items-center gap-1 rounded-[4px] border border-[var(--team-template-ghost-badge-border)] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[var(--team-template-aux)] tabular-nums"
+                          title={member.selected_skill_ids.join(", ")}
+                        >
+                          <span className="h-1 w-1 rounded-full bg-current opacity-60" />
+                          {translateWithFallback(t, "teamTemplates.member.skillCount", "{count} skills", { count: member.selected_skill_ids.length })}
+                        </span>
+                      )}
+                      {isEditing ? (
+                        <button
+                          type="button"
+                          disabled={controlsDisabled}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            removeFormMember(member.id);
+                          }}
+                          className="pointer-events-none flex h-6 w-6 items-center justify-center rounded-[4px] text-[var(--team-template-muted)] opacity-0 transition-all duration-150 hover:bg-red-500/10 hover:text-red-300 group-hover:pointer-events-auto group-hover:opacity-100 focus:pointer-events-auto focus:opacity-100 disabled:opacity-40"
+                          aria-label={translateWithFallback(t, "teamTemplates.members.remove", "Remove member")}
+                        >
+                          <Trash2 aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.4} />
+                        </button>
+                      ) : (
+                        <ChevronRight
+                          aria-hidden="true"
+                          className={[
+                            "h-2.5 w-2.5 shrink-0 text-[var(--team-template-aux)] opacity-35 transition-all duration-150 group-hover:opacity-100 group-hover:text-[var(--team-template-muted)]",
+                            active ? "translate-x-0.5 opacity-70" : "",
+                          ].join(" ")}
+                          strokeWidth={1.4}
+                        />
+                      )}
+                    </span>
+                  </>
+                );
+
+                return isEditing ? (
+                  <div
+                    key={`${member.id}-${index}`}
+                    className={rowClassName}
+                    onClick={() => setSelectedMemberId(member.id)}
+                  >
+                    {rowContent}
+                  </div>
+                ) : (
+                  <button
+                    key={`${member.id}-${index}`}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => setSelectedMemberId(member.id)}
+                    className={rowClassName}
+                  >
+                    {rowContent}
+                  </button>
+                );
+              })}
+          </div>
+        </section>
+      </div>
+
+      {(isEditing || viewDetail.team_protocol) && (
+        <section className="mt-12 border-t border-[var(--team-template-border)] pt-6">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h2 className="text-[13px] font-medium tracking-[0.02em] text-[var(--team-template-muted)]">
+              {translateWithFallback(t, "teamTemplates.protocol.title", "Collaboration protocol")}
+            </h2>
+            <span className="font-mono text-[10px] font-medium text-[var(--team-template-aux)]">
+              TEAM PROTOCOL
+            </span>
+          </div>
+          <div className="border-l border-[var(--team-template-border)] pl-3">
+            {isEditing && form ? (
+              <MarkdownEditableField
+                disabled={controlsDisabled}
+                editable
+                placeholder={translateWithFallback(t, "teamTemplates.protocol.placeholder", "Describe how the team should collaborate...")}
+                rows={7}
+                value={form.teamProtocol}
+                onCommit={(teamProtocol) => {
+                  const nextForm = { ...form, teamProtocol };
+                  commitFormChange(nextForm, { autoSave: true });
+                }}
+              />
+            ) : (
+              <AgentMarkdown content={viewDetail.team_protocol} fontSize={14} />
+            )}
+          </div>
+        </section>
+      )}
+      </div>
+      </div>
+
+      <aside className="min-h-0 border-t border-[var(--team-template-grid-line-strong)] bg-[var(--team-template-surface)] p-4 lg:h-full lg:border-l lg:border-t-0 lg:px-6 lg:pb-6 lg:pt-[68px]">
+        {selectedMember && (
+          <TemplateMemberInfoPage
+            disabled={controlsDisabled}
+            editable={isEditing}
+            fieldErrors={fieldErrors}
+            formMember={selectedFormMember ?? undefined}
+            index={selectedMemberIndex}
+            installedSkills={installedSkills}
+            isLead={selectedMember.id === viewDetail.lead_member_id}
+            member={selectedMember}
+            onMemberChange={updateSelectedFormMember}
+            runtimes={runtimes}
+            t={t}
+          />
+        )}
+      </aside>
+
+      {showExportModal && detail && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-2xl rounded-[12px] border border-[var(--team-template-border-strong)] bg-[var(--team-template-surface)] shadow-2xl">
+            <div className="flex items-center justify-between border-b border-[var(--team-template-border)] px-6 py-4">
+              <h2 className="text-[16px] font-semibold text-[var(--team-template-title)]">
+                {translateWithFallback(t, "teamTemplates.exportTitle", "Export template")}
+              </h2>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowExportModal(false);
+                  setExportCopied(false);
+                }}
+                className="flex h-7 w-7 items-center justify-center rounded-[4px] text-[var(--team-template-muted)] transition-colors duration-150 hover:bg-[var(--team-template-row-hover)] hover:text-[var(--team-template-title)]"
+              >
+                <X aria-hidden="true" className="h-4 w-4" strokeWidth={1.4} />
+              </button>
+            </div>
+            <div className="px-6 py-4">
+              <p className="mb-3 text-[13px] text-[var(--team-template-muted)]">
+                {translateWithFallback(t, "teamTemplates.exportDescription", "Copy the JSON below and save it as a file to import later.")}
+              </p>
+              <div className="relative">
+                <pre className="max-h-[400px] overflow-auto rounded-[8px] border border-[var(--team-template-border)] bg-[var(--team-template-code-bg,var(--team-template-row-hover))] p-4 font-mono text-[12px] leading-relaxed text-[var(--team-template-title)] selection:bg-[var(--team-template-icon)] selection:text-white">
+                  {exportJson}
+                </pre>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(exportJson).then(() => {
+                      setExportCopied(true);
+                      setTimeout(() => setExportCopied(false), 2000);
+                    });
+                  }}
+                  className="absolute right-2 top-2 rounded-[4px] border border-[var(--team-template-border)] bg-[var(--team-template-surface)] px-2.5 py-1 text-[11px] font-medium text-[var(--team-template-muted)] transition-colors duration-150 hover:border-[var(--team-template-border-strong)] hover:text-[var(--team-template-title)]"
+                >
+                  {exportCopied
+                    ? translateWithFallback(t, "teamTemplates.copySuccess", "Copied!")
+                    : translateWithFallback(t, "teamTemplates.copyToClipboard", "Copy")}
+                </button>
+              </div>
+            </div>
+            <div className="flex justify-end border-t border-[var(--team-template-border)] px-6 py-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowExportModal(false);
+                  setExportCopied(false);
+                }}
+                className={`${quietButtonClassName} h-8 rounded-[4px] px-4 text-[13px] font-medium`}
+              >
+                {translateWithFallback(t, "teamTemplates.close", "Close")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UnsavedEditorExitDialog({
+  saving,
+  onCancel,
+  onDiscard,
+  onSave,
+  t,
+}: {
+  saving: boolean;
+  onCancel: () => void;
+  onDiscard: () => void;
+  onSave: () => void;
+  t: TranslateFn;
+}) {
+  useConfirmationDialogKeyboard({
+    confirming: saving,
+    onCancel,
+    onConfirm: onSave,
+  });
+
+  return (
+    <div
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/55 px-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="unsaved-template-title"
+    >
+      <div className="w-full max-w-[420px] rounded-[12px] border border-[var(--team-template-border-strong)] bg-[var(--team-template-surface)] p-4 shadow-2xl">
+        <div className="flex items-start gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px] border border-[var(--team-template-border)] text-[var(--team-template-icon)]">
+            <Save aria-hidden="true" className="h-4 w-4" strokeWidth={1.4} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2
+              id="unsaved-template-title"
+              className="text-[16px] font-semibold text-[var(--team-template-title)]"
+            >
+              {translateWithFallback(t, "teamTemplates.unsaved.title", "Save changes before exiting?")}
+            </h2>
+            <p className="mt-1 text-[14px] leading-relaxed text-[var(--team-template-muted)]">
+              {translateWithFallback(t, "teamTemplates.unsaved.description", "This template has unsaved changes. Save them first, or discard them and exit editing.")}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={saving}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] text-[var(--team-template-muted)] transition hover:bg-[var(--team-template-row-hover)] hover:text-[var(--team-template-title)] disabled:cursor-not-allowed disabled:opacity-50"
+            aria-label={translateWithFallback(t, "teamTemplates.unsaved.continue", "Continue editing")}
+            title={translateWithFallback(t, "teamTemplates.unsaved.continue", "Continue editing")}
+          >
+            <X aria-hidden="true" className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onDiscard}
+            disabled={saving}
+            className={`${dangerGhostButtonClassName} h-8 px-3 text-[13px] font-medium disabled:cursor-not-allowed`}
+          >
+            {translateWithFallback(t, "teamTemplates.unsaved.discard", "Discard changes")}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={saving}
+            className={`${quietButtonClassName} h-8 px-3 text-[13px] font-medium disabled:cursor-not-allowed disabled:opacity-60`}
+          >
+            {translateWithFallback(t, "teamTemplates.unsaved.continue", "Continue editing")}
+          </button>
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={saving}
+            className={`${brandPrimaryButtonClassName} h-8 rounded-[6px] px-3 text-[13px] disabled:opacity-70`}
+          >
+            {saving
+              ? translateWithFallback(t, "teamTemplates.saving", "Saving...")
+              : translateWithFallback(t, "teamTemplates.unsaved.saveAndExit", "Save and exit")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function UseTeamTemplateDialog({
+  applying,
+  detail,
+  onCancel,
+  onConfirm,
+  t,
+}: {
+  applying: boolean;
+  detail: ChatTeamPreset;
+  onCancel: () => void;
+  onConfirm: () => void;
+  t: TranslateFn;
+}) {
+  useConfirmationDialogKeyboard({
+    confirming: applying,
+    onCancel,
+    onConfirm,
+  });
+
+  return (
+    <div
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/55 px-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="use-team-template-title"
+    >
+      <div className="w-full max-w-[400px] rounded-[12px] border border-[var(--team-template-border-strong)] bg-[var(--team-template-surface)] p-4 shadow-2xl">
+        <div className="flex items-start gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px] border border-[var(--team-template-border)] text-[var(--team-template-icon)]">
+            <Workflow aria-hidden="true" className="h-4 w-4" strokeWidth={1.4} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2
+              id="use-team-template-title"
+              className="text-[16px] font-semibold text-[var(--team-template-title)]"
+            >
+              {translateWithFallback(t, "teamTemplates.useDialog.title", "Use this template?")}
+            </h2>
+            <p className="mt-1 text-[14px] leading-relaxed text-[var(--team-template-muted)]">
+              {translateWithFallback(t, "teamTemplates.useDialog.description", "This replaces the current team members and syncs the team protocol.")}
+            </p>
+            <p className="mt-3 truncate rounded-[7px] border border-[var(--team-template-border)] px-3 py-2 text-[13px] font-medium text-[var(--team-template-title)]">
+              {detail.name}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={applying}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] text-[var(--team-template-muted)] transition hover:bg-[var(--team-template-row-hover)] hover:text-[var(--team-template-title)] disabled:cursor-not-allowed disabled:opacity-50"
+            aria-label={translateWithFallback(t, "teamTemplates.cancel", "Cancel")}
+            title={translateWithFallback(t, "teamTemplates.cancel", "Cancel")}
+          >
+            <X aria-hidden="true" className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        <div className="mt-4 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={applying}
+            className={`${quietButtonClassName} h-8 px-3 text-[13px] font-medium disabled:cursor-not-allowed disabled:opacity-60`}
+          >
+            {translateWithFallback(t, "teamTemplates.cancel", "Cancel")}
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={applying}
+            className={`${brandPrimaryButtonClassName} h-8 rounded-[6px] px-3 text-[13px] disabled:opacity-70`}
+          >
+            {applying
+              ? translateWithFallback(t, "teamTemplates.replacing", "Replacing...")
+              : translateWithFallback(t, "teamTemplates.confirmReplace", "Confirm replacement")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TemplateCard({
+  template,
+  onClick,
+  t,
+}: {
+  template: TeamPresetSummary;
+  onClick: () => void;
+  t: TranslateFn;
+}) {
+  const CategoryIcon = getTemplateIcon(template.id, template.name);
+  
+  return (
+    <div
+      onClick={onClick}
+      className={`team-template-card group relative flex min-h-[124px] cursor-pointer flex-col rounded-[8px] p-3 ${hairlineSurfaceClassName} ${interactiveSurfaceClassName}`}
+    >
+      {template.is_builtin && (
+        <div className="absolute right-3 top-3">
+          <RecommendedBadge t={t} />
+        </div>
+      )}
+
+      <div className="flex min-w-0 items-start gap-2 pr-9">
+        <div className="flex h-6 w-6 shrink-0 items-center justify-center text-[var(--team-template-icon)] transition-colors duration-150 ease-out">
+          <CategoryIcon className="h-4 w-4" strokeWidth={1.5} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <h3 className="min-w-0 whitespace-normal break-words text-[14px] font-semibold leading-snug text-[var(--team-template-title)]">
+            {template.name}
+          </h3>
+          {template.description && (
+            <p
+              className="mt-1 line-clamp-2 text-[12px] leading-snug text-[var(--team-template-muted)]"
+              title={template.description}
+            >
+              {template.description}
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-auto flex items-center justify-between gap-3 pt-0.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <AgentAvatarGroup template={template} />
+          <span className="min-w-0 font-mono text-[12px] font-medium text-[var(--team-template-aux)] tabular-nums">
+            {translateWithFallback(t, "teamTemplates.memberCount", "{count} members", { count: template.member_count })}
+          </span>
+        </div>
+        <span className="shrink-0 font-mono text-[11px] font-medium text-[var(--team-template-aux)] tabular-nums">
+          {getTemplateVersionLabel(template)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+export function TeamTemplatesPage() {
+  const {
+    t,
+    projects,
+    selectedProjectId,
+    refreshMembers,
+    refreshSessions,
+    showToast,
+    skills,
+    locale,
+  } = useWorkspace();
+  const [templates, setTemplates] = useState<TeamPresetSummary[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedDetail, setSelectedDetail] = useState<ChatTeamPreset | null>(
+    null,
+  );
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [editorMode, setEditorMode] = useState<EditorMode>(null);
+  const [form, setForm] = useState<TeamPresetForm>(() => blankForm(t));
+  const [formError, setFormError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [showExitPrompt, setShowExitPrompt] = useState(false);
+  const [editorSelectedMemberId, setEditorSelectedMemberId] = useState<
+    string | null
+  >(null);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [applyTargetDetail, setApplyTargetDetail] =
+    useState<ChatTeamPreset | null>(null);
+  const [applyingTemplate, setApplyingTemplate] = useState(false);
+  const [projectTemplateMembers, setProjectTemplateMembers] = useState<
+    ProjectMemberWithRuntime[]
+  >([]);
+  const [projectTemplateMembersLoaded, setProjectTemplateMembersLoaded] =
+    useState(false);
+  const [runtimes, setRuntimes] = useState<AgentRuntimeStatus[]>([]);
+  const templateRequestGate = useRef(createLatestRequestGate());
+  const detailRequestGate = useRef(createLatestRequestGate());
+
+  const loadTemplates = useCallback(async () => {
+    const requestId = templateRequestGate.current.start();
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const response = await teamPresetsApi.list(locale);
+      if (templateRequestGate.current.isLatest(requestId)) {
+        setTemplates(response.teams);
+      }
+    } catch (error) {
+      if (templateRequestGate.current.isLatest(requestId)) {
+        setLoadError(errorText(error, "Failed to load templates."));
+      }
+    } finally {
+      if (templateRequestGate.current.isLatest(requestId)) {
+        setLoading(false);
+      }
+    }
+  }, [locale]);
+
+  const loadDetail = useCallback(async (teamId: string) => {
+    const requestId = detailRequestGate.current.start();
+    setDetailLoading(true);
+    setDetailError(null);
+    setSelectedDetail(null);
+    try {
+      const detail = await teamPresetsApi.get(teamId, locale);
+      if (detailRequestGate.current.isLatest(requestId)) {
+        setSelectedDetail(detail);
+      }
+    } catch (error) {
+      if (detailRequestGate.current.isLatest(requestId)) {
+        setDetailError(errorText(error, "Failed to load template details."));
+      }
+    } finally {
+      if (detailRequestGate.current.isLatest(requestId)) {
+        setDetailLoading(false);
+      }
+    }
+  }, [locale]);
+
+  useEffect(() => {
+    void loadTemplates();
+  }, [loadTemplates]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void agentRuntimeApi
+      .list()
+      .then((response) => {
+        if (!cancelled) setRuntimes(response.runners);
+      })
+      .catch(() => {
+        if (!cancelled) setRuntimes([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    setApplyTargetDetail(null);
+    if (!selectedId) {
+      setSelectedDetail(null);
+      return;
+    }
+    void loadDetail(selectedId);
+  }, [loadDetail, locale, selectedId]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      setProjectTemplateMembers([]);
+      setProjectTemplateMembersLoaded(true);
+      return;
+    }
+
+    let cancelled = false;
+    setProjectTemplateMembersLoaded(false);
+    void projectApi
+      .listMembers(selectedProjectId)
+      .then((members) => {
+        if (!cancelled) {
+          setProjectTemplateMembers(members);
+          setProjectTemplateMembersLoaded(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setProjectTemplateMembers([]);
+          setProjectTemplateMembersLoaded(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProjectId]);
+
+  const selectedDetailForView =
+    selectedDetail?.id === selectedId ? selectedDetail : null;
+  const detailViewLoading = Boolean(
+    selectedId &&
+      !detailError &&
+      (detailLoading || selectedDetailForView === null),
+  );
+  const canEditSelected = Boolean(
+    selectedDetail &&
+      selectedDetail.id === selectedId &&
+      !selectedDetail.is_builtin,
+  );
+  const editorBaselineForm = useMemo(() => {
+    if (!editorMode) return null;
+    if (editorMode === "edit") {
+      return selectedDetailForView ? detailToForm(selectedDetailForView) : null;
+    }
+    return blankForm(t);
+  }, [editorMode, selectedDetailForView, t]);
+  const hasUnsavedEditorChanges = Boolean(
+    editorMode &&
+      editorBaselineForm &&
+      formDirtySnapshot(form) !== formDirtySnapshot(editorBaselineForm),
+  );
+  const editorSaveStatus =
+    editorMode === "edit"
+      ? hasUnsavedEditorChanges
+        ? translateWithFallback(t, "teamTemplates.unsaved", "Unsaved changes")
+        : translateWithFallback(t, "teamTemplates.draftBackedUp", "Draft backed up")
+      : null;
+
+  const openTemplateDetail = (teamId: string) => {
+    setDetailError(null);
+    setDetailLoading(true);
+    setSelectedId(teamId);
+  };
+
+  const startCreate = () => {
+    const draft = blankForm(t);
+    setForm(draft);
+    setFormError(null);
+    setFieldErrors({});
+    setShowExitPrompt(false);
+    setEditorSelectedMemberId(draft.members[0]?.id ?? null);
+    setEditorMode("create");
+    setSelectedId(null);
+  };
+
+  const importTemplateFromFile = useCallback(
+    (file: File) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const raw = JSON.parse(reader.result as string);
+          if (!raw || typeof raw !== "object" || !raw.name || !Array.isArray(raw.members)) {
+            showToast(
+              translateWithFallback(t, "teamTemplates.importInvalid", "Invalid template file. The JSON must contain name and members fields."),
+              "error",
+            );
+            return;
+          }
+          const rawMembers = raw.members as Record<string, unknown>[];
+          const newMembers = rawMembers.map((m: Record<string, unknown>) => ({
+            id: createUniqueTemplateId(),
+            name: typeof m.name === "string" ? m.name : "Member",
+            description: typeof m.description === "string" ? m.description : "",
+            runner_type: typeof m.runner_type === "string" ? m.runner_type : null,
+            recommended_model: typeof m.recommended_model === "string" ? m.recommended_model : null,
+            system_prompt: typeof m.system_prompt === "string" ? m.system_prompt : "",
+            default_workspace_path: null,
+            selected_skill_ids: Array.isArray(m.selected_skill_ids) ? m.selected_skill_ids as string[] : [],
+            tools_enabled: m.tools_enabled ?? {},
+            execution_config: m.execution_config as MemberExecutionConfig | undefined,
+            is_builtin: false,
+            enabled: true,
+          }));
+          const rawLeadIndex = typeof raw.lead_member_id === "string"
+            ? rawMembers.findIndex((m) => m.id === raw.lead_member_id)
+            : -1;
+          const lead_member_id = rawLeadIndex >= 0 ? newMembers[rawLeadIndex].id : null;
+          const preset: ChatTeamPreset = {
+            id: createUniqueTemplateId(),
+            name: typeof raw.name === "string" ? raw.name : "",
+            description: typeof raw.description === "string" ? raw.description : "",
+            members: newMembers,
+            lead_member_id,
+            workflow_steps: Array.isArray(raw.workflow_steps)
+              ? raw.workflow_steps.filter((s: unknown) => s && typeof s === "object" && "title" in (s as Record<string, unknown>))
+              : [],
+            team_protocol: typeof raw.team_protocol === "string" ? raw.team_protocol : "",
+            is_builtin: false,
+            enabled: true,
+            tier: (raw.tier === "advanced" ? "advanced" : "standard") as ChatTeamTemplateTier,
+          };
+          const draft = detailToForm(preset);
+          setForm(draft);
+          setFormError(null);
+          setFieldErrors({});
+          setShowExitPrompt(false);
+          setEditorSelectedMemberId(draft.members[0]?.id ?? null);
+          setEditorMode("create");
+          setSelectedId(null);
+          showToast(
+            translateWithFallback(t, "teamTemplates.importSuccess", "Template imported. Review and save to apply."),
+            "success",
+          );
+        } catch {
+          showToast(
+            translateWithFallback(t, "teamTemplates.importInvalid", "Invalid JSON file. Please check the file format."),
+            "error",
+          );
+        }
+      };
+      reader.readAsText(file);
+    },
+    [showToast, t],
+  );
+
+  const startEdit = () => {
+    if (!selectedDetailForView || selectedDetailForView.is_builtin) return;
+    const restored = restoreDraftBackup(selectedDetailForView.id);
+    const draft = restored ?? detailToForm(selectedDetailForView);
+    setForm(draft);
+    setFormError(null);
+    setFieldErrors({});
+    setShowExitPrompt(false);
+    setEditorSelectedMemberId(
+      draft.leadMemberId || draft.members[0]?.id || null,
+    );
+    setEditorMode("edit");
+  };
+
+  const saveTemplate = async (): Promise<boolean> => {
+    setFormError(null);
+    setFieldErrors({});
+    const validation = validateTeamPresetForm(form, t);
+    if (validation.issue) {
+      setFormError(validation.issue.message);
+      if (validation.issue.fieldKey) {
+        setFieldErrors({ [validation.issue.fieldKey]: validation.issue.message });
+      }
+      if (validation.issue.memberId) {
+        setEditorSelectedMemberId(validation.issue.memberId);
+      }
+      return false;
+    }
+
+    setSaving(true);
+    try {
+      const saved =
+        editorMode === "create"
+          ? await teamPresetsApi.create(validation.payload)
+          : await teamPresetsApi.update(form.id, validation.payload);
+      clearDraftBackup(form.id);
+      setEditorMode(null);
+      await loadTemplates();
+      setSelectedDetail(saved);
+      setSelectedId(saved.id);
+      setShowExitPrompt(false);
+      return true;
+    } catch (error) {
+      const errorMessage = errorText(error, translateWithFallback(t, "teamTemplates.saveError", "Failed to save template."));
+      setFormError(errorMessage);
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const closeEditor = () => {
+    if (form?.id) clearDraftBackup(form.id);
+    setShowExitPrompt(false);
+    setEditorMode(null);
+    setFieldErrors({});
+    setFormError(null);
+  };
+
+  const requestExitEditor = () => {
+    if (hasUnsavedEditorChanges) {
+      setShowExitPrompt(true);
+      return;
+    }
+    closeEditor();
+  };
+
+  const saveAndExitEditor = async () => {
+    const saved = await saveTemplate();
+    if (!saved) {
+      setShowExitPrompt(false);
+    }
+  };
+
+  const autoSaveTemplate = useCallback(
+    (draft: TeamPresetForm) => {
+      if (editorMode !== "edit" || saving) return;
+      saveDraftBackup(draft.id, draft);
+    },
+    [editorMode, saving],
+  );
+
+  useEffect(() => {
+    if (
+      editorMode !== "edit" ||
+      !hasUnsavedEditorChanges ||
+      saving ||
+      deleting
+    ) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void autoSaveTemplate(form);
+    }, 700);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    autoSaveTemplate,
+    deleting,
+    editorMode,
+    form,
+    hasUnsavedEditorChanges,
+    saving,
+  ]);
+
+  const validateMemberToolsOnBlur = useCallback(
+    (draft: TeamPresetForm, memberId: string) => {
+      const issue = validateMemberToolsEnabled(draft, memberId, t);
+      if (issue) {
+        setFormError(issue.message);
+        if (issue.fieldKey) {
+          setFieldErrors({ [issue.fieldKey]: issue.message });
+        }
+        if (issue.memberId) {
+          setEditorSelectedMemberId(issue.memberId);
+        }
+        return;
+      }
+
+      setFieldErrors((current) => {
+        const next = { ...current };
+        delete next[`member:${memberId}:tools_enabled`];
+        return next;
+      });
+      setFormError((current) =>
+        current === translateWithFallback(t, "teamTemplates.validation.invalidJson", "Invalid JSON format. Please check your syntax.")
+          ? null
+          : current,
+      );
+
+      if (editorMode === "edit") {
+        void autoSaveTemplate(draft);
+      }
+    },
+    [autoSaveTemplate, editorMode, t],
+  );
+
+  const validateMemberMcpOnBlur = useCallback(
+    (draft: TeamPresetForm, memberId: string) => {
+      const issue = validateMemberMcpConfig(draft, memberId, t);
+      if (issue) {
+        setFormError(issue.message);
+        if (issue.fieldKey) {
+          setFieldErrors({ [issue.fieldKey]: issue.message });
+        }
+        if (issue.memberId) {
+          setEditorSelectedMemberId(issue.memberId);
+        }
+        return;
+      }
+
+      setFieldErrors((current) => {
+        const next = { ...current };
+        delete next[`member:${memberId}:mcp_config`];
+        return next;
+      });
+      const mcpMessages = memberMcpErrorMessages(t);
+      setFormError((current) =>
+        current === mcpMessages.invalidJson ||
+        current === mcpMessages.invalidShape
+          ? null
+          : current,
+      );
+
+      if (editorMode === "edit") {
+        void autoSaveTemplate(draft);
+      }
+    },
+    [autoSaveTemplate, editorMode, t],
+  );
+
+  const deleteSelected = async () => {
+    if (!selectedDetailForView || selectedDetailForView.is_builtin || deleting) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      translateWithFallback(t, "teamTemplates.deleteConfirm", `Delete "${selectedDetailForView.name}"? This removes the custom template and any private members only used by it.`, { name: selectedDetailForView.name }),
+    );
+    if (!confirmed) return;
+
+    setDeleting(true);
+    try {
+      await teamPresetsApi.delete(selectedDetailForView.id);
+      setShowExitPrompt(false);
+      setEditorMode(null);
+      setFieldErrors({});
+      setFormError(null);
+      setSelectedDetail(null);
+      setSelectedId(null);
+      await loadTemplates();
+    } catch (error) {
+      setDetailError(errorText(error, translateWithFallback(t, "teamTemplates.deleteError", "Failed to delete template.")));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const createProjectAgentMember = async (
+    projectId: string,
+    spec: TemplateMemberBuild,
+  ): Promise<ProjectMemberWithRuntime> => {
+    const agent = await chatAgentsApi.create({
+      name: spec.name,
+      runner_type: spec.runnerType,
+      system_prompt: spec.systemPrompt,
+      tools_enabled: spec.toolsEnabled,
+      model_name: spec.modelName,
+      owner_project_id: projectId,
+    });
+
+    return projectApi.addMember(projectId, {
+      member_type: ProjectMemberType.agent,
+      user_id: null,
+      agent_id: agent.id,
+      member_name: agent.name,
+      role: spec.role,
+      display_order: BigInt(spec.displayOrder),
+      default_workspace_path: spec.workspacePath,
+      allowed_skill_ids: spec.allowedSkillIds,
+      execution_config: structuredClone(spec.executionConfig),
+      is_default: true,
+    });
+  };
+
+  const removeProjectSessionAgents = async (
+    projectId: string,
+    projectMemberIds: Set<string>,
+    agentIds: Set<string>,
+  ) => {
+    const sessions = await projectApi.listSessions(projectId);
+
+    await Promise.all(
+      sessions.map(async (session) => {
+        const sessionAgents = await sessionAgentsApi.list(session.id);
+        const removable = sessionAgents.filter(
+          (sessionAgent) =>
+            (sessionAgent.project_member_id &&
+              projectMemberIds.has(sessionAgent.project_member_id)) ||
+            agentIds.has(sessionAgent.agent_id),
+        );
+
+        await Promise.all(
+          removable.map((sessionAgent) =>
+            sessionAgentsApi.remove(session.id, sessionAgent.id),
+          ),
+        );
+      }),
+    );
+
+    return sessions;
+  };
+
+  const applyTemplateToProject = async () => {
+    const target = applyTargetDetail;
+    if (!target || applyingTemplate) return;
+
+    if (!selectedProjectId) {
+      showToast(translateWithFallback(t, "teamTemplates.selectProject", "Select a project before using a template."), "warning");
+      return;
+    }
+
+    const projectId = selectedProjectId;
+    const workspacePath =
+      projects.find((project) => project.id === projectId)
+        ?.default_workspace_path ?? null;
+
+    setApplyingTemplate(true);
+    try {
+      const detail = await teamPresetsApi.get(target.id, locale);
+      const [runtimeResponse, existingMembers, projectAgents] =
+        await Promise.all([
+          agentRuntimeApi.list(),
+          projectApi.listMembers(projectId),
+          chatAgentsApi.list({ projectId }),
+        ]);
+      const memberSpecs = buildTemplateMemberSpecs(
+        detail,
+        workspacePath,
+        runtimeResponse.runners,
+      ).map((spec) =>
+        workspacePath ? { ...spec, workspacePath } : spec,
+      );
+      if (memberSpecs.length === 0) {
+        throw new Error(translateWithFallback(t, "teamTemplates.noUsableMembers", "The template has no usable members, so the current team was not replaced."));
+      }
+
+      const existingAgentMembers = existingMembers.filter(isAgentProjectMember);
+      const existingProjectMemberIds = new Set(
+        existingAgentMembers.map((member) => member.id),
+      );
+      const existingAgentIds = new Set(
+        existingAgentMembers
+          .map((member) => member.agent_id)
+          .filter((agentId): agentId is string => !!agentId),
+      );
+      const removableOwnedAgentIds = new Set(
+        projectAgents
+          .filter(
+            (agent) =>
+              agent.owner_project_id === projectId &&
+              existingAgentIds.has(agent.id),
+          )
+          .map((agent) => agent.id),
+      );
+
+      const sessions = await removeProjectSessionAgents(
+        projectId,
+        existingProjectMemberIds,
+        existingAgentIds,
+      );
+      await Promise.all(
+        existingAgentMembers.map((member) =>
+          projectApi.removeMember(projectId, member.id),
+        ),
+      );
+      await Promise.all(
+        Array.from(removableOwnedAgentIds).map((agentId) =>
+          chatAgentsApi.delete(agentId).catch(() => undefined),
+        ),
+      );
+
+      const createdMembers: ProjectMemberWithRuntime[] = [];
+      for (const spec of memberSpecs) {
+        createdMembers.push(await createProjectAgentMember(projectId, spec));
+      }
+
+      const leadAgentId =
+        createdMembers.find((member) => member.role === "lead")?.agent_id ??
+        createdMembers[0]?.agent_id ??
+        null;
+      const teamProtocol = detail.team_protocol.trim();
+      const sessionPatch: Partial<UpdateChatSession> = {};
+      if (leadAgentId) {
+        sessionPatch.lead_agent_id = leadAgentId;
+      }
+
+      await projectApi.updateTeamProtocol(projectId, {
+        content: teamProtocol,
+        enabled: teamProtocol.length > 0,
+      });
+      await Promise.all(
+        sessions.map((session) =>
+          chatSessionsApi.update(
+            session.id,
+            teamTemplateSessionUpdatePayload(sessionPatch),
+          ),
+        ),
+      );
+
+      setProjectTemplateMembers(await projectApi.listMembers(projectId));
+      setProjectTemplateMembersLoaded(true);
+      await Promise.all([refreshMembers(), refreshSessions()]);
+      setApplyTargetDetail(null);
+      showToast(translateWithFallback(t, "teamTemplates.applySuccess", `Replaced the current team with "${detail.name}".`, { name: detail.name }), "success");
+    } catch (error) {
+      showToast(errorText(error, translateWithFallback(t, "teamTemplates.applyError", "Failed to apply template.")), "error");
+    } finally {
+      setApplyingTemplate(false);
+    }
+  };
+
+  const { standard: standardTemplates, advanced: advancedTemplates } =
+    useMemo(() => groupTeamTemplatesByTier(templates), [templates]);
+  const templateCandidates = templates;
+  const currentActiveTemplate = useMemo(
+    () => resolveProjectActiveTemplate(projectTemplateMembers, templateCandidates),
+    [projectTemplateMembers, templateCandidates],
+  );
+  const CurrentActiveIcon = getTemplateIcon(
+    currentActiveTemplate?.id ?? "",
+    currentActiveTemplate?.name ?? "",
+  );
+
+  return (
+    <div className="team-template-page flex h-full min-h-0 flex-col font-sans text-[var(--team-template-title)]">
+      <TeamTemplatesHeader onCreate={startCreate} onImport={importTemplateFromFile} t={t} />
+
+      <main className="team-template-scrollbar flex-1 overflow-y-auto">
+        {loading && (
+          <div className="flex h-full w-full items-center justify-center">
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-[var(--team-template-border)] border-t-[var(--team-template-title)]" />
+          </div>
+        )}
+
+        {!loading && loadError && (
+          <div className="flex h-full w-full flex-col items-center justify-center p-8 text-center">
+            <h2 className="text-[16px] font-medium text-[var(--team-template-title)]">
+              {translateWithFallback(t, "teamTemplates.loadTitle", "Could not load templates")}
+            </h2>
+            <p className="mt-2 text-[14px] text-[var(--team-template-muted)]">
+              {loadError}
+            </p>
+            <button
+              type="button"
+              onClick={() => void loadTemplates()}
+              className={`${quietButtonClassName} mt-6 h-9 px-4 text-[14px] font-medium`}
+            >
+              {translateWithFallback(t, "teamTemplates.retry", "Retry")}
+            </button>
+          </div>
+        )}
+
+        {!loading && !loadError && editorMode && (
+          <TemplateDetailView
+            canEdit={false}
+            canUseTemplate={false}
+            detail={selectedDetailForView}
+            detailError={null}
+            detailLoading={false}
+            deleting={deleting}
+            editorMode={editorMode}
+            fieldErrors={fieldErrors}
+            form={form}
+            formError={formError}
+            installedSkills={skills}
+            runtimes={runtimes}
+            saving={saving}
+            saveStatus={editorSaveStatus}
+            selectedEditableMemberId={editorSelectedMemberId}
+            usingTemplate={false}
+            t={t}
+            onAutoSave={(draft) => void autoSaveTemplate(draft)}
+            onBack={requestExitEditor}
+            onCancel={requestExitEditor}
+            onDelete={() => void deleteSelected()}
+            onEdit={() => undefined}
+            onEditableMemberSelect={setEditorSelectedMemberId}
+            onFormChange={(draft) => {
+              setForm(draft);
+              setFieldErrors({});
+              setFormError(null);
+            }}
+            onRetryDetail={() => undefined}
+            onSave={() => void saveTemplate()}
+            onValidateMemberMcp={validateMemberMcpOnBlur}
+            onValidateMemberTools={validateMemberToolsOnBlur}
+            onUseTemplate={() => undefined}
+          />
+        )}
+
+        {!loading && !loadError && !editorMode && selectedId && (
+          <TemplateDetailView
+            canEdit={canEditSelected}
+            canUseTemplate={Boolean(
+              selectedDetailForView &&
+                projectTemplateMembersLoaded &&
+                selectedDetailForView.id !== currentActiveTemplate?.id,
+            )}
+            detail={selectedDetailForView}
+            detailError={detailError}
+            detailLoading={detailViewLoading}
+            deleting={deleting}
+            installedSkills={skills}
+            runtimes={runtimes}
+            usingTemplate={applyingTemplate}
+            t={t}
+            onBack={() => setSelectedId(null)}
+            onDelete={() => void deleteSelected()}
+            onEdit={startEdit}
+            onRetryDetail={() => void loadDetail(selectedId)}
+            onUseTemplate={() => {
+              if (selectedDetailForView) {
+                setApplyTargetDetail(selectedDetailForView);
+              }
+            }}
+          />
+        )}
+
+        {!loading && !loadError && !editorMode && !selectedId && (
+          <div className="w-full px-4 py-6 sm:px-5 md:px-6 md:py-8 lg:px-8 lg:py-10">
+            {currentActiveTemplate && (
+              <section className="mb-8">
+                <div className={`group relative flex cursor-pointer items-center gap-3 overflow-hidden rounded-[8px] px-3 py-2.5 ${activeSurfaceClassName} transition-colors duration-150 ease-out hover:bg-[var(--team-template-surface-hover)]`} onClick={() => openTemplateDetail(currentActiveTemplate.id)}>
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-y-0 left-0 w-px bg-[var(--team-template-accent)]"
+                  />
+                  <div className="flex min-w-0 flex-1 items-start gap-2.5">
+                    <div className="flex h-7 w-7 shrink-0 items-center justify-center text-[var(--team-template-icon)] transition-colors duration-150 ease-out">
+                      <CurrentActiveIcon className="h-4 w-4" strokeWidth={1.5} />
+                    </div>
+                    <div className="flex min-w-0 flex-1 flex-col">
+                      <div className="flex items-center">
+                        <span className="font-mono text-[12px] font-medium text-[var(--team-template-aux)]">
+                          {translateWithFallback(t, "teamTemplates.currentActive", "Current active template")}
+                        </span>
+                      </div>
+                      <h3 className="whitespace-normal break-words text-[14px] font-semibold leading-snug text-[var(--team-template-title)]">
+                        {currentActiveTemplate.name}
+                      </h3>
+                      {currentActiveTemplate.description && (
+                        <p
+                          className="mt-0.5 line-clamp-1 text-[13px] leading-snug text-[var(--team-template-muted)]"
+                          title={currentActiveTemplate.description}
+                        >
+                          {currentActiveTemplate.description}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="hidden min-w-[150px] flex-col md:flex">
+                    <div className="flex items-center justify-between gap-2 font-mono text-[11px] text-[var(--team-template-aux)]">
+                      <span>{getTemplateVersionLabel(currentActiveTemplate)}</span>
+                      <span>{translateWithFallback(t, "teamTemplates.updatedRecently", "Updated recently")}</span>
+                    </div>
+                  </div>
+                  <div className="hidden lg:flex">
+                    <AgentAvatarGroup template={currentActiveTemplate} />
+                  </div>
+                  <button className={`${quietButtonClassName} h-7 gap-1.5 px-2.5 text-[13px] font-medium`}>
+                    {translateWithFallback(t, "teamTemplates.configure", "Configure")}
+                    <kbd className="rounded border border-[var(--team-template-border)] px-1.5 py-px font-mono text-[11px] font-medium text-[var(--team-template-aux)]">
+                      C
+                    </kbd>
+                  </button>
+                </div>
+              </section>
+            )}
+
+            <section className="mb-10">
+              <h2 className="mb-4 text-[12px] font-semibold uppercase tracking-[0.12em] text-[var(--team-template-aux)]">
+                {translateWithFallback(t, "teamTemplates.tiers.standard", "Standard templates")} (<span className="font-mono tabular-nums text-[var(--team-template-title)]">{standardTemplates.length}</span>)
+              </h2>
+              {standardTemplates.length === 0 ? (
+                <button
+                  type="button"
+                  onClick={startCreate}
+                  className={`flex w-full flex-col items-center justify-center rounded-[8px] border border-dashed border-[var(--team-template-border)] bg-[var(--team-template-surface)] py-12 transition-colors duration-150 ease-out hover:border-[var(--team-template-border-strong)] hover:bg-[var(--team-template-surface-hover)]`}
+                >
+                  <div className={`flex h-12 w-12 items-center justify-center rounded-lg text-[var(--team-template-muted)] ${hairlineSurfaceClassName}`}>
+                    <Plus className="h-6 w-6" strokeWidth={1.5} />
+                  </div>
+                  <h3 className="mt-4 text-sm font-medium text-[var(--team-template-title)]">
+                    {translateWithFallback(t, "teamTemplates.empty.create", "Create a custom template")}
+                  </h3>
+                  <p className="mt-1 text-xs text-[var(--team-template-muted)]">
+                    {translateWithFallback(t, "teamTemplates.empty.description", "Create a customized team configuration for your specific workflows.")}
+                  </p>
+                </button>
+              ) : (
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+                  {standardTemplates.map((template) => (
+                    <TemplateCard
+                      key={template.id}
+                      template={template}
+                      t={t}
+                      onClick={() => openTemplateDetail(template.id)}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section>
+              <h2 className="mb-4 text-[12px] font-semibold uppercase tracking-[0.12em] text-[var(--team-template-aux)]">
+                {translateWithFallback(t, "teamTemplates.tiers.advanced", "Advanced templates")} (<span className="font-mono tabular-nums text-[var(--team-template-title)]">{advancedTemplates.length}</span>)
+              </h2>
+              {advancedTemplates.length === 0 ? (
+                <p className="text-[13px] text-[var(--team-template-muted)]">
+                  {translateWithFallback(t, "teamTemplates.tiers.emptyAdvanced", "No advanced templates available.")}
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+                  {advancedTemplates.map((template) => (
+                    <TemplateCard
+                      key={template.id}
+                      template={template}
+                      t={t}
+                      onClick={() => {
+                        openTemplateDetail(template.id);
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          </div>
+        )}
+        {applyTargetDetail && (
+          <UseTeamTemplateDialog
+            applying={applyingTemplate}
+            detail={applyTargetDetail}
+            onCancel={() => {
+              if (!applyingTemplate) {
+                setApplyTargetDetail(null);
+              }
+            }}
+            onConfirm={() => void applyTemplateToProject()}
+            t={t}
+          />
+        )}
+        {showExitPrompt && (
+          <UnsavedEditorExitDialog
+            saving={saving}
+            onCancel={() => setShowExitPrompt(false)}
+            onDiscard={closeEditor}
+            onSave={() => void saveAndExitEditor()}
+            t={t}
+          />
+        )}
+      </main>
+    </div>
+  );
+}
