@@ -53,7 +53,9 @@ fn normalize_mention(value: &str) -> Option<String> {
 
 pub fn parse_user_message_mentions(content: &str, meta: &Value) -> Vec<String> {
     let content_mentions = parse_mentions(content);
-    if !content_mentions.is_empty() {
+    if !content_mentions.is_empty()
+        || meta.get("chat_input_mode").and_then(Value::as_str) == Some("free")
+    {
         return content_mentions;
     }
 

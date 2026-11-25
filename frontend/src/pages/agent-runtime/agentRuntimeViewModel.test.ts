@@ -3,6 +3,7 @@
 
 import type { AgentRuntimeStatus } from "@/types";
 import {
+  modelsForRuntimeDisplay,
   AGENT_RUNTIME_EDITABLE_FIELDS,
   buildLocalMachineSummary,
   envSummaryToText,
@@ -305,6 +306,17 @@ check(
     ["GEMINI", "CLAUDE_CODE"],
   ),
 );
+
+check("unavailable diagnostic keeps last-known model choices", same(
+  modelsForRuntimeDisplay({ model_source: "none", discovered_models: [] }, baseRunner),
+  baseRunner.discovered_models,
+));
+check("confirmed empty model catalog does not keep stale choices", same(
+  modelsForRuntimeDisplay({ model_source: "runner", discovered_models: [] }, baseRunner), [],
+));
+check("fresh discovery replaces old choices", same(
+  modelsForRuntimeDisplay({ model_source: "runner", discovered_models: ["new-model"] }, baseRunner), ["new-model"],
+));
 
 if (failures > 0) {
   // eslint-disable-next-line no-console

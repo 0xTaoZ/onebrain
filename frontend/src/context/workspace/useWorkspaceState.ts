@@ -113,6 +113,7 @@ import {
   CHAT_MESSAGE_FONT_SIZE_DEFAULT,
   EMPTY_INBOX_SUMMARY,
   resolveSystemTheme,
+  readInitialThemePreference,
   readSessionIdSet,
   writeSessionIdSet,
   normalizeChatMessageFontSize,
@@ -143,7 +144,7 @@ import { ChatDeliveryResyncScheduler } from './chatDeliveryResyncScheduler';
 export const useWorkspaceState = () => {
   const runActivityStore = useRunActivityStore();
   const [themePreference, setThemePreferenceState] =
-    useState<ThemePreference>('system');
+    useState<ThemePreference>(readInitialThemePreference);
   const [systemTheme, setSystemTheme] = useState<Theme>(resolveSystemTheme);
   const theme: Theme =
     themePreference === 'system' ? systemTheme : themePreference;
@@ -695,7 +696,10 @@ export const useWorkspaceState = () => {
 
   useEffect(() => {
     document.body.setAttribute('data-mode', theme);
-  }, [theme]);
+    document.documentElement.style.backgroundColor = theme === 'paper' ? '#fbfaf7' : theme === 'light' ? '#fbfbfc' : '#010102';
+    document.documentElement.style.colorScheme = theme === 'dark' ? 'dark' : 'light';
+    try { localStorage.setItem('openteams-theme-preference', themePreference); } catch { /* Storage may be disabled. */ }
+  }, [theme, themePreference]);
 
   const makeListSetter =
     <T,>(

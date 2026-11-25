@@ -372,7 +372,7 @@ export const isAutoReadableInboxItem = (item: InboxItem): boolean =>
 export const isThemePreference = (
   value: string | null | undefined,
 ): value is ThemePreference =>
-  value === 'light' || value === 'dark' || value === 'system';
+  value === 'light' || value === 'paper' || value === 'dark' || value === 'system';
 
 export const resolveSystemTheme = (): Theme => {
   if (typeof window === 'undefined') return 'dark';
@@ -942,4 +942,12 @@ export const filterMessagesForSession = (
   }
 
   return orderMessagesForConversation(deduped);
+};
+
+/** Cache only the appearance preference for a consistent pre-paint theme. */
+export const readInitialThemePreference = (): ThemePreference => {
+  try {
+    const cached = localStorage.getItem('openteams-theme-preference');
+    return isThemePreference(cached) ? cached : 'system';
+  } catch { return 'system'; }
 };

@@ -98,3 +98,29 @@ if (failures > 0) {
 } else {
   console.log('\nAll chat queue API assertions passed.');
 }
+
+import assert from 'node:assert/strict';
+import { withChatOpKey } from './chatQueueApi';
+const data = {sender_type: 'user' as const, sender_id: null, content: 'test', meta: {client_message_id: 'stable-id'}};
+const first = withChatOpKey(data);
+assert.equal(first.opKey, 'stable-id');
+assert.equal(withChatOpKey(first).opKey, first.opKey);
+assert.equal(withChatOpKey(data).opKey, first.opKey);
+assert.equal(withChatOpKey({...data, meta: null}).opKey, undefined);
+console.log('Stable opKey retry tests passed');
+
+const fetchBeforeAck = globalThis.fetch;
+let ackCalls = 0;
+globalThis.fetch = (async () => {
+  ackCalls += 1;
+  return new Response(JSON.stringify({success: false, error_data: {code: 'needs_ack', pending: {active_count: 1, items: []}}}), {status: 409});
+}) as typeof fetch;
+try {
+  const { chatMessagesApi } = await import('./api');
+  const { NeedsAckError } = await import('./chatQueueApi');
+  await assert.rejects(chatMessagesApi.send('session-ack', data), NeedsAckError);
+  assert.equal(ackCalls, 1, 'needs_ack must not trigger a silent retry');
+} finally {
+  globalThis.fetch = fetchBeforeAck;
+}
+console.log('needs_ack API handling passed');

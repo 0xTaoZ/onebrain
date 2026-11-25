@@ -1,6 +1,6 @@
 {
   "generated_at": "2026-07-17T08:54:32.090Z",
-  "total_skills": 871,
+  "total_skills": 872,
   "categories": [
     "App Automation",
     "Business",
@@ -21,6 +21,29 @@
     "sales-intelligence"
   ],
   "skills": [
+    {
+      "id": "context-economy",
+      "name": "context-economy",
+      "description": "Reduce repeated source reads and oversized tool output during multi-agent coding, research, and handoff. Use for long histories, repeated file inspection, shared Markdown knowledge, or token-cost concerns.",
+      "category": "Development",
+      "version": "1.0.0",
+      "author": null,
+      "tags": [
+        "context",
+        "token-efficiency",
+        "shared-knowledge"
+      ],
+      "compatible_agents": [
+        "codex",
+        "opencode",
+        "cursor",
+        "claude-code",
+        "qwen-code"
+      ],
+      "source_url": null,
+      "content": "---\nname: context-economy\ndescription: Reduce repeated source reads and oversized tool output during multi-agent coding, research, and handoff. Use for long histories, repeated file inspection, shared Markdown knowledge, or token-cost concerns.\nlicense: MIT\n---\n\n# Context economy\n\nKeep the task correct and evidence retrievable. Use this skill on demand; do not paste this whole document into every prompt.\n\n- Start with the task, constraints, current result, and next action. Keep handoffs short and attach source paths, message IDs, code versions, and test results.\n- Search filenames and symbols before reading. Read the smallest relevant range; do not repack whole repositories or repeatedly dump the same file/page/log.\n- Reuse a prior read only when its content is still in your active context and the source hash, path, range, and clipping settings match. A new agent or compacted session must retrieve the needed excerpt again. A shared hash alone does not give another model the contents.\n- Keep stable instructions/tool definitions stable. Put changing task data later where the client allows. Provider prefix caching usually reduces input cost; cache creation and subscription quotas have provider-specific accounting.\n- Retain raw logs and source messages; present short observations plus references. Never hide failures, change exit codes, or treat clipping as a model-generated summary.\n- Read shared Markdown by topic and path. Treat summaries as derived, versioned evidence. Do not persist guesses or concurrent task state as shared facts.\n- Delegate only separable work. Give each worker a bounded input and return contract. More agents can increase total tokens even when faster.\n- AI-generated summaries require explicit opt-in and their own usage accounting. Do not start background inference, polling, wake/check-in jobs, or model downloads to save tokens.\n- Do not promise a saving percentage. Measure payload bytes or reported token fields and label estimates, unknown values, and test fixtures accurately.\n\n## Small reads without a persistent cache\n\nRun the helper relative to this skill's directory:\n\n```sh\npython3 scripts/context_io.py read /absolute/source.py --start 40 --lines 50 --max-chars 4000\npython3 scripts/context_io.py read /absolute/source.py --known-read-key PREVIOUS_READ_KEY --start 40 --lines 50\n```\n\nOnly pass `--known-read-key` when the prior excerpt remains available in this agent's current context. Use `--force` to read again. No fingerprints or private source are stored automatically.\n\n## Bounded command observations\n\n```sh\npython3 scripts/context_io.py run --log /absolute/task-output/check.log --max-chars 3000 -- python3 -m unittest\n```\n\nThe complete combined output stays in the named local log. The helper reports its path/hash and the original exit status. For failures, inspect the full relevant error range before concluding. Avoid commands that expose credentials.\n",
+      "download_count": null
+    },
     {
       "id": "29efa3036750",
       "name": "github-pr-actions-fix",

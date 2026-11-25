@@ -1,3 +1,8 @@
+import { resolveUserMessageMentions } from "@/lib/userMessageRouting";
+import { PaperChatHeader } from "@/components/PaperChatHeader";
+import { runtimeModelLabel } from "@/lib/runtimeModelLabel";
+import { AgentCharacterAvatar } from "@/components/AgentCharacterAvatar";
+import { NeedsAckError } from "@/lib/chatQueueApi";
 import React, {
   useState,
   useRef,
@@ -96,9 +101,9 @@ import {
   RELATED_FILES_SEPARATOR_WIDTH,
   getVisibleSidebarMemberCount,
   extractMentionHandles,
-  routeMentionsForText,
   normalizeMentionHandle,
   displayChatSenderName,
+  PaperChatWelcome,
   SessionMemberAvatar,
   LinkedWorkItemRow,
   InlineQueueGroup,
@@ -137,6 +142,7 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
   const appScale = useAppScale();
   const {
     t,
+    theme,
     activeSessionId,
     messages,
     memberQueuesBySessionAgentId,
@@ -166,7 +172,8 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
     selectedProjectId,
   } = useWorkspace();
 
-  const [isRelatedFilesOpen, setIsRelatedFilesOpen] = useState(true);
+  const [isRelatedFilesOpen, setIsRelatedFilesOpen] = useState(theme !== "paper");
+  useEffect(() => { if (theme === "paper") setIsRelatedFilesOpen(false); }, [theme]);
   const [wasRelatedFilesAutoCollapsed, setWasRelatedFilesAutoCollapsed] =
     useState(false);
   const [isMemberRailExpanded, setIsMemberRailExpanded] = useState(false);
@@ -1087,6 +1094,8 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
     }
   };
 
+  const { requestDispatchAcknowledgement } = useWorkspace();
+
   const handleComposerSubmit = useCallback(
     async (
       payload: ChatComposerSubmit,
@@ -1112,26 +1121,31 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
         if (payload.inputMode === "workflow") {
           await ensureWorkflowRouteToMainAgent();
         }
-        const explicitMentions = routeMentionsForText(payload.text);
-        const mainRoute = mainAgentName
-          ? mainAgentName.trim().replace(/^@/, "")
-          : null;
-        await chatMessagesApi.uploadAttachment(
+        const explicitMentions = resolveUserMessageMentions(payload.text, payload.inputMode);
+        const opKey = crypto.randomUUID();
+        const upload = (force = false) => chatMessagesApi.uploadAttachment(
           activeSessionId,
           payload.files,
           {
+            opKey,
+            force,
             chatInputMode: payload.inputMode,
             content: payload.text.trim() ? payload.text : undefined,
             appLanguage: locale,
             referenceMessageId: payload.quotedMessageId,
-            mentions:
-              explicitMentions.length > 0
-                ? explicitMentions
-                : payload.inputMode !== "workflow" && mainRoute
-                  ? [mainRoute]
-                  : undefined,
+            mentions: explicitMentions.length > 0 ? explicitMentions : undefined,
           },
         );
+        try {
+          await upload();
+        } catch (error) {
+          if (!(error instanceof NeedsAckError) || !requestDispatchAcknowledgement) throw error;
+          requestDispatchAcknowledgement(activeSessionId, error.pending, async () => {
+            await upload(true);
+            await refreshMessages();
+          });
+          return "accepted";
+        }
         await refreshMessages();
         return "accepted";
       } catch {
@@ -1141,6 +1155,7 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
     },
     [
       activeSessionId,
+      requestDispatchAcknowledgement,
       ensureWorkflowRouteToMainAgent,
       locale,
       mainAgentName,
@@ -1354,6 +1369,7 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
   return (
     <div
       ref={workspaceRootRef}
+      data-paper-chat={theme === "paper" ? "true" : undefined}
       className={
         embedded
           ? "relative h-full w-full flex flex-col font-sans text-xs select-none"
@@ -1407,7 +1423,9 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
           </div>
         </div>
       )}
+      {theme === "paper" && <PaperChatHeader filesAvailable={canFitRelatedFiles} filesOpen={isRelatedFilesOpen} onToggleFiles={() => setIsRelatedFilesOpen(value => !value)} />}
       <div
+        data-paper-chat-grid={theme === "paper" ? "true" : undefined}
         style={
           isRelatedFilesOpen
             ? ({
@@ -1428,7 +1446,7 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
       >
         {/* Center Panel (Conversation) */}
         <main
-          className={`relative flex h-full min-h-0 w-full min-w-0 flex-col p-4 ${
+          className={`paper-chat-center relative flex h-full min-h-0 w-full min-w-0 flex-col p-4 ${
             embedded ? "bg-transparent" : "bg-[var(--canvas)]"
           }`}
         >
@@ -1451,7 +1469,7 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
               type="button"
               data-command-id="sidebar.right.toggle"
               onClick={openRelatedFiles}
-              className="absolute top-1 right-1 z-10 flex h-7 w-7 items-center justify-center rounded-md border border-[var(--hairline)] bg-[var(--surface-1)] text-[var(--ink-subtle)] shadow-sm transition hover:bg-[var(--surface-3)] hover:text-[var(--ink)]"
+              className="paper-old-files-toggle absolute top-1 right-1 z-10 flex h-7 w-7 items-center justify-center rounded-md border border-[var(--hairline)] bg-[var(--surface-1)] text-[var(--ink-subtle)] shadow-sm transition hover:bg-[var(--surface-3)] hover:text-[var(--ink)]"
               title={t("relatedFiles.show")}
               aria-label={t("relatedFiles.show")}
             >
@@ -1477,7 +1495,7 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
           <div className="relative mb-4 min-h-0 flex-1">
           <ScrollArea
             ref={chatMessagesScrollRef}
-            className="h-full space-y-4 pr-1"
+            className="paper-chat-messages h-full space-y-4 pr-1"
             onScroll={handleChatScroll}
             onWheel={handleChatWheel}
           >
@@ -1493,10 +1511,12 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
                 onRetry={() => void refreshMessages()}
               />
             )}
+            <PaperChatWelcome />
             {displayedMessages.map((msg) => (
               <div
                 key={msg.id}
                 id={`chat-message-${msg.id}`}
+                data-paper-message={msg.isUser ? "self" : "agent"}
                 className={`group/message relative flex w-full min-w-0 gap-3 items-start rounded-md ${
                   msg.isUser
                     ? "border border-[var(--hairline)] bg-[var(--surface-1)] px-3 py-2.5"
@@ -1509,21 +1529,21 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
                   </span>
                 ) : (
                   <span className="h-7 w-7 rounded-full bg-[var(--mono-bg)] border border-[var(--mono-border)] flex items-center justify-center text-[9px] font-mono font-bold text-[var(--ink-muted)] flex-shrink-0">
-                    {msg.avatar}
+                    <AgentCharacterAvatar identity={`${msg.sender} ${msg.model ?? ""}`}>{msg.avatar}</AgentCharacterAvatar>
                   </span>
                 )}
 
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-baseline gap-2 mb-1">
+                <div className="paper-message-content flex-1 min-w-0">
+                  <div className="paper-message-meta flex items-baseline gap-2 mb-1">
                     <span
                       className="font-semibold text-[var(--ink)]"
                       style={{ fontSize: `${chatMessageFontSize}px` }}
                     >
-                      {msg.isUser ? "you" : displayChatSenderName(msg.sender)}
+                      {msg.isUser ? (theme === "paper" ? (locale === "zh" ? "你" : "You") : "you") : displayChatSenderName(msg.sender)}
                     </span>
                     {msg.model && (
                       <span className="rounded-full bg-[var(--surface-3)] border border-[var(--hairline-strong)] px-2 py-0.5 text-[9px] font-mono text-[var(--ink-muted)] shrink-0 select-text">
-                        {msg.model}
+                        {runtimeModelLabel(msg.model)}
                       </span>
                     )}
                     <span className="text-[10px] font-mono text-[var(--ink-tertiary)] ml-auto">

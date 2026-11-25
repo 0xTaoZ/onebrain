@@ -1,7 +1,4 @@
-use axum::{
-    Router,
-    routing::{IntoMakeService, get},
-};
+use axum::{Router, extract::connect_info::IntoMakeServiceWithConnectInfo, routing::get};
 use tower_http::validate_request::ValidateRequestHeaderLayer;
 
 use crate::{DeploymentImpl, middleware};
@@ -12,6 +9,7 @@ pub mod analytics;
 pub mod approvals;
 pub mod browser_lifecycle;
 pub mod build_stats;
+pub mod capabilities;
 pub mod chat;
 pub mod config;
 pub mod events;
@@ -31,12 +29,22 @@ pub mod tags;
 pub mod version;
 pub mod workflow;
 
-pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
+pub fn router(
+    deployment: DeploymentImpl,
+) -> IntoMakeServiceWithConnectInfo<Router, std::net::SocketAddr> {
+    let app = application(deployment);
+    let controller = crate::lan::LanController::new(app.clone());
+    app.merge(crate::lan::control_routes(controller))
+        .into_make_service_with_connect_info::<std::net::SocketAddr>()
+}
+
+pub(crate) fn application(deployment: DeploymentImpl) -> Router {
     // Create routers with different middleware layers
     let base_routes = Router::new()
         .route("/health", get(health::health_check))
         .merge(browser_lifecycle::router())
         .merge(config::router())
+        .merge(capabilities::router())
         .merge(chat::router(&deployment))
         .merge(tags::router(&deployment))
         .merge(filesystem::router())
@@ -66,5 +74,4 @@ pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
         .route("/", get(frontend::serve_frontend_root))
         .route("/{*path}", get(frontend::serve_frontend))
         .nest("/api", base_routes)
-        .into_make_service()
 }

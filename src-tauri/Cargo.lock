@@ -1980,9 +1980,10 @@ dependencies = [
 
 [[package]]
 name = "openteams-desktop"
-version = "1.0.25"
+version = "1.0.28"
 dependencies = [
  "directories",
+ "libc",
  "portpicker",
  "serde",
  "serde_json",

@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type {
   BackendChatMessage,
   ChatRuntimeDelta,
@@ -707,3 +707,32 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
     upsertStreamedMessage,
   };
 };
+
+export function useDispatchAcknowledgements() {
+  type Entry = import('@/lib/chatQueueApi').DispatchAcknowledgement & { id: symbol };
+  const [queues, setQueues] = useState<Record<string, Entry[]>>({});
+  const requestDispatchAcknowledgement = useCallback((sessionId: string, pending: import('@/lib/chatQueueApi').NeedsAckDetails, retry: () => Promise<void>) => {
+    const id = Symbol('dispatch');
+    let running = false;
+    const update = (change: (entries: Entry[]) => Entry[]) => setQueues(current => {
+      const next = { ...current, [sessionId]: change(current[sessionId] ?? []) };
+      if (!next[sessionId].length) delete next[sessionId];
+      return next;
+    });
+    const confirm = async () => {
+      if (running) return;
+      running = true;
+      update(entries => entries.map(entry => entry.id === id ? { ...entry, busy: true, error: undefined } : entry));
+      try {
+        await retry();
+        update(entries => entries.filter(entry => entry.id !== id));
+      } catch (error) {
+        update(entries => entries.map(entry => entry.id === id ? { ...entry, busy: false, error: error instanceof Error ? error.message : String(error) } : entry));
+      } finally { running = false; }
+    };
+    update(entries => [...entries, { id, pending, retry: confirm }]);
+  }, []);
+  // Multiple blocked sends stay reviewable; confirming one never auto-dispatches another.
+  const dispatchAcknowledgements = Object.fromEntries(Object.entries(queues).map(([session, entries]) => [session, entries[0]]));
+  return { dispatchAcknowledgements, requestDispatchAcknowledgement };
+}

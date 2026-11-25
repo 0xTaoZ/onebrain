@@ -15,6 +15,7 @@ fn simplified_to_context_value(message: &SimplifiedMessage) -> Value {
         .unwrap_or_else(|_| message.timestamp.clone());
 
     serde_json::json!({
+        "message_id": message.message_id,
         "sender": message.sender,
         "content": message.content,
         "time": time,
@@ -32,7 +33,7 @@ fn simplified_messages_to_jsonl(messages: &[SimplifiedMessage]) -> (Vec<Value>, 
     (context_messages, jsonl)
 }
 
-/// Build full (uncompressed) context with a hard token limit.
+/// Build context from available cached history with a hard estimated token limit.
 ///
 /// This is used by the non-blocking main execution path so agent runs are never
 /// delayed by summarization/compression. If the context exceeds MAX_CONTEXT_TOKENS,
@@ -63,10 +64,28 @@ pub async fn build_full_context(
         })
         .collect();
 
-    let simplified_messages: Vec<SimplifiedMessage> = all_messages
+    let mut simplified_messages: Vec<SimplifiedMessage> = all_messages
         .iter()
         .map(|message| to_simplified_message(message, &session_member_names, &agent_map))
         .collect();
+
+    // Reuse existing summaries/archives without starting inference on the run path.
+    let (threshold, percentage) = load_chat_compression_settings().await;
+    let mut context_compacted = false;
+    let mut inherited_warning = None;
+    if let Some(cached) = get_compression_cache_entry(pool, session_id).await?
+        && cached.token_threshold == threshold
+        && cached.compression_percentage == percentage
+        && cached.source_message_count <= simplified_messages.len()
+        && calculate_messages_fingerprint(&simplified_messages[..cached.source_message_count])
+            == cached.source_fingerprint
+    {
+        let mut messages = cached.result.messages;
+        messages.extend_from_slice(&simplified_messages[cached.source_message_count..]);
+        simplified_messages = messages;
+        context_compacted = cached.result.compression_type != CompressionType::None;
+        inherited_warning = cached.result.warning;
+    }
 
     // Enforce hard token limit to prevent model input errors
     let total_tokens = estimate_token_count(&simplified_messages);
@@ -85,18 +104,29 @@ pub async fn build_full_context(
                 total_tokens,
                 estimate_token_count(&truncated)
             ),
-            split_file_path: String::new(),
+            split_file_path: inherited_warning
+                .as_ref()
+                .map(|warning| warning.split_file_path.clone())
+                .unwrap_or_default(),
+        };
+        let warning = if let Some(previous) = inherited_warning {
+            CompressionWarning {
+                message: format!("{}; {}", warning.message, previous.message),
+                ..warning
+            }
+        } else {
+            warning
         };
         (truncated, Some(warning))
     } else {
-        (simplified_messages, None)
+        (simplified_messages, inherited_warning)
     };
 
     let (messages, jsonl) = simplified_messages_to_jsonl(&messages);
     Ok(CompactedContext {
         messages,
         jsonl,
-        context_compacted: false,
+        context_compacted,
         compression_warning: warning,
     })
 }
@@ -115,25 +145,38 @@ fn truncate_messages_to_token_limit(
         return messages.to_vec();
     }
 
-    // Keep the most recent messages that fit within the token budget
+    // Keep a suffix. A single oversized latest message must also obey the budget.
+    // Clone only; the original content and message ID remain in the database.
     let mut selected_rev: Vec<SimplifiedMessage> = Vec::new();
     let mut selected_tokens = 0u32;
-
     for message in messages.iter().rev() {
         let message_tokens = estimate_token_count(std::slice::from_ref(message)).max(1);
-        if !selected_rev.is_empty() && selected_tokens.saturating_add(message_tokens) > max_tokens {
+        if selected_tokens.saturating_add(message_tokens) > max_tokens {
+            if selected_rev.is_empty() {
+                let mut clipped = message.clone();
+                let marker = "\n[Content truncated for context budget; original message remains in database.]";
+                let mut end = clipped.content.len();
+                loop {
+                    clipped.content = format!("{}{}", &message.content[..end], marker);
+                    let tokens = estimate_token_count(std::slice::from_ref(&clipped));
+                    if tokens <= max_tokens {
+                        selected_rev.push(clipped);
+                        break;
+                    }
+                    if end == 0 {
+                        // A tiny budget may not even fit provenance marker + sender.
+                        break;
+                    }
+                    end = end.saturating_sub((end / 4).max(1));
+                    while !message.content.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                }
+            }
             break;
         }
         selected_rev.push(message.clone());
         selected_tokens = selected_tokens.saturating_add(message_tokens);
-        if selected_tokens >= max_tokens {
-            break;
-        }
-    }
-
-    if selected_rev.is_empty() {
-        // Always keep at least the most recent message
-        selected_rev.push(messages.last().unwrap().clone());
     }
 
     selected_rev.reverse();
@@ -241,6 +284,7 @@ pub fn to_simplified_message(
     };
 
     SimplifiedMessage {
+        message_id: Some(message.id),
         sender,
         content: message.content.clone(),
         timestamp: message.created_at.to_rfc3339(),

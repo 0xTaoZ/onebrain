@@ -46,9 +46,25 @@ pub struct IdempotentChatMessageDeliveryBundle {
     pub created: bool,
 }
 
-pub(crate) fn normalized_client_message_id(
+pub fn normalized_client_message_id(
     meta: Option<&Value>,
 ) -> Result<Option<String>, ChatServiceError> {
+    if let Some(op_key) = meta.and_then(|value| value.get("opKey")) {
+        let key = op_key
+            .as_str()
+            .ok_or_else(|| ChatServiceError::Validation("opKey must be a string".into()))?;
+        if key.is_empty()
+            || key.len() > 64
+            || !key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(ChatServiceError::Validation(
+                "opKey must contain 1-64 ASCII letters, digits, underscores or hyphens".into(),
+            ));
+        }
+        return Ok(Some(key.to_string()));
+    }
     let Some(client_message_id) = meta
         .and_then(Value::as_object)
         .and_then(|meta| meta.get("client_message_id"))
@@ -199,13 +215,10 @@ pub(crate) async fn create_message_delivery_bundle_with_id(
         .await?;
         if !claimed {
             transaction.rollback().await?;
-            let existing = ChatMessage::find_idempotent_user_message(
-                pool,
-                data.session_id,
-                client_message_id,
-            )
-            .await?
-            .ok_or(sqlx::Error::RowNotFound)?;
+            let existing =
+                ChatMessage::find_idempotent_user_message(pool, data.session_id, client_message_id)
+                    .await?
+                    .ok_or(sqlx::Error::RowNotFound)?;
             return load_message_delivery_bundle(pool, existing).await;
         }
     }
@@ -292,7 +305,11 @@ pub async fn create_message_idempotent_with_id(
     mut meta: Option<Value>,
     message_id: Uuid,
 ) -> Result<IdempotentChatMessage, ChatServiceError> {
-    let client_message_id = if matches!(sender_type, ChatSenderType::User) {
+    let client_message_id = if matches!(sender_type, ChatSenderType::User)
+        || meta
+            .as_ref()
+            .is_some_and(|value| value.get("opKey").is_some())
+    {
         normalized_client_message_id(meta.as_ref())?
     } else {
         None
@@ -328,15 +345,8 @@ pub async fn create_message_idempotent_with_id(
             Value::String(client_message_id.clone()),
         );
     }
-    let data = prepare_chat_message(
-        pool,
-        session_id,
-        sender_type,
-        sender_id,
-        content,
-        meta,
-    )
-    .await?;
+    let data =
+        prepare_chat_message(pool, session_id, sender_type, sender_id, content, meta).await?;
     let mut transaction = pool.begin().await?;
     let claimed = ChatMessage::claim_idempotency_key_in_transaction(
         &mut transaction,
@@ -347,13 +357,10 @@ pub async fn create_message_idempotent_with_id(
     .await?;
     if !claimed {
         transaction.rollback().await?;
-        let existing = ChatMessage::find_idempotent_user_message(
-            pool,
-            session_id,
-            &client_message_id,
-        )
-        .await?
-        .ok_or(sqlx::Error::RowNotFound)?;
+        let existing =
+            ChatMessage::find_idempotent_user_message(pool, session_id, &client_message_id)
+                .await?
+                .ok_or(sqlx::Error::RowNotFound)?;
         return Ok(IdempotentChatMessage {
             message: existing,
             created: false,
@@ -381,7 +388,8 @@ pub async fn create_message_with_id(
     meta: Option<Value>,
     message_id: Uuid,
 ) -> Result<ChatMessage, ChatServiceError> {
-    let data = prepare_chat_message(pool, session_id, sender_type, sender_id, content, meta).await?;
+    let data =
+        prepare_chat_message(pool, session_id, sender_type, sender_id, content, meta).await?;
 
     let message = ChatMessage::create(pool, &data, message_id).await?;
 

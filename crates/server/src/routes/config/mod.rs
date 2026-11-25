@@ -9,7 +9,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{
-        Path, Query, State,
+        DefaultBodyLimit, Path, Query, State,
         ws::{WebSocket, WebSocketUpgrade},
     },
     http,
@@ -65,7 +65,11 @@ use crate::{DeploymentImpl, error::ApiError};
 pub fn router() -> Router<DeploymentImpl> {
     Router::new()
         .route("/info", get(get_user_system_info))
-        .route("/config", put(update_config))
+        // Bundled team presets make the default config exceed Axum's 2 MiB limit.
+        .route(
+            "/config",
+            put(update_config).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
         .route("/config/cli", get(get_cli_config).put(update_cli_config))
         .route(
             "/config/cli/sync-to-cli",

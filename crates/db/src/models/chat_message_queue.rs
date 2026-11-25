@@ -1178,6 +1178,8 @@ mod tests {
         sqlx::query(
             r#"
             CREATE TABLE chat_messages (
+ client_op_key TEXT,
+
                 id         BLOB PRIMARY KEY,
                 session_id BLOB NOT NULL REFERENCES chat_sessions(id)
             )
@@ -2064,6 +2066,8 @@ mod tests {
                 agent_id BLOB NOT NULL
             );
             CREATE TABLE chat_messages (
+ client_op_key TEXT,
+
                 id BLOB PRIMARY KEY,
                 session_id BLOB NOT NULL,
                 sender_type TEXT NOT NULL,

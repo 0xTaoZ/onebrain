@@ -122,12 +122,6 @@ impl DeepseekHarness {
                 ),
             }));
         }
-        if self.selected_model().is_some() && self.cmd.base_command_override.is_some() {
-            return Err(ExecutorError::Configuration(
-                "DeepSeek Harness model selection requires the structured source-checkout command; clear base_command_override or configure the model in that custom ACP command"
-                    .to_string(),
-            ));
-        }
 
         let Some(options) = self.acp.as_ref() else {
             return Ok(());
@@ -142,13 +136,15 @@ impl DeepseekHarness {
                     .to_string(),
             ));
         }
-        if options
-            .config_overrides
-            .as_ref()
-            .is_some_and(|overrides| !overrides.is_empty())
-        {
+        if options.config_overrides.as_ref().is_some_and(|overrides| {
+            overrides.iter().any(|selection| {
+                self.cmd.base_command_override.is_none()
+                    || !(selection.category_snapshot.as_deref() == Some("model")
+                        || selection.option_id.eq_ignore_ascii_case("model"))
+            })
+        }) {
             return Err(ExecutorError::Configuration(
-                "DeepSeek Harness ACP does not advertise session config options; configure provider and model in cordis.yml"
+                "DeepSeek Harness source checkouts use cordis.yml; custom ACP commands support model config overrides only"
                     .to_string(),
             ));
         }
@@ -469,13 +465,27 @@ impl DeepseekHarness {
             AcpApprovalMode::AutoReject => AcpApprovalPolicy::AutoReject,
         };
         let full_access = options.access_mode.unwrap_or_default() == AcpAccessMode::FullAccess;
-        Ok(AcpAgentHarness::new()
+        let mut harness = AcpAgentHarness::new()
             .with_approval_policy(approval_policy)
             .with_client_services(AcpClientServicePolicy {
                 full_access,
                 ..AcpClientServicePolicy::default()
             })
-            .with_mcp_servers(Vec::new()))
+            .with_mcp_servers(Vec::new());
+        if self.cmd.base_command_override.is_some() {
+            let overrides = options.config_overrides.as_deref().unwrap_or_default();
+            let has_model_override = overrides.iter().any(|selection| {
+                selection.category_snapshot.as_deref() == Some("model")
+                    || selection.option_id.eq_ignore_ascii_case("model")
+            });
+            if let Some(model) = self.selected_model().filter(|_| !has_model_override) {
+                harness = harness.with_model(model);
+            }
+            for selection in overrides {
+                harness = harness.with_config_override(selection);
+            }
+        }
+        Ok(harness)
     }
 
     fn checkout_is_ready(&self) -> bool {
@@ -554,6 +564,20 @@ impl StandardCodingAgentExecutor for DeepseekHarness {
             )));
         }
         let runtime_env = self.runtime_env(env, current_dir);
+        // Installed/custom ACP agents advertise model options in session/new.
+        // Keep the sessionless composition probe for legacy source checkouts.
+        if self.cmd.base_command_override.is_some() {
+            return Ok(Some(
+                super::acp::runtime::probe_acp_command(
+                    self.build_command_builder()?.build_initial()?,
+                    current_dir,
+                    &runtime_env,
+                    &self.cmd,
+                    None,
+                )
+                .await?,
+            ));
+        }
         Ok(Some(
             super::acp::runtime::probe_acp_command_without_session(
                 self.build_command_builder()?.build_initial()?,
@@ -923,6 +947,24 @@ mod tests {
             .validate_structured_options()
             .expect_err("persistence root override must fail");
         assert!(error.to_string().contains("runtime data boundary"));
+    }
+
+    #[test]
+    fn custom_acp_command_accepts_native_model_selection() {
+        let harness = DeepseekHarness {
+            model: Some("deepseek-flash".to_string()),
+            cmd: CmdOverrides {
+                base_command_override: Some("custom-dsh-acp --stdio".to_string()),
+                ..CmdOverrides::default()
+            },
+            ..DeepseekHarness::default()
+        };
+        harness
+            .validate_structured_options()
+            .expect("native model selection");
+        harness
+            .acp_harness()
+            .expect("native ACP session preferences");
     }
 
     #[tokio::test]

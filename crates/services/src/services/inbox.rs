@@ -64,6 +64,14 @@ struct InboxSummaryCountRow {
 }
 
 impl InboxService {
+    pub async fn pending_for_session(
+        &self,
+        pool: &SqlitePool,
+        session_id: Uuid,
+    ) -> Result<Vec<InboxItem>, sqlx::Error> {
+        InboxItem::pending_for_session(pool, session_id).await
+    }
+
     pub fn new() -> Self {
         Self
     }
@@ -956,6 +964,7 @@ mod tests {
         let session_id = Uuid::new_v4();
         let agent_id = Uuid::new_v4();
         let message = ChatMessage {
+            client_op_key: None,
             id: Uuid::new_v4(),
             session_id,
             sender_type: ChatSenderType::Agent,
@@ -980,6 +989,7 @@ mod tests {
         assert_eq!(item.dedupe_key, format!("message:{}", message.id));
 
         let user_message = ChatMessage {
+            client_op_key: None,
             id: Uuid::new_v4(),
             sender_type: ChatSenderType::User,
             sender_id: None,
@@ -1101,6 +1111,7 @@ mod tests {
         let message_id = Uuid::new_v4();
         let agent_id = Uuid::new_v4();
         let message = ChatMessage {
+            client_op_key: None,
             id: message_id,
             session_id,
             sender_type: ChatSenderType::Agent,
@@ -1127,6 +1138,7 @@ mod tests {
         assert!(item.title.contains("Builder"));
 
         let user_message = ChatMessage {
+            client_op_key: None,
             sender_type: ChatSenderType::User,
             ..message
         };

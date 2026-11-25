@@ -34,7 +34,7 @@ function resolveBun() {
 const cargo = resolveCargo();
 const bun = resolveBun();
 const root = path.join(__dirname, '..', '..');
-const targetDir = path.join(root, 'target', profile);
+const targetDir = path.join(process.env.CARGO_TARGET_DIR || path.join(root, 'target'), profile);
 const binName = process.platform === 'win32' ? 'server.exe' : 'server';
 const binPath = path.join(targetDir, binName);
 const outDir = path.join(root, 'src-tauri', 'bin');

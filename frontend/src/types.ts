@@ -46,7 +46,7 @@ export { WorkspaceGitErrorCode } from '../../shared/types';
 
 export type MemberQueuesBySessionAgentId = Record<string, MemberQueueSnapshot>;
 
-export type Theme = 'dark' | 'light';
+export type Theme = 'dark' | 'light' | 'paper';
 export type ThemePreference = Theme | 'system';
 
 export type Locale = 'en' | 'zh' | 'ja' | 'ko' | 'fr' | 'es';
@@ -58,6 +58,8 @@ export interface Member {
   name: string;
   roleDetail: string;
   modelName: string;
+  /** Runtime of the backing agent, such as CLAUDE_CODE; picks the avatar. */
+  runner?: string;
 }
 
 export interface Session {
@@ -991,6 +993,8 @@ export interface BackendChatMessage {
 }
 
 export interface CreateChatMessageRequest {
+  opKey?: string;
+  force?: boolean;
   sender_type: ChatSenderType;
   sender_id: string | null;
   content: string;
@@ -1774,6 +1778,7 @@ export type UiLanguage =
 // only round-trips it via GET /api/info and PUT /api/config; treat the bulk as
 // opaque while exposing the few fields the UI inspects directly.
 export interface Config {
+  chat_compression?: import("../../shared/types").ChatCompressionConfig;
   config_version: string;
   theme: ThemeMode;
   language: UiLanguage;

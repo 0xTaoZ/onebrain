@@ -3,7 +3,6 @@
 use std::{
     path::{Path, PathBuf},
     process::Command as StdCommand,
-    sync::Mutex,
 };
 
 use directories::ProjectDirs;
@@ -14,11 +13,10 @@ use tauri::{
     Manager,
 };
 
+mod backend_lifecycle;
 mod update;
 
-struct BackendState {
-    child: Mutex<Option<CommandChild>>,
-}
+use backend_lifecycle::BackendState;
 
 #[cfg(windows)]
 fn apply_windows_corner_preference(window: &tauri::Window) {
@@ -391,6 +389,10 @@ fn spawn_backend(port: u16) -> Result<CommandChild, Box<dyn std::error::Error>> 
     envs.insert("HOST".to_string(), "127.0.0.1".to_string());
     envs.insert("RUST_LOG".to_string(), "info".to_string());
     envs.insert("AGENT_CHATGROUP_DESKTOP".to_string(), "1".to_string());
+    envs.insert(
+        backend_lifecycle::PARENT_PID_ENV.to_string(),
+        std::process::id().to_string(),
+    );
     cmd = cmd.envs(envs);
 
     let (_rx, child) = cmd.spawn()?;
@@ -458,9 +460,7 @@ fn main() {
             let port = pick_unused_port().unwrap_or(3999);
             let child = spawn_backend(port)?;
 
-            app.manage(BackendState {
-                child: Mutex::new(Some(child)),
-            });
+            app.manage(BackendState::new(child));
 
             if let Some(window) = app.get_window("main") {
                 #[cfg(windows)]
@@ -480,13 +480,9 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|app, event| match event {
-            tauri::RunEvent::ExitRequested { .. } => {
+            tauri::RunEvent::Exit => {
                 if let Some(state) = app.try_state::<BackendState>() {
-                    if let Ok(mut guard) = state.child.lock() {
-                        if let Some(child) = guard.take() {
-                            let _ = child.kill();
-                        }
-                    }
+                    state.stop();
                 }
             }
             _ => {}

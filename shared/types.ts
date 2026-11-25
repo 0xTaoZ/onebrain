@@ -4,6 +4,24 @@
 
 // If you are an AI, and you absolutely have to edit this file, please confirm with the user first.
 
+export type LanEnableRequest = { bind_address: string, };
+
+export type LanStatus = { enabled: boolean, url: string | null, certificate_sha256: string | null, session_expires_at: string | null, suggested_bind_address: string | null, };
+
+export type LanPairing = { status: LanStatus, pairing_secret: string, };
+
+export type Capabilities = { name: string, version: string, limits: CapabilityLimits,
+/**
+ * False means a recommended client budget, not a server rejection threshold.
+ */
+limit_enforcement: CapabilityLimitEnforcement, executors: Array<string>, executor_scope: string, tools: Array<string>, tool_scope: string, endpoints: Array<CapabilityEndpoint>, };
+
+export type CapabilityLimits = { message_length: number, messages_per_hour: number, members_per_session: number, agent_chain_depth: number, };
+
+export type CapabilityLimitEnforcement = { message_length: boolean, messages_per_hour: boolean, members_per_session: boolean, agent_chain_depth: boolean, };
+
+export type CapabilityEndpoint = { method: string, path: string, does: string, };
+
 export type Project = { id: string, name: string, default_agent_working_dir: string | null, remote_project_id: string | null, description: string | null, status: string | null, default_workspace_path: string | null, active_repo_id: string | null, created_at: Date, updated_at: Date, };
 
 export type CreateProject = { name: string, repositories: Array<CreateProjectRepo>, description: string | null, status: string | null, default_workspace_path: string | null, active_repo_id: string | null, };
@@ -292,7 +310,7 @@ export type CreateChatAgent = { name: string, runner_type: string, system_prompt
 
 export type UpdateChatAgent = { name: string | null, runner_type: string | null, system_prompt: string | null, tools_enabled: JsonValue | null, model_name: string | null, };
 
-export type ChatMessage = { id: string, session_id: string, sender_type: ChatSenderType, sender_id: string | null, sender_session_agent_id: string | null, content: string, mentions: string[], meta: JsonValue, created_at: string, };
+export type ChatMessage = { id: string, session_id: string, sender_type: ChatSenderType, sender_id: string | null, sender_session_agent_id: string | null, content: string, client_op_key: string | null, mentions: string[], meta: JsonValue, created_at: string, };
 
 export type ChatMessageTarget = { message_id: string, ordinal: bigint, session_id: string, session_agent_id: string | null, project_member_id: string | null, agent_id: string, member_name_snapshot: string, route_kind: ChatMessageTargetRouteKind, resolution_status: ChatMessageTargetResolutionStatus, created_at: string, };
 
@@ -337,6 +355,12 @@ export type InboxItemsResponse = { items: Array<InboxItem>, };
 export type InboxItemResponse = { item: InboxItem, };
 
 export type ChatRun = { id: string, session_id: string, session_agent_id: string, workspace_path: string | null, run_index: bigint, run_dir: string, input_path: string | null, output_path: string | null, raw_log_path: string | null, meta_path: string | null, log_state: ChatRunLogState, artifact_state: ChatRunArtifactState, log_truncated: boolean, log_capture_degraded: boolean, pruned_at: string | null, prune_reason: string | null, retention_summary_json: string | null, created_at: string, };
+
+export type DailyRunCount = {
+/**
+ * `YYYY-MM-DD`
+ */
+day: string, runs: number, };
 
 export enum ChatRunLogState { live = "live", tail = "tail", pruned = "pruned" }
 
@@ -861,9 +885,9 @@ path: string, content?: string | null, use_stage?: ConflictResolutionSide, delet
 
 export type ContinueMergeRequest = { commit_message?: string | null, };
 
-export type CreateChatMessageRequest = { sender_type: ChatSenderType, sender_id: string | null, content: string, meta: JsonValue | null, };
+export type CreateChatMessageRequest = { sender_type: ChatSenderType, sender_id: string | null, content: string, meta: JsonValue | null, opKey: string | null, force: boolean, };
 
-export type CreateChatMessageResponse = { message: ChatMessage, deliveries: Array<QueuedMessage>, revision: bigint, runtime: ChatSessionRuntimeSnapshot, };
+export type CreateChatMessageResponse = { message: ChatMessage, deliveries: Array<QueuedMessage>, revision: bigint, deduplicated: boolean, runtime: ChatSessionRuntimeSnapshot, };
 
 export type UserReviewResponseRequest = { review_id: string, action: string, feedback: string | null, expected_step_id: string | null, };
 
@@ -1001,7 +1025,7 @@ export type NotificationInboxSourcesConfig = { chat_message: boolean, workflow_a
 
 export enum NotificationInboxSource { chat_message = "chat_message", workflow_action = "workflow_action", approval = "approval", worktree = "worktree", failure = "failure" }
 
-export enum ThemeMode { LIGHT = "LIGHT", DARK = "DARK", SYSTEM = "SYSTEM" }
+export enum ThemeMode { LIGHT = "LIGHT", PAPER = "PAPER", DARK = "DARK", SYSTEM = "SYSTEM" }
 
 export type EditorConfig = { editor_type: EditorType, custom_command: string | null, remote_ssh_host: string | null, remote_ssh_user: string | null, };
 
@@ -1023,7 +1047,11 @@ export enum ChatBubbleFontSize { px12 = "px12", px13 = "px13", px14 = "px14", px
 
 export type ChatCompressionConfig = {
 /**
- * Token threshold before compression kicks in (default: 5000000)
+ * Allow paid agent inference for history summaries. Disabled unless explicitly enabled.
+ */
+allow_ai_summary: boolean,
+/**
+ * Token threshold before compression kicks in (default: 50000)
  */
 token_threshold: number,
 /**

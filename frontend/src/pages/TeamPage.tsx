@@ -1,3 +1,4 @@
+import { runtimeModelLabel } from "@/lib/runtimeModelLabel";
 import {
   type ReactNode,
   useCallback,
@@ -12,6 +13,7 @@ import { ProjectBreadcrumbAvatar } from "@/components/ProjectBreadcrumbAvatar";
 import { useConfirmationDialogKeyboard } from "@/components/useConfirmationDialogKeyboard";
 import { useWorkspace } from "@/context/WorkspaceContext";
 import {
+  capabilitiesApi,
   agentRuntimeApi,
   chatAgentsApi,
   chatSessionsApi,
@@ -103,7 +105,7 @@ const createModelOptions = (
   },
   ...models.map((model) => ({
     id: model,
-    label: model,
+    label: runtimeModelLabel(model),
     description: t("teamPage.options.discoveredModel"),
   })),
 ];
@@ -396,6 +398,16 @@ const removeAgentFromProjectSessions = async (
 };
 
 export function TeamPage() {
+  const [capabilities, setCapabilities] = useState<import('../../../shared/types').Capabilities | null>(null);
+  const [capabilitiesError, setCapabilitiesError] = useState(false);
+  const { locale } = useWorkspace();
+  useEffect(() => {
+    let active = true;
+    capabilitiesApi.get().then(data => { if (active) setCapabilities(data); })
+      .catch(() => { if (active) setCapabilitiesError(true); });
+    return () => { active = false; };
+  }, []);
+
   const {
     projects,
     projectsAsync,
@@ -1564,6 +1576,18 @@ export function TeamPage() {
           ) : null
         }
       />
+
+      <details className="shrink-0 border-b border-[var(--hairline)] px-4 py-2 text-xs text-[var(--ink-subtle)]">
+        <summary className="cursor-pointer">{locale === 'zh' ? '能力与限额' : 'Capabilities and budgets'}</summary>
+        {capabilities ? <div className="space-y-2 py-3">
+          <p>{capabilities.name} {capabilities.version}</p>
+          <p>{locale === 'zh' ? '建议预算：单条 ' : 'Recommended budgets: message '}{capabilities.limits.message_length}{locale === 'zh' ? ' 字符；每小时 ' : ' characters; hourly '}{capabilities.limits.messages_per_hour}{locale === 'zh' ? ' 条；每会话 ' : ' messages; session '}{capabilities.limits.members_per_session}{locale === 'zh' ? ' 位成员。以上为客户端建议，不是服务端强制限额。' : ' members. These are client recommendations, not enforced server limits.'}</p>
+          <p>{locale === 'zh' ? '后端执行的 agent 链深度上限：' : 'Enforced agent chain depth: '}{capabilities.limits.agent_chain_depth}</p>
+          <p>{locale === 'zh' ? '支持的适配器（可用状态见运行时）：' : 'Supported adapters (check runtime availability): '}{capabilities.executors.join(' · ')}</p>
+          <p>{locale === 'zh' ? '执行器操作（需成员权限）：' : 'Executor operations (member permissions apply): '}{capabilities.tools.join(' · ')}</p>
+          <ul className="space-y-1 font-mono">{capabilities.endpoints.map(endpoint => <li key={endpoint.path}>{endpoint.method} {endpoint.path}</li>)}</ul>
+        </div> : <p className="py-2">{capabilitiesError ? (locale === 'zh' ? '暂时无法读取能力清单' : 'Capabilities are unavailable') : (locale === 'zh' ? '正在读取…' : 'Loading…')}</p>}
+      </details>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[var(--surface-2)]">
         {teamDataReady && (error || notice) && (

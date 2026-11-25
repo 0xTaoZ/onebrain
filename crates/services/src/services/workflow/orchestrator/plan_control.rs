@@ -1057,6 +1057,8 @@ mod tests {
         sqlx::query(
             r#"
             CREATE TABLE chat_messages (
+ client_op_key TEXT,
+
                 id BLOB PRIMARY KEY,
                 session_id BLOB NOT NULL,
                 sender_type TEXT NOT NULL CHECK (sender_type IN ('user','agent','system')),

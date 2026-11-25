@@ -47,6 +47,15 @@ pub struct ChatRunRetentionSummary {
     pub prune_reason: Option<String>,
 }
 
+/// Runs started on one calendar day (UTC) by one agent, across all sessions.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize, TS)]
+pub struct DailyRunCount {
+    /// `YYYY-MM-DD`
+    pub day: String,
+    #[ts(type = "number")]
+    pub runs: i64,
+}
+
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize, TS)]
 pub struct ChatRun {
     pub id: Uuid,
@@ -698,5 +707,31 @@ mod tests {
         assert_eq!(workspace_a_runs[0].id, run_a.id);
         assert_eq!(workspace_b_runs.len(), 1);
         assert_eq!(workspace_b_runs[0].id, run_b.id);
+    }
+}
+
+impl DailyRunCount {
+    /// Daily run counts for the agent behind `session_agent_id`, covering every
+    /// session that agent took part in, for the last `days` days.
+    pub async fn for_session_agent(
+        pool: &SqlitePool,
+        session_agent_id: Uuid,
+        days: u32,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as::<_, DailyRunCount>(
+            r#"
+            SELECT date(r.created_at) AS day, COUNT(*) AS runs
+            FROM chat_runs r
+            JOIN chat_session_agents sa ON sa.id = r.session_agent_id
+            WHERE sa.agent_id = (SELECT agent_id FROM chat_session_agents WHERE id = ?1)
+              AND r.created_at >= datetime('now', ?2)
+            GROUP BY day
+            ORDER BY day
+            "#,
+        )
+        .bind(session_agent_id)
+        .bind(format!("-{days} days"))
+        .fetch_all(pool)
+        .await
     }
 }

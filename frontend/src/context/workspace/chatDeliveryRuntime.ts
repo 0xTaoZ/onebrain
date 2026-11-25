@@ -74,6 +74,7 @@ export interface ChatDelivery {
   avatar?: string;
   model?: string | null;
   sourceMessageId?: string;
+  /** Stable operation identity; retries retain meta.client_message_id / opKey. */
   clientMessageId?: string;
   runId?: string;
   status: ChatDeliveryStatus;

@@ -118,6 +118,11 @@ export const trimOrNull = (value: string): string | null => {
 
 export const canonicalRuntimeModelId = (modelId: string): string => {
   let canonical = modelId.trim();
+  // ACP can use a JSON tuple as its model ID; it is not a display suffix.
+  try {
+    const tuple = JSON.parse(canonical);
+    if (Array.isArray(tuple) && tuple.length === 2 && tuple.every(part => typeof part === 'string')) return canonical;
+  } catch { /* Plain IDs retain the existing suffix normalization. */ }
   let previous = "";
   while (canonical !== previous) {
     previous = canonical;

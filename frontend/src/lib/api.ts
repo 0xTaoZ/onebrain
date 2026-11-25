@@ -1,3 +1,4 @@
+import { withChatOpKey, NeedsAckError } from "./chatQueueApi";
 // =============================================================================
 // API adapter
 // -----------------------------------------------------------------------------
@@ -1359,8 +1360,12 @@ export const chatMessagesApi = {
   ): Promise<ChatMessageMutationResponse> => {
     const r = await makeRequest(
       `/api/chat/sessions/${encodeURIComponent(sessionId)}/messages`,
-      { method: "POST", body: JSON.stringify(data) },
+      { method: "POST", body: JSON.stringify(withChatOpKey(data)) },
     );
+    if (r.status === 409) {
+      const body = await r.clone().json().catch(() => null);
+      if (body?.error_data?.code === 'needs_ack') throw new NeedsAckError(body.error_data.pending);
+    }
     return handleApiResponse<ChatMessageMutationResponse>(r);
   },
   get: async (messageId: string): Promise<BackendChatMessage> => {
@@ -1402,6 +1407,8 @@ export const chatMessagesApi = {
     files: File | File[],
     options?: {
       chatInputMode?: "free" | "workflow";
+      force?: boolean;
+      opKey?: string;
       content?: string;
       appLanguage?: string;
       referenceMessageId?: string;
@@ -1424,13 +1431,17 @@ export const chatMessagesApi = {
     if (options?.mentions && options.mentions.length > 0) {
       form.append("mentions", JSON.stringify(options.mentions));
     }
-    if (options?.chatInputMode === "workflow") {
-      form.append("chat_input_mode", "workflow");
-    }
+    if (options?.chatInputMode) form.append("chat_input_mode", options.chatInputMode);
+    if (options?.force) form.append("force", "true");
+    if (options?.opKey) form.append("opKey", options.opKey);
     const r = await makeRequest(
       `/api/chat/sessions/${encodeURIComponent(sessionId)}/messages/upload`,
       { method: "POST", body: form },
     );
+    if (r.status === 409) {
+      const body = await r.clone().json().catch(() => null);
+      if (body?.error_data?.code === "needs_ack") throw new NeedsAckError(body.error_data.pending);
+    }
     return handleApiResponse<ChatMessageMutationResponse>(r);
   },
   attachmentUrl: (
@@ -1555,6 +1566,15 @@ export const chatAgentsApi = {
 };
 
 export const sessionAgentsApi = {
+  /** Daily run counts for this member's agent across sessions (last ~6 months). */
+  activity: async (
+    sessionAgentId: string,
+  ): Promise<import("../../../shared/types").DailyRunCount[]> => {
+    const r = await makeRequest(
+      `/api/chat/members/${encodeURIComponent(sessionAgentId)}/activity`,
+    );
+    return handleApiResponse<import("../../../shared/types").DailyRunCount[]>(r);
+  },
   list: async (sessionId: string): Promise<BackendChatSessionAgent[]> => {
     const r = await makeRequest(
       `/api/chat/sessions/${encodeURIComponent(sessionId)}/agents`,
@@ -3005,4 +3025,13 @@ export const api = {
   projectGithub: projectGithubApi,
   projectWorkItems: projectWorkItemsApi,
   delivery: deliveryApi,
+};
+
+/** Public metadata is a direct JSON document, not the data-bearing API envelope. */
+export const capabilitiesApi = {
+  get: async (): Promise<import('../../../shared/types').Capabilities> => {
+    const response = await makeRequest('/api/capabilities');
+    if (!response.ok) throw new Error(`Capabilities unavailable (${response.status})`);
+    return response.json();
+  },
 };

@@ -145,6 +145,16 @@ pub struct RunStoppingTransition {
 pub struct QueuedMessageService;
 
 impl QueuedMessageService {
+    /// The delivery ledger is the authoritative active-run projection.
+    pub async fn pending_for_session(
+        &self,
+        pool: &SqlitePool,
+        session_id: Uuid,
+    ) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM chat_message_queue WHERE session_id = ?1 AND status IN ('queued','starting','processing','running','waiting_approval','stopping','blocked','paused')")
+            .bind(session_id).fetch_one(pool).await
+    }
+
     pub fn new() -> Self {
         Self
     }
@@ -1130,6 +1140,52 @@ mod tests {
             .await
             .expect("set created_at");
         message
+    }
+
+    #[tokio::test]
+    async fn pending_session_counts_only_unfinished_deliveries_in_that_session() {
+        let pool = setup_pool().await;
+        let service = QueuedMessageService::new();
+        let session = Uuid::new_v4();
+        for status in [
+            "queued",
+            "starting",
+            "processing",
+            "running",
+            "waiting_approval",
+            "stopping",
+            "completed",
+            "failed",
+            "cancelled",
+            "skipped",
+        ] {
+            let mut data = sample_create(Uuid::new_v4());
+            data.session_id = session;
+            let message = service.create_queued(&pool, &data).await.unwrap();
+            sqlx::query("UPDATE chat_message_queue SET status = ?2 WHERE id = ?1")
+                .bind(message.id)
+                .bind(status)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        service
+            .create_queued(&pool, &sample_create(Uuid::new_v4()))
+            .await
+            .unwrap();
+        assert_eq!(
+            service.pending_for_session(&pool, session).await.unwrap(),
+            6
+        );
+        sqlx::query("UPDATE chat_message_queue SET status = 'completed' WHERE session_id = ?1")
+            .bind(session)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            service.pending_for_session(&pool, session).await.unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

@@ -222,7 +222,9 @@ export const FreeChatApprovalTray: React.FC<FreeChatApprovalTrayProps> = ({
   workflowExecutionId,
 }) => {
   const { t } = useAppTranslation();
-  const { locale } = useWorkspace();
+  const { locale, dispatchAcknowledgements } = useWorkspace();
+  const acknowledgement = workflowExecutionId ? undefined : dispatchAcknowledgements?.[sessionId];
+  const [showPending, setShowPending] = useState(false);
   const {
     requests: allRequests,
     resolvingIds,
@@ -293,13 +295,29 @@ export const FreeChatApprovalTray: React.FC<FreeChatApprovalTrayProps> = ({
     };
   }, [error, requests.length, trayVisible]);
 
-  if (!trayVisible && requests.length === 0 && !error) return null;
+  if (!trayVisible && requests.length === 0 && !error && !acknowledgement) return null;
   const memberCount = new Set(
     requests.map((request) => request.session_agent_id),
   ).size;
 
   return (
     <section className="mx-3 mb-2 overflow-hidden rounded-xl border border-[var(--hairline)] bg-[var(--surface-1)]">
+      {acknowledgement && (
+        <div className="border-b border-[var(--hairline)] p-3 text-sm" role="alert">
+          <p>{locale === 'zh' ? '上一次任务还没收口' : 'The previous task still needs attention'}</p>
+          {showPending && <div className="my-2 text-xs text-[var(--ink-subtle)]">
+            <p>{locale === 'zh' ? '未完成投递：' : 'Pending deliveries: '}{acknowledgement.pending.active_count}</p>
+            <ul>{acknowledgement.pending.items.map(item => <li key={item.id}>{item.title}</li>)}</ul>
+          </div>}
+          {acknowledgement.error && <p role="alert">{acknowledgement.error}</p>}
+          <div className="mt-2 flex gap-2">
+            <button type="button" onClick={() => setShowPending(value => !value)} className="rounded-lg border border-[var(--hairline)] px-3 py-1.5">{locale === 'zh' ? '看一下' : 'Review'}</button>
+            <button type="button" disabled={acknowledgement.busy} onClick={() => void acknowledgement.retry()} className="rounded-lg bg-[var(--primary)] px-3 py-1.5 text-[var(--on-primary)] disabled:opacity-50">{locale === 'zh' ? '仍然派' : 'Dispatch anyway'}</button>
+          </div>
+        </div>
+      )}
+
+      {(trayVisible || requests.length > 0 || error) && <>
       <div className="flex items-center gap-2.5 px-3.5 py-3">
         <Shield className="h-4 w-4 shrink-0 text-[var(--ink-tertiary)]" />
         <div className="min-w-0">
@@ -375,6 +393,7 @@ export const FreeChatApprovalTray: React.FC<FreeChatApprovalTrayProps> = ({
           );
         })}
       </div>
+      </>}
     </section>
   );
 };

@@ -99,6 +99,20 @@ impl Default for InboxItemListFilter {
 }
 
 impl InboxItem {
+    pub async fn pending_for_session(
+        pool: &SqlitePool,
+        session_id: Uuid,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        Self::list(
+            pool,
+            &InboxItemListFilter {
+                session_id: Some(session_id),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
     pub async fn find_by_id(pool: &SqlitePool, id: Uuid) -> Result<Option<Self>, sqlx::Error> {
         sqlx::query_as::<_, Self>(&format!(
             "SELECT {INBOX_ITEM_COLUMNS} FROM inbox_items WHERE id = ?1"
@@ -331,6 +345,32 @@ mod tests {
             source_id: Some("review-1".to_string()),
             dedupe_key: dedupe_key.to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn pending_is_scoped_and_excludes_read_and_archived_items() {
+        let pool = setup_pool().await;
+        let session = Uuid::new_v4();
+        for key in ["pending", "read", "archived", "other"] {
+            let mut data = upsert_data(key, key);
+            if key != "other" {
+                data.session_id = Some(session);
+            }
+            let item = InboxItem::upsert(&pool, &data, Uuid::new_v4())
+                .await
+                .unwrap();
+            if key == "read" {
+                InboxItem::mark_read(&pool, item.id).await.unwrap();
+            }
+            if key == "archived" {
+                InboxItem::archive(&pool, item.id).await.unwrap();
+            }
+        }
+        let pending = InboxItem::pending_for_session(&pool, session)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].title, "pending");
     }
 
     #[tokio::test]

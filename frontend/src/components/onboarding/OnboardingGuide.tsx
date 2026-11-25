@@ -360,6 +360,7 @@ const themePreferenceToOnboardingAppearance = (
   preference: ThemePreference,
 ): OnboardingAppearance => {
   switch (preference) {
+    case 'paper':
     case 'light':
       return OnboardingAppearance.light;
     case 'dark':

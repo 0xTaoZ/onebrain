@@ -555,18 +555,24 @@ impl ChatRunner {
             );
         }
 
-        // Main path must never block on summarization: always build full context synchronously.
+        // Main path reuses cached history and never waits for summarization.
         let full_context =
             crate::services::chat::build_full_context(&self.db.pool, session_id).await?;
         let jsonl = full_context.jsonl;
-        let context_path = context_dir.join("messages.jsonl");
+        // Each run reads its own snapshot; background jobs and later runs cannot
+        // replace the file after its path has been injected into this run's prompt.
+        let snapshot_dir = context_dir
+            .join("snapshots")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&snapshot_dir).await?;
+        let context_path = snapshot_dir.join("messages.jsonl");
         fs::write(&context_path, jsonl.as_bytes()).await?;
-        Self::sync_protocol_context_files(session_id, &context_dir).await?;
+        Self::sync_protocol_context_files(session_id, &snapshot_dir).await?;
         tracing::info!(
             session_id = %session_id,
             workspace_path = %workspace_path,
             context_path = %context_path.display(),
-            "Using workspace context (full, non-blocking)"
+            "Using immutable workspace context (non-blocking)"
         );
 
         // Kick off background compaction for future runs, without blocking current run.
@@ -578,8 +584,8 @@ impl ChatRunner {
 
         Ok(ContextSnapshot {
             workspace_path: context_path,
-            context_compacted: false,
-            compression_warning: None,
+            context_compacted: full_context.context_compacted,
+            compression_warning: full_context.compression_warning,
         })
     }
 
@@ -611,26 +617,13 @@ impl ChatRunner {
 
             match result {
                 Ok(compacted) => {
-                    if compacted.context_compacted {
-                        let workspace_context_path = context_dir.join("messages.jsonl");
-                        if let Err(err) =
-                            fs::write(&workspace_context_path, compacted.jsonl.as_bytes()).await
-                        {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                error = %err,
-                                path = %workspace_context_path.display(),
-                                "Failed to update workspace context with compacted history"
-                            );
-                        } else {
-                            tracing::info!(
-                                session_id = %session_id,
-                                path = %workspace_context_path.display(),
-                                compacted_message_count = compacted.messages.len(),
-                                "Background context compaction completed and updated workspace context"
-                            );
-                        }
-                    }
+                    // build_compacted_context persists the cache for subsequent runs.
+                    // Never overwrite a context file already handed to an active agent.
+                    tracing::debug!(
+                        session_id = %session_id,
+                        compacted_message_count = compacted.messages.len(),
+                        "Background context compaction cached for future runs"
+                    );
 
                     if let Some(warning) = compacted.compression_warning {
                         runner.emit(
@@ -862,6 +855,7 @@ impl ChatRunner {
         prompt_language: ResolvedPromptLanguage,
         team_protocol: Option<&str>,
         workflow_generation_blocked: bool,
+        continuation: &ContinuationContext,
     ) -> String {
         let mut markdown = String::new();
         let sender = Self::resolve_message_sender_identity(message);
@@ -998,7 +992,19 @@ impl ChatRunner {
             markdown.push_str("\n\n");
         }
 
-        if !is_protocol_retry {
+        if !is_protocol_retry && continuation.prefix_unchanged {
+            markdown.push_str("## Agent\n- name: ");
+            markdown.push_str(&agent.name);
+            markdown.push_str("\n- Your role definition and the team protocol are unchanged since your previous turn in this conversation (prefix ");
+            markdown.push_str(
+                continuation
+                    .prefix_hash
+                    .get(..12)
+                    .unwrap_or(&continuation.prefix_hash),
+            );
+            markdown.push_str("). Keep following them.\n\n");
+        }
+        if !is_protocol_retry && !continuation.prefix_unchanged {
             markdown.push_str("## Agent\n");
             markdown.push_str("- name: ");
             markdown.push_str(&agent.name);
@@ -1057,6 +1063,28 @@ impl ChatRunner {
         markdown.push_str("- `");
         markdown.push_str(&work_records_rel.to_string_lossy());
         markdown.push_str("`\n\n");
+
+        if continuation.has_cursor {
+            markdown.push_str("## New Since Your Last Turn\n");
+            if continuation.new_messages.is_empty() {
+                markdown.push_str("_No other messages since your previous turn._\n\n");
+            } else {
+                if continuation.omitted_messages > 0 {
+                    markdown.push_str(&format!(
+                        "_{} older new messages are not shown; read the history file if you need them._\n",
+                        continuation.omitted_messages
+                    ));
+                }
+                for message in &continuation.new_messages {
+                    markdown.push_str("- ");
+                    markdown.push_str(&message.sender);
+                    markdown.push_str(": ");
+                    markdown.push_str(&message.content.replace('\n', "\n  "));
+                    markdown.push('\n');
+                }
+                markdown.push('\n');
+            }
+        }
 
         markdown.push_str("## Using language: \n");
         markdown.push_str(prompt_language.setting);
@@ -2270,6 +2298,118 @@ impl ChatRunner {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Hash of the parts of the prompt that a resumed CLI session keeps in its
+    /// own history: the member's role and the team protocol.
+    pub(super) fn prompt_prefix_hash(agent: &ChatAgent, team_protocol: Option<&str>) -> String {
+        use sha2::{Digest, Sha256};
+
+        let role = Self::strip_embedded_team_protocol_from_system_prompt(&agent.system_prompt);
+        let mut hasher = Sha256::new();
+        for part in [
+            agent.name.as_str(),
+            role.as_str(),
+            team_protocol.unwrap_or("").trim(),
+        ] {
+            hasher.update((part.len() as u64).to_le_bytes());
+            hasher.update(part.as_bytes());
+        }
+        format!("{:x}", hasher.finalize())
+    }
+
+    /// Messages after `last_seen`, excluding the message being answered.
+    /// Returns `None` when `last_seen` is no longer in the history.
+    pub(super) fn select_continuation_messages(
+        messages: &[ChatMessage],
+        last_seen: Uuid,
+        source_message_id: Uuid,
+    ) -> Option<(Vec<ContinuationMessage>, usize)> {
+        let position = messages
+            .iter()
+            .position(|message| message.id == last_seen)?;
+        let unseen = messages[position + 1..]
+            .iter()
+            .filter(|message| message.id != source_message_id)
+            .filter(|message| chat::should_include_message_in_history(message))
+            .collect::<Vec<_>>();
+
+        // Keep the newest messages that fit; older ones stay in the history file.
+        let mut kept = Vec::new();
+        let mut used_chars = 0usize;
+        for message in unseen.iter().rev() {
+            if kept.len() == CONTINUATION_MAX_MESSAGES {
+                break;
+            }
+            let mut content = message.content.trim().to_string();
+            if content.chars().count() > CONTINUATION_MAX_MESSAGE_CHARS {
+                content = content
+                    .chars()
+                    .take(CONTINUATION_MAX_MESSAGE_CHARS)
+                    .collect::<String>()
+                    + " [truncated; full text in the history file]";
+            }
+            let size = content.chars().count();
+            if !kept.is_empty() && used_chars + size > CONTINUATION_MAX_TOTAL_CHARS {
+                break;
+            }
+            used_chars += size;
+            kept.push(ContinuationMessage {
+                sender: Self::resolve_message_sender_identity(message).label,
+                content,
+            });
+        }
+        let omitted = unseen.len() - kept.len();
+        kept.reverse();
+        Some((kept, omitted))
+    }
+
+    pub(super) async fn build_continuation_context(
+        &self,
+        session_agent: &ChatSessionAgent,
+        agent: &ChatAgent,
+        team_protocol: Option<&str>,
+        source_message: &ChatMessage,
+    ) -> ContinuationContext {
+        let mut context = ContinuationContext {
+            prefix_hash: Self::prompt_prefix_hash(agent, team_protocol),
+            ..Default::default()
+        };
+        let messages =
+            match ChatMessage::find_by_session_id(&self.db.pool, source_message.session_id, None)
+                .await
+            {
+                Ok(messages) => messages,
+                Err(err) => {
+                    tracing::warn!(error = %err, "continuation context: failed to load messages");
+                    return context;
+                }
+            };
+        context.latest_message_id = messages.last().map(|message| message.id);
+
+        let resumed = session_agent.state != ChatSessionAgentState::Dead
+            && session_agent.agent_session_id.is_some();
+        if !resumed {
+            return context;
+        }
+        let cursor = match ChatMemberContextCursor::find(&self.db.pool, session_agent.id).await {
+            Ok(Some(cursor)) if cursor.agent_session_id == session_agent.agent_session_id => cursor,
+            Ok(_) => return context,
+            Err(err) => {
+                tracing::warn!(error = %err, "continuation context: failed to load cursor");
+                return context;
+            }
+        };
+        context.prefix_unchanged =
+            cursor.prefix_hash.as_deref() == Some(context.prefix_hash.as_str());
+        if let Some((new_messages, omitted)) = cursor.last_message_id.and_then(|last_seen| {
+            Self::select_continuation_messages(&messages, last_seen, source_message.id)
+        }) {
+            context.has_cursor = true;
+            context.new_messages = new_messages;
+            context.omitted_messages = omitted;
+        }
+        context
+    }
+
     pub(super) fn build_prompt(
         &self,
         agent: &ChatAgent,
@@ -2283,6 +2423,7 @@ impl ChatRunner {
         prompt_language: ResolvedPromptLanguage,
         team_protocol: Option<&str>,
         workflow_generation_blocked: bool,
+        continuation: &ContinuationContext,
     ) -> String {
         let context_dir = context_path.parent().unwrap_or(context_path);
 
@@ -2298,6 +2439,7 @@ impl ChatRunner {
             prompt_language,
             team_protocol,
             workflow_generation_blocked,
+            continuation,
         )
     }
 }

@@ -1,3 +1,5 @@
+import { AgentCharacterAvatar } from "@/components/AgentCharacterAvatar";
+import { MemberStrip } from "@/components/MemberStrip";
 import {
   Bot,
   Crown,
@@ -48,6 +50,7 @@ function MemberRoleAvatar({
       title={label}
       aria-label={label}
     >
+      <AgentCharacterAvatar identity={runner}>
       {runner ? (
         <AgentBrandAvatar
           runner={runner}
@@ -58,6 +61,7 @@ function MemberRoleAvatar({
       ) : (
         <Bot aria-hidden="true" className="h-4 w-4" />
       )}
+      </AgentCharacterAvatar>
       {lead && (
         <span className="absolute -bottom-1 -right-1 flex h-[14px] w-[14px] items-center justify-center rounded-full bg-[var(--primary)] text-white ring-2 ring-[var(--surface-2)]">
           <Crown aria-hidden="true" className="h-[9px] w-[9px]" strokeWidth={2.75} />
@@ -356,6 +360,25 @@ export function TeamMemberSidebar({
 
   return (
     <div className="flex h-full flex-col">
+      <div className="ui-only">
+        <MemberStrip
+          members={members.map((member) => {
+            const agent = agents.find((item) => item.id === member.agent_id);
+            const runner = member.execution_config?.runner_type ?? normalizeRunnerType(agent?.runner_type);
+            const sessionAgent = sessionAgentLookup.byMemberId.get(member.id) ?? (member.agent_id ? sessionAgentLookup.byAgentId.get(member.agent_id) : undefined);
+            return {
+              id: member.id,
+              name: memberName(member, agent),
+              platform: compactRunnerLabel(runner, t("teamPage.fallback.runtime")),
+              activity: t(`teamPage.state.${normalizeMemberRunState(sessionAgent?.state)}`),
+              portrait: <AgentCharacterAvatar identity={runner}>{Array.from(memberName(member, agent))[0]}</AgentCharacterAvatar>,
+              avatar: runner ? <AgentBrandAvatar runner={runner} framed={false} className="h-3 w-3" iconClassName="h-2.5 w-2.5" /> : <Bot className="h-2.5 w-2.5" />,
+            };
+          })}
+          selectedId={selectedMemberId}
+          onSelect={onSelectMember}
+        />
+      </div>
       <div className="flex-1 space-y-1 p-2 overflow-y-auto ot-scroll-area-styled">
         {members.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center px-6 py-12 text-center">

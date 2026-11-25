@@ -1,0 +1,80 @@
+/* Internal integration; design tokens for the paper theme.
+   PAPER is additive; existing LIGHT and DARK remain available. */
+body[data-mode="paper"] {
+  --ui-paper: #fff;
+  --ui-panel: #f6f4f0;
+  --ui-line: #0000001a;
+  --ui-ink-2: #00000085;
+  --ui-ink-3: #00000061;
+  --ui-accent-new: #007aff;
+  --ui-dur-enter: .22s;
+  --ui-dur-exit: .12s;
+  --ui-dur-move: .32s;
+  --ui-ease-out: cubic-bezier(.2, .8, .2, 1);
+  --ui-ease-in-out: cubic-bezier(.4, 0, .2, 1);
+  --canvas: #fbfaf7;
+  --surface-1: #fff;
+  --surface-2: #f6f4f0;
+  --surface-3: #efece6;
+  --surface-4: #e8e4dd;
+  --hairline: #0000001a;
+  --hairline-strong: #00000024;
+  --hairline-tertiary: #00000038;
+  --ink: #1d1d1f;
+  --ink-muted: #00000085;
+  --ink-subtle: #000000b3;
+  --ink-tertiary: #00000099;
+  --primary: #007aff;
+  --primary-hover: #0066d6;
+  --primary-focus: #007aff;
+  --on-primary: #fff;
+  --primary-tint: #007aff1a;
+  --success: #1a9f4a;
+  --mono-bg: #f6f4f0;
+  --mono-border: #0000001a;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Noto Sans SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, "JetBrains Mono", monospace;
+  color-scheme: light;
+  -webkit-font-smoothing: antialiased;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Noto Sans SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+}
+
+.ui-only { display: none; }
+body[data-mode="paper"] .ui-only { display: block; }
+body[data-mode="paper"] .ui-welcome { max-width: 960px; margin: 32px auto; padding: 24px; }
+body[data-mode="paper"] .ui-welcome h2 { font-size: 20px; font-weight: 600; color: var(--ink); }
+body[data-mode="paper"] .ui-welcome p { color: var(--ink-subtle); font-size: 14px; margin: 8px 0 20px; }
+body[data-mode="paper"] .ui-grid { display: grid; grid-template-columns: minmax(0,1fr); gap: 16px; }
+body[data-mode="paper"] .ui-card { display: flex; flex-direction: column; gap: 12px; min-width: 0; padding: 20px; border: 1px solid var(--hairline); border-radius: 16px; background: var(--surface-1); text-align: left; cursor: pointer; transition: border-color var(--ui-dur-enter) var(--ui-ease-out), transform var(--ui-dur-enter) var(--ui-ease-out); }
+body[data-mode="paper"] .ui-card:hover { border-color: var(--primary); transform: translateY(-2px); }
+body[data-mode="paper"] .ui-card:focus-visible, body[data-mode="paper"] .ui-member:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+body[data-mode="paper"] .ui-avatar { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--surface-3); color: var(--ink); font-weight: 600; }
+body[data-mode="paper"] .ui-card-title { color: var(--ink); font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+body[data-mode="paper"] .ui-card-description { color: var(--ink-subtle); font-size: 13px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+body[data-mode="paper"] .ui-card-meta { color: var(--ink-tertiary); font-size: 11px; font-weight: 500; }
+body[data-mode="paper"] .ui-members { display: flex; gap: 12px; overflow-x: auto; padding: 12px; border-bottom: 1px solid var(--hairline); }
+body[data-mode="paper"] .ui-member { display: flex; align-items: center; gap: 8px; flex-shrink: 0; padding: 6px 8px; border-radius: 12px; font-size: 12px; font-weight: 500; color: var(--ink); cursor: pointer; }
+body[data-mode="paper"] .ui-member[aria-pressed="true"] { background: var(--primary-tint); }
+body[data-mode="paper"] .ui-member-avatar { position: relative; width: 32px; height: 32px; display: grid; place-items: center; background: var(--surface-3); border-radius: 50%; }
+body[data-mode="paper"] .ui-member-badge { position: absolute; right: -2px; bottom: -2px; width: 14px; height: 14px; border-radius: 50%; background: var(--surface-1); display: grid; place-items: center; }
+@media (min-width: 640px) { body[data-mode="paper"] .ui-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+@media (min-width: 1024px) { body[data-mode="paper"] .ui-grid { grid-template-columns: repeat(3,minmax(0,1fr)); } }
+@media (prefers-reduced-motion: reduce) { body[data-mode="paper"] .ui-card { transition: none; } body[data-mode="paper"] .ui-card:hover { transform: none; } }
+
+body[data-mode="paper"] .ui-intro { max-width: 520px; margin: 0 auto 28px; text-align: center; }
+body[data-mode="paper"] .ui-code { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; padding: 12px; border-radius: 12px; background: var(--surface-2); text-align: left; }
+body[data-mode="paper"] .ui-code code { min-width: 0; flex: 1; overflow: auto; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; }
+body[data-mode="paper"] .ui-primary { padding: 10px 16px; border-radius: 12px; background: var(--primary); color: var(--on-primary); font-size: 14px; cursor: pointer; }
+body[data-mode="paper"] .ui-primary:hover { background: var(--primary-hover); }
+body[data-mode="paper"] .ui-copy { padding: 5px 8px; border: 1px solid var(--hairline); border-radius: 8px; color: var(--ink-subtle); font-size: 11px; cursor: pointer; }
+body[data-mode="paper"] .ui-copy:hover { background: var(--surface-2); color: var(--ink); }
+body[data-mode="paper"] .ui-primary:focus-visible, body[data-mode="paper"] .ui-copy:focus-visible, body[data-mode="paper"] .ui-select:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+body[data-mode="paper"] .ui-select { display: flex; flex: 1; flex-direction: column; gap: 8px; min-width: 0; text-align: left; cursor: pointer; }
+
+.agent-character-avatar { display: inline-flex; width: 100%; height: 100%; align-items: center; justify-content: center; }
+.agent-character-fallback { display: contents; }
+.agent-character-image { display: none; }
+body[data-mode="paper"] .agent-character-fallback { display: none; }
+body[data-mode="paper"] .agent-character-image { display: block; width: 100%; height: 100%; object-fit: contain; border-radius: 50%; }

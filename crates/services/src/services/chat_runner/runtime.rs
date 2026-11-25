@@ -1781,6 +1781,22 @@ impl ChatRunner {
                             RunCompletionStatus::Failed | RunCompletionStatus::Stopped
                         );
 
+                        if matches!(completion_status, RunCompletionStatus::Succeeded)
+                            && let Err(err) = ChatMemberContextCursor::commit(
+                                &db.pool,
+                                session_agent_id,
+                                run_id,
+                                agent_session_id.as_deref(),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                run_id = %run_id,
+                                error = %err,
+                                "failed to commit member context cursor"
+                            );
+                        }
+
                         if should_clear_agent_session {
                             agent_session_id = None;
                             agent_message_id = None;
@@ -2316,6 +2332,7 @@ impl ChatRunner {
                                         "mentions": [agent_name],
                                     }));
                                     let retry_message = ChatMessage {
+            client_op_key: None,
                                         id: source_message_id,
                                         session_id,
                                         sender_type: ChatSenderType::System,

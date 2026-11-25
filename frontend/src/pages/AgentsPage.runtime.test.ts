@@ -157,11 +157,11 @@ assert.match(
 assert.match(source, /KIRO_CLI: kiroCliSchema,/u);
 assert.match(
   source,
-  /KIRO_CLI: \{[\s\S]*?title: "Kiro CLI"[\s\S]*?text: "Ki"/u,
+  /KIRO_CLI: \{[\s\S]*?title: "Kiro CLI"[\s\S]*?logoSrc: "\/logos\/kiro-logo\.svg"/u,
 );
 assert.match(
   sharedBrandSource,
-  /KIRO_CLI: \{[\s\S]*?title: "Kiro CLI"[\s\S]*?text: "Ki"/u,
+  /KIRO_CLI: \{[\s\S]*?title: "Kiro CLI"[\s\S]*?logoSrc: "\/logos\/kiro-logo\.svg"/u,
 );
 assert.deepEqual(Object.keys(kiroCliSchema.properties ?? {}).sort(), [
   'acp',

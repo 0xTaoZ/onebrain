@@ -1,3 +1,6 @@
+import { AgentCharacterAvatar } from "@/components/AgentCharacterAvatar";
+import { copyPlainText } from "@/lib/clipboard";
+import { GroupGrid } from "@/components/GroupGrid";
 import React, {
   useState,
   useRef,
@@ -92,6 +95,27 @@ import type {
   SourceControlDiffArea,
 } from "@/types";
 
+
+export function PaperChatWelcome() {
+  const { theme, sessions, setActiveSessionId, messagesAsync, t, locale, mainAgentName } = useWorkspace();
+  const [copied, setCopied] = useState(false);
+  const example = mainAgentName
+    ? `@${mainAgentName.replace(/^@/, '')} ${locale === 'zh' ? '先阅读项目说明，列出计划与验收条件。' : 'Read the project instructions, then list a plan and acceptance criteria.'}`
+    : (locale === 'zh' ? '添加一位成员，再 @成员 分派具体任务。' : 'Add a member, then @mention them with a specific task.');
+  const copy = async () => setCopied(await copyPlainText(example));
+  if (theme !== "paper" || messagesAsync.loading || messagesAsync.error || !messagesAsync.empty) return null;
+  return (
+    <section className="ui-only ui-welcome">
+      <div className="ui-intro">
+        <h2>{t("onboarding.welcome.title")}</h2>
+        <p>{locale === 'zh' ? '明确目标，@一位成员开始协作；计划与审阅沿用现有工作流。' : 'Set a goal and @mention a member to begin; use the existing workflow for planning and review.'}</p>
+        <div className="ui-code"><code>{example}</code><button type="button" className="ui-copy" onClick={() => void copy()} aria-label={locale === 'zh' ? '复制示例' : 'Copy example'}><Copy size={14} /></button></div>
+        <button type="button" className="ui-primary" onClick={() => void copy()}>{copied ? (locale === 'zh' ? '已复制，粘贴到输入框即可' : 'Copied — paste into the composer') : (locale === 'zh' ? '复制起步指令' : 'Copy a starting prompt')}</button>
+      </div>
+      <GroupGrid groups={sessions} onSelect={setActiveSessionId} activityLabel={t("teamPage.state.running")} locale={locale} />
+    </section>
+  );
+}
 
 export const statusTextTone: Record<RelatedFileStatus, string> = {
   M: "text-amber-600",
@@ -219,7 +243,7 @@ export function SessionMemberAvatar({ member }: { member: Member }) {
       title={member.name}
       aria-label={`${member.name} ${member.roleDetail}`}
     >
-      {member.avatar}
+      <AgentCharacterAvatar identity={`${member.runner ?? ''} ${member.name} ${member.modelName}`}>{member.avatar}</AgentCharacterAvatar>
     </span>
   );
 }

@@ -41,7 +41,8 @@
     "desktop:sync-icons": "node scripts/desktop/sync-icons.js",
     "desktop:dev": "pnpm run desktop:sync-icons && pnpm -C frontend build && node scripts/desktop/prepare-sidecar.js --debug --skip-cli && pnpm tauri dev --config src-tauri/tauri.dev.conf.json",
     "desktop:build": "pnpm tauri build && node scripts/desktop/style-dmg.mjs --all",
-    "desktop:prepare-sidecar": "node scripts/desktop/prepare-sidecar.js --release"
+    "desktop:prepare-sidecar": "node scripts/desktop/prepare-sidecar.js --release",
+    "desktop:build:local": "CARGO_PROFILE_RELEASE_STRIP=none pnpm tauri build --bundles app --config src-tauri/tauri.local.conf.json"
   },
   "dependencies": {
     "adm-zip": "^0.5.16"

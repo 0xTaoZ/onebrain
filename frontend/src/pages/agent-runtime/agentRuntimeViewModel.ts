@@ -191,3 +191,13 @@ export function parseEnvText(text: string): EnvTextParseResult {
 
   return { ok: true, value };
 }
+/** Keep last-known models only when a probe has no model source to report. */
+export function modelsForRuntimeDisplay(
+  diagnostic: Pick<AgentRuntimeStatus, "discovered_models" | "model_source"> | null | undefined,
+  previous: Pick<AgentRuntimeStatus, "discovered_models">,
+): string[] {
+  if (!diagnostic || (diagnostic.model_source === "none" && diagnostic.discovered_models.length === 0)) {
+    return previous.discovered_models;
+  }
+  return diagnostic.discovered_models;
+}

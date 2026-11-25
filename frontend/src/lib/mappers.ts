@@ -459,6 +459,7 @@ export const mapAgentToMember = (
     name: handle,
     roleDetail: `${modelName} · ${stateLabel}`,
     modelName,
+    runner: agent.runner_type,
   };
 };
 

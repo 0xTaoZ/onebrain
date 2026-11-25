@@ -277,7 +277,10 @@ impl<'de> Deserialize<'de> for ChatPresetsConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[ts(export)]
 pub struct ChatCompressionConfig {
-    /// Token threshold before compression kicks in (default: 5000000)
+    /// Allow paid agent inference for history summaries. Disabled unless explicitly enabled.
+    #[serde(default)]
+    pub allow_ai_summary: bool,
+    /// Token threshold before compression kicks in (default: 50000)
     #[serde(default = "default_token_threshold")]
     pub token_threshold: u32,
     /// Percentage of messages to compress (default: 25)
@@ -296,6 +299,7 @@ fn default_compression_percentage() -> u8 {
 impl Default for ChatCompressionConfig {
     fn default() -> Self {
         Self {
+            allow_ai_summary: false,
             token_threshold: default_token_threshold(),
             compression_percentage: default_compression_percentage(),
         }

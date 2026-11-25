@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -219,6 +220,10 @@ pub(crate) async fn install_desktop_update(
     })?;
 
     if should_restart_after_install(std::env::consts::OS) {
+        // restart() exits without RunEvent::Exit, so stop the backend here.
+        if let Some(state) = app.try_state::<crate::backend_lifecycle::BackendState>() {
+            state.stop();
+        }
         app.restart();
     }
 

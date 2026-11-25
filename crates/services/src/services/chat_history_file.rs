@@ -16,9 +16,12 @@ use tokio::fs;
 use uuid::Uuid;
 
 /// Simplified message format for chat history files.
-/// Only contains sender and content to minimize storage and token usage.
+/// Contains sender/content, timestamp, and optional database provenance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimplifiedMessage {
+    /// Original database message; absent for generated summaries and legacy history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<Uuid>,
     /// Sender identifier in format "user:{handle}" or "agent:{name}" or "system"
     pub sender: String,
     /// Message content
@@ -241,11 +244,13 @@ mod tests {
     fn test_estimate_token_count() {
         let messages = vec![
             SimplifiedMessage {
+                message_id: None,
                 sender: "user:alice".to_string(),
                 content: "Hello, how are you?".to_string(),
                 timestamp: "2026-02-27T10:00:00Z".to_string(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "agent:assistant".to_string(),
                 content: "I'm doing well, thank you!".to_string(),
                 timestamp: "2026-02-27T10:00:01Z".to_string(),
@@ -261,6 +266,7 @@ mod tests {
     #[test]
     fn test_estimate_token_count_chinese() {
         let messages = vec![SimplifiedMessage {
+            message_id: None,
             sender: "user:alice".to_string(),
             content: "你好，世界！".to_string(),
             timestamp: "2026-02-27T10:00:00Z".to_string(),

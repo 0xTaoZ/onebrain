@@ -7,6 +7,17 @@
     <title>openteams</title>
   </head>
   <body>
+    <script>
+      (() => {
+        let preference = 'system';
+        try { preference = localStorage.getItem('openteams-theme-preference') || 'system'; } catch {}
+        if (!['light', 'paper', 'dark', 'system'].includes(preference)) preference = 'system';
+        const mode = preference === 'system' ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') : preference;
+        document.body.dataset.mode = mode;
+        document.documentElement.style.backgroundColor = mode === 'paper' ? '#fbfaf7' : mode === 'light' ? '#fbfbfc' : '#010102';
+        document.documentElement.style.colorScheme = mode === 'dark' ? 'dark' : 'light';
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

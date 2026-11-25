@@ -2,7 +2,7 @@
   --wrs-modal-overlay-bg: rgba(1, 1, 2, 0.58);
 }
 
-body[data-mode="light"] .workflow-review-settings-dialog-overlay {
+:is(body[data-mode="light"], body[data-mode="paper"]) .workflow-review-settings-dialog-overlay {
   --wrs-modal-overlay-bg: rgba(248, 250, 252, 0.84);
 }
 
@@ -51,7 +51,7 @@ body[data-mode="light"] .workflow-review-settings-dialog-overlay {
   background: var(--wrs-panel-highlight);
 }
 
-body[data-mode="light"] .workflow-review-settings-dialog {
+:is(body[data-mode="light"], body[data-mode="paper"]) .workflow-review-settings-dialog {
   --wrs-panel-bg: #ffffff;
   --wrs-panel-border: rgba(15, 23, 42, 0.1);
   --wrs-panel-shadow:

@@ -10,7 +10,7 @@ use axum::{
     response::{IntoResponse, Json as ResponseJson, Response},
 };
 use db::models::{
-    chat_run::{ChatRun, ChatRunLogState, ChatRunRetentionInfo},
+    chat_run::{ChatRun, ChatRunLogState, ChatRunRetentionInfo, DailyRunCount},
     chat_session::ChatSession,
 };
 use deployment::Deployment;
@@ -691,4 +691,17 @@ mod tests {
 
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
+}
+
+const MEMBER_ACTIVITY_DAYS: u32 = 182;
+
+/// Daily run counts behind a member's contribution heatmap.
+pub async fn get_member_activity(
+    State(deployment): State<DeploymentImpl>,
+    Path(session_agent_id): Path<Uuid>,
+) -> Result<ResponseJson<ApiResponse<Vec<DailyRunCount>>>, ApiError> {
+    let days =
+        DailyRunCount::for_session_agent(&deployment.db().pool, session_agent_id, MEMBER_ACTIVITY_DAYS)
+            .await?;
+    Ok(ResponseJson(ApiResponse::success(days)))
 }

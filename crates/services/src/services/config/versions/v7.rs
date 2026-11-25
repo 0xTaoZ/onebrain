@@ -26,6 +26,7 @@ pub struct ShowcaseState {
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ThemeMode {
     Light,
+    Paper,
     Dark,
     System,
 }

@@ -684,6 +684,8 @@ mod tests {
             CREATE UNIQUE INDEX idx_chat_session_agents_unique
                 ON chat_session_agents(session_id, agent_id);
             CREATE TABLE chat_messages (
+ client_op_key TEXT,
+
                 id BLOB PRIMARY KEY,
                 session_id BLOB NOT NULL,
                 sender_type TEXT NOT NULL,

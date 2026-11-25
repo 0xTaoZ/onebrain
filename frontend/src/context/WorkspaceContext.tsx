@@ -1,4 +1,7 @@
-﻿import React, {
+import { resolveUserMessageMentions } from "@/lib/userMessageRouting";
+import { NeedsAckError } from '@/lib/chatQueueApi';
+import { useDispatchAcknowledgements } from './workspace/useWorkspaceChatRuntime';
+import React, {
   createContext,
   useCallback,
   useContext,
@@ -1622,6 +1625,8 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
     }, 600);
   };
 
+  const { dispatchAcknowledgements, requestDispatchAcknowledgement } = useDispatchAcknowledgements();
+
   const sendMessageToSession = (
     sessionId: string,
     text: string,
@@ -1641,16 +1646,11 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
     const hasExplicitMentions = explicitMentions.length > 0;
     const hasRouteMentionOverride =
       options.routeMentions !== undefined && options.routeMentions.length > 0;
-    const mainAgentMention = mainAgentName
-      ? mainAgentName.replace(/^@/, '')
-      : null;
-    const routeMentions =
-      options.routeMentions ??
-      (hasExplicitMentions
-        ? explicitMentions
-        : mainAgentMention
-          ? [mainAgentMention]
-          : []);
+    const routeMentions = resolveUserMessageMentions(
+      text,
+      effectiveChatInputMode,
+      options.routeMentions,
+    );
     const visibleMentions =
       effectiveChatInputMode === 'workflow' &&
       !hasExplicitMentions &&
@@ -1691,6 +1691,7 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
     // Real backend: runtime state comes from the message response and stream.
     const meta: { [key: string]: JsonValue } = {
       app_language: locale,
+      chat_input_mode: effectiveChatInputMode,
     };
     if (effectiveChatInputMode === 'workflow') {
       meta.chat_input_mode = 'workflow';
@@ -1714,13 +1715,14 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
           ? workflowRouteAgentIdRef.current
           : null;
 
-    const persistMessage = async () => {
+    const persistMessage = async (force = false) => {
       await syncSessionLeadAgent(sid, workflowLeadAgentId);
       return chatMessagesApi.send(sid, {
         sender_type: 'user',
         sender_id: null,
         content: text,
         meta,
+        force,
       });
     };
 
@@ -1731,6 +1733,14 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
         applyChatRuntimeSnapshot(response.runtime);
       })
       .catch((err) => {
+        if (err instanceof NeedsAckError) {
+          requestDispatchAcknowledgement(sid, err.pending, async () => {
+            const response = await persistMessage(true);
+            upsertStreamedMessage(sid, mapBackendChatMessage(response.message));
+            applyChatRuntimeSnapshot(response.runtime);
+          });
+          return;
+        }
         setAllMessages((prev) => {
           const current = filterMessagesForSession(sid, prev[sid] ?? []);
           const hasUserMessage = current.some(
@@ -1797,6 +1807,8 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
   return (
     <WorkspaceContext.Provider
       value={{
+        dispatchAcknowledgements,
+        requestDispatchAcknowledgement,
         theme,
         themePreference,
         setTheme,

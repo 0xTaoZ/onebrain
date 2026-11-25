@@ -68,6 +68,8 @@ pub enum ApiError {
     Unauthorized,
     #[error("Bad request: {0}")]
     BadRequest(String),
+    #[error("previous task requires acknowledgement")]
+    NeedsAck(serde_json::Value),
     #[error("Conflict: {0}")]
     Conflict(String),
     #[error("Forbidden: {0}")]
@@ -138,6 +140,16 @@ impl ErrorInfo {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let Self::NeedsAck(pending) = &self {
+            return (
+                StatusCode::CONFLICT,
+                axum::Json(serde_json::json!({
+                    "success": false, "message": "needs_ack", "data": null,
+                    "error_data": {"code": "needs_ack", "pending": pending}
+                })),
+            )
+                .into_response();
+        }
         let info = match &self {
             ApiError::Project(ProjectError::Database(_)) => ErrorInfo::internal("ProjectError"),
             ApiError::Project(ProjectError::ProjectNotFound) => {
@@ -211,6 +223,9 @@ impl IntoResponse for ApiError {
                 "Unauthorized",
                 "Unauthorized. Please sign in again.",
             ),
+            ApiError::NeedsAck(_) => {
+                ErrorInfo::conflict("NeedsAck", "previous task requires acknowledgement")
+            }
             ApiError::BadRequest(msg) => ErrorInfo::bad_request("BadRequest", msg.clone()),
             ApiError::Conflict(msg) => ErrorInfo::conflict("ConflictError", msg.clone()),
             ApiError::Forbidden(msg) => {

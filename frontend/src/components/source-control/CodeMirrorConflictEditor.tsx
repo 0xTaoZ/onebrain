@@ -983,7 +983,7 @@ const SyntaxCodeEditor: React.FC<{
       height="100%"
       readOnly={!editable}
       editable={editable}
-      theme={theme}
+      theme={theme === 'paper' ? 'light' : theme}
       extensions={[
         conflictEditorTheme,
         ...languageExtensions,

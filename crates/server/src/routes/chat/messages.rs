@@ -44,6 +44,10 @@ use uuid::Uuid;
 use super::runtime::{ChatSessionRuntimeSnapshot, build_session_runtime_snapshot};
 use crate::{DeploymentImpl, error::ApiError};
 
+// Bound memory and serialize concurrent free-chat admission for a session.
+static FREE_CHAT_ADMISSION: [tokio::sync::Mutex<()>; 64] =
+    [const { tokio::sync::Mutex::const_new(()) }; 64];
+
 const ALLOWED_TEXT_EXTENSIONS: &[&str] = &[
     ".txt", ".csv", ".md", ".json", ".xml", ".yaml", ".yml", ".html", ".htm", ".css", ".js", ".ts",
     ".jsx", ".tsx", ".py", ".java", ".c", ".cpp", ".h", ".hpp", ".rb", ".php", ".go", ".rs",
@@ -64,6 +68,10 @@ pub struct CreateChatMessageRequest {
     pub sender_id: Option<Uuid>,
     pub content: String,
     pub meta: Option<serde_json::Value>,
+    #[serde(rename = "opKey", default)]
+    pub op_key: Option<String>,
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -72,6 +80,7 @@ pub struct CreateChatMessageResponse {
     pub message: ChatMessage,
     pub deliveries: Vec<QueuedMessage>,
     pub revision: i64,
+    pub deduplicated: bool,
     pub runtime: ChatSessionRuntimeSnapshot,
 }
 
@@ -138,10 +147,10 @@ fn resolve_relative_path(relative_path: &str) -> Option<PathBuf> {
 }
 
 fn normalize_chat_input_mode(value: &str) -> Option<&'static str> {
-    if value.trim() == "workflow" {
-        Some("workflow")
-    } else {
-        None
+    match value.trim() {
+        "workflow" => Some("workflow"),
+        "free" => Some("free"),
+        _ => None,
     }
 }
 
@@ -185,11 +194,75 @@ fn inject_workflow_card_summary_into_message_meta(meta: &mut serde_json::Value) 
     );
 }
 
+async fn admit_free_chat(
+    pool: &sqlx::SqlitePool,
+    session_id: Uuid,
+    sender_type: &ChatSenderType,
+    meta: Option<&serde_json::Value>,
+    force: bool,
+) -> Result<Option<tokio::sync::MutexGuard<'static, ()>>, ApiError> {
+    // Roll out only for clients explicitly using free-chat; workflow/legacy routes stay unchanged.
+    let is_free_chat = meta
+        .and_then(|m| m.get("chat_input_mode"))
+        .and_then(serde_json::Value::as_str)
+        == Some("free");
+    let _admission = if is_free_chat && *sender_type == ChatSenderType::User {
+        Some(
+            FREE_CHAT_ADMISSION[usize::from(session_id.as_bytes()[0]) % 64]
+                .lock()
+                .await,
+        )
+    } else {
+        None
+    };
+    if is_free_chat && *sender_type == ChatSenderType::User && !force {
+        let key = services::services::chat::normalized_client_message_id(meta)?;
+        let replay = match key {
+            Some(key) => ChatMessage::find_idempotent_user_message(pool, session_id, &key)
+                .await?
+                .is_some(),
+            None => false,
+        };
+        if !replay {
+            let active = services::services::queued_message::QueuedMessageService::new()
+                .pending_for_session(pool, session_id)
+                .await?;
+            let items = services::services::inbox::InboxService::new()
+                .pending_for_session(pool, session_id)
+                .await?;
+            if active > 0 || !items.is_empty() {
+                return Err(ApiError::NeedsAck(serde_json::json!({
+                    "active_count": active,
+                    "items": items.iter().map(|item| serde_json::json!({"id": item.id, "title": item.title})).collect::<Vec<_>>()
+                })));
+            }
+        }
+    }
+    Ok(_admission)
+}
+
 pub async fn create_message(
     Extension(session): Extension<ChatSession>,
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<CreateChatMessageRequest>,
 ) -> Result<ResponseJson<ApiResponse<CreateChatMessageResponse>>, ApiError> {
+    let mut payload = payload;
+    if let Some(op_key) = payload.op_key.take() {
+        let mut meta = payload.meta.take().unwrap_or_else(|| serde_json::json!({}));
+        let object = meta
+            .as_object_mut()
+            .ok_or_else(|| ApiError::BadRequest("meta must be an object".into()))?;
+        object.insert("opKey".into(), serde_json::json!(op_key));
+        payload.meta = Some(meta);
+    }
+    let _admission = admit_free_chat(
+        &deployment.db().pool,
+        session.id,
+        &payload.sender_type,
+        payload.meta.as_ref(),
+        payload.force,
+    )
+    .await?;
     let result = deployment
         .chat_runner()
         .persist_and_dispatch_message(
@@ -220,6 +293,7 @@ pub async fn create_message(
 
     Ok(ResponseJson(ApiResponse::success(
         CreateChatMessageResponse {
+            deduplicated: !result.created,
             message,
             deliveries: result.deliveries,
             revision: result.revision,
@@ -242,9 +316,17 @@ pub async fn upload_message_attachments(
     let mut mentions: Vec<String> = Vec::new();
     let mut chat_input_mode: Option<&'static str> = None;
     let mut attachments: Vec<ChatAttachmentMeta> = Vec::new();
+    let mut force = false;
+    let mut op_key: Option<String> = None;
 
     while let Some(field) = multipart.next_field().await? {
         match field.name() {
+            Some("force") => {
+                force = field.text().await? == "true";
+            }
+            Some("opKey") => {
+                op_key = Some(field.text().await?);
+            }
             Some("content") => {
                 let text = field.text().await?;
                 if !text.trim().is_empty() {
@@ -366,6 +448,24 @@ pub async fn upload_message_attachments(
         meta["chat_input_mode"] = serde_json::json!(mode);
     }
 
+    if let Some(key) = op_key {
+        meta["opKey"] = serde_json::json!(key);
+    }
+    let admission = admit_free_chat(
+        &deployment.db().pool,
+        session.id,
+        &ChatSenderType::User,
+        Some(&meta),
+        force,
+    )
+    .await;
+    let _admission = match admission {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = fs::remove_dir_all(attachment_storage_dir(session.id, message_id)).await;
+            return Err(error);
+        }
+    };
     let result = match deployment
         .chat_runner()
         .persist_and_dispatch_message(
@@ -423,6 +523,7 @@ pub async fn upload_message_attachments(
 
     Ok(ResponseJson(ApiResponse::success(
         CreateChatMessageResponse {
+            deduplicated: !result.created,
             message,
             deliveries: result.deliveries,
             revision: result.revision,
@@ -855,6 +956,7 @@ pub async fn resend_message(
     let mut meta = original.meta.0.clone();
     if let Some(meta) = meta.as_object_mut() {
         meta.remove("client_message_id");
+        meta.remove("opKey");
     }
     deployment
         .chat_runner()
@@ -875,11 +977,68 @@ pub async fn resend_message(
 mod tests {
     use super::{inject_workflow_card_summary_into_message_meta, normalize_chat_input_mode};
 
+    #[tokio::test]
+    async fn unfinished_free_chat_requires_ack_but_force_and_workflow_keep_dispatching() {
+        use db::models::chat_message::ChatSenderType;
+
+        use super::admit_free_chat;
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE chat_message_queue (session_id BLOB, status TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE inbox_items (id BLOB, project_id BLOB, session_id BLOB, kind TEXT, severity TEXT, title TEXT, body TEXT, source_type TEXT, source_id TEXT, dedupe_key TEXT, read_at TEXT, archived_at TEXT, created_at TEXT, updated_at TEXT)").execute(&pool).await.unwrap();
+        let session = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO chat_message_queue VALUES (?1, 'running')")
+            .bind(session)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let free = serde_json::json!({"chat_input_mode": "free"});
+        assert!(matches!(
+            admit_free_chat(&pool, session, &ChatSenderType::User, Some(&free), false).await,
+            Err(crate::error::ApiError::NeedsAck(_))
+        ));
+        drop(
+            admit_free_chat(&pool, session, &ChatSenderType::User, Some(&free), true)
+                .await
+                .unwrap(),
+        );
+        let workflow = serde_json::json!({"chat_input_mode": "workflow"});
+        assert!(
+            admit_free_chat(
+                &pool,
+                session,
+                &ChatSenderType::User,
+                Some(&workflow),
+                false
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            admit_free_chat(&pool, session, &ChatSenderType::Agent, Some(&free), false)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        sqlx::query("UPDATE chat_message_queue SET status = 'completed'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        drop(
+            admit_free_chat(&pool, session, &ChatSenderType::User, Some(&free), false)
+                .await
+                .unwrap(),
+        );
+    }
+
     #[test]
-    fn normalize_chat_input_mode_accepts_only_workflow() {
+    fn normalize_chat_input_mode_accepts_free_and_workflow() {
         assert_eq!(normalize_chat_input_mode("workflow"), Some("workflow"));
         assert_eq!(normalize_chat_input_mode(" workflow "), Some("workflow"));
-        assert_eq!(normalize_chat_input_mode("free"), None);
+        assert_eq!(normalize_chat_input_mode("free"), Some("free"));
         assert_eq!(normalize_chat_input_mode(""), None);
     }
 

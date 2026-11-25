@@ -1,3 +1,5 @@
+import { runtimeModelLabel } from "@/lib/runtimeModelLabel";
+import { AgentCharacterAvatar } from "@/components/AgentCharacterAvatar";
 import {
   type CSSProperties,
   useCallback,
@@ -37,6 +39,7 @@ import type {
   PiModelsSyncDiagnostic,
 } from "@/types";
 import {
+  modelsForRuntimeDisplay,
   envSummaryToText,
   filterRuntimeRunners,
   getRunnerLabel,
@@ -482,6 +485,7 @@ function AgentBrandAvatar({
       title={brand.title}
       aria-label={brand.title}
     >
+      <AgentCharacterAvatar identity={runner}>
       {brand.logoSrc && brand.logoMode === "mask" ? (
         <span
           aria-hidden="true"
@@ -519,6 +523,7 @@ function AgentBrandAvatar({
           )}
         </svg>
       )}
+      </AgentCharacterAvatar>
     </span>
   );
 }
@@ -1257,16 +1262,16 @@ function AgentConfigSidebar({
       )
     : null;
   const discoveredModels =
-    currentDiagnostics?.discovered_models ?? runner.discovered_models;
+    modelsForRuntimeDisplay(currentDiagnostics, runner);
   const modelOptions = useMemo<DropdownSelectOption[]>(
     () =>
-      acpModelOption
+      acpModelOption?.options.length
         ? acpModelOption.options.map((choice) => ({
             id: choice.value,
             label: choice.name,
             description: choice.description ?? undefined,
           }))
-        : discoveredModels.map((model) => ({ id: model, label: model })),
+        : discoveredModels.map((model) => ({ id: model, label: runtimeModelLabel(model) })),
     [acpModelOption, discoveredModels],
   );
   const configuredModel =
@@ -2047,8 +2052,10 @@ export function AgentsPage() {
               node_available: diagnostics.node_available,
               npm_available: diagnostics.npm_available,
               npx_available: diagnostics.npx_available,
-              discovered_models: diagnostics.discovered_models,
-              model_source: diagnostics.model_source,
+              discovered_models: modelsForRuntimeDisplay(diagnostics, item),
+              model_source: diagnostics.model_source === "none" && !diagnostics.discovered_models.length
+                ? item.model_source
+                : diagnostics.model_source,
               version: diagnostics.version,
               last_checked_at: diagnostics.last_checked_at,
               last_error: diagnostics.last_error,

@@ -2,7 +2,7 @@ use std::{path::PathBuf, time::Duration};
 
 use anyhow::{self, Error as AnyhowError};
 use deployment::{Deployment, DeploymentError};
-use server::{DeploymentImpl, npx_browser_lifecycle, routes};
+use server::{DeploymentImpl, npx_browser_lifecycle, parent_watch, routes};
 use services::services::{
     build_stats::model_pricing_sync::ModelPricingSyncService,
     config::{TeamTemplateCatalogService, TeamTemplateCatalogSyncResult, load_config_from_file},
@@ -402,6 +402,7 @@ pub async fn shutdown_signal() {
             _ = ctrl_c => {},
             _ = terminate => {},
             _ = npx_browser_lifecycle::wait_for_shutdown_signal() => {},
+            _ = parent_watch::wait_for_parent_exit() => {},
         }
     }
 
@@ -410,6 +411,7 @@ pub async fn shutdown_signal() {
         tokio::select! {
             _ = ctrl_c => {},
             _ = npx_browser_lifecycle::wait_for_shutdown_signal() => {},
+            _ = parent_watch::wait_for_parent_exit() => {},
         }
     }
 }

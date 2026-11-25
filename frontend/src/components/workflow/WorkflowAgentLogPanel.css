@@ -49,11 +49,11 @@
   background: rgba(255, 255, 255, 0.14);
 }
 
-body[data-mode="light"] .workflow-window-root .wf-log-panel::-webkit-scrollbar-thumb {
+:is(body[data-mode="light"], body[data-mode="paper"]) .workflow-window-root .wf-log-panel::-webkit-scrollbar-thumb {
   background: rgba(0, 0, 0, 0.25);
 }
 
-body[data-mode="light"] .workflow-window-root .wf-log-panel::-webkit-scrollbar-thumb:hover {
+:is(body[data-mode="light"], body[data-mode="paper"]) .workflow-window-root .wf-log-panel::-webkit-scrollbar-thumb:hover {
   background: rgba(0, 0, 0, 0.45);
 }
 
@@ -89,7 +89,7 @@ body[data-mode="light"] .workflow-window-root .wf-log-panel::-webkit-scrollbar-t
   letter-spacing: 0.02em;
 }
 
-body[data-mode="light"] .workflow-window-root .wf-log-group + .wf-log-group {
+:is(body[data-mode="light"], body[data-mode="paper"]) .workflow-window-root .wf-log-group + .wf-log-group {
   border-top-color: rgba(0, 0, 0, 0.16);
 }
 
@@ -243,7 +243,7 @@ body[data-mode="light"] .workflow-window-root .wf-log-group + .wf-log-group {
   text-overflow: ellipsis;
 }
 
-body[data-mode="light"] :is(.workflow-window-root, .wf-log-panel-inline) .wf-log-task-tool-icon {
+:is(body[data-mode="light"], body[data-mode="paper"]) :is(.workflow-window-root, .wf-log-panel-inline) .wf-log-task-tool-icon {
   color: var(--ink-subtle, #62666d);
 }
 
@@ -296,7 +296,7 @@ body[data-mode="light"] :is(.workflow-window-root, .wf-log-panel-inline) .wf-log
   font-size: 11px;
 }
 
-body[data-mode="light"] .workflow-window-root .wf-log-markdown pre {
+:is(body[data-mode="light"], body[data-mode="paper"]) .workflow-window-root .wf-log-markdown pre {
   border-color: rgba(0, 0, 0, 0.12);
   background: rgba(0, 0, 0, 0.05);
 }
@@ -355,7 +355,7 @@ body[data-mode="light"] .workflow-window-root .wf-log-markdown pre {
   font-size: 0.92em;
 }
 
-body[data-mode="light"] :is(.workflow-window-root, .wf-log-panel-inline) .wf-log-inline-code {
+:is(body[data-mode="light"], body[data-mode="paper"]) :is(.workflow-window-root, .wf-log-panel-inline) .wf-log-inline-code {
   background: rgba(0, 0, 0, 0.06);
 }
 
@@ -586,7 +586,7 @@ body[data-mode="light"] :is(.workflow-window-root, .wf-log-panel-inline) .wf-log
   border-top: 1px solid rgba(255, 255, 255, 0.12);
 }
 
-body[data-mode="light"] .workflow-window-root .wf-log-pane + .wf-log-pane {
+:is(body[data-mode="light"], body[data-mode="paper"]) .workflow-window-root .wf-log-pane + .wf-log-pane {
   border-top-color: rgba(0, 0, 0, 0.12);
 }
 
@@ -609,7 +609,7 @@ body[data-mode="light"] .workflow-window-root .wf-log-pane + .wf-log-pane {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-body[data-mode="light"] .workflow-window-root .wf-log-run-disclosure {
+:is(body[data-mode="light"], body[data-mode="paper"]) .workflow-window-root .wf-log-run-disclosure {
   border-bottom-color: rgba(0, 0, 0, 0.08);
 }
 

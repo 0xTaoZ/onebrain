@@ -8,9 +8,7 @@ mod tests {
             chat_message::{ChatMessage, ChatSenderType},
             chat_message_target::ChatMessageTargetRouteKind,
             chat_session::{ChatSession, CreateChatSession},
-            chat_session_agent::{
-                ChatSessionAgent, ChatSessionAgentState, CreateChatSessionAgent,
-            },
+            chat_session_agent::{ChatSessionAgent, ChatSessionAgentState, CreateChatSessionAgent},
             member_execution_config::MemberExecutionConfig,
             project::CreateProject,
             project_member::{ProjectMember, ProjectMemberType},
@@ -20,17 +18,15 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        CompressionType, SimplifiedMessage, all_agents_running, build_message_analytics_metrics,
-        build_summarization_prompt, compress_messages_if_needed, create_message,
-        create_message_delivery_bundle_with_id, create_message_idempotent,
+        CompressionType, ResolvedChatMessageTarget, SimplifiedMessage, all_agents_running,
+        build_message_analytics_metrics, build_summarization_prompt, compress_messages_if_needed,
+        create_message, create_message_delivery_bundle_with_id, create_message_idempotent,
         create_message_idempotent_with_id, create_message_with_id,
-        create_session_with_project_members, effective_agent_name,
-        ensure_message_delivery_bundle,
+        create_session_with_project_members, effective_agent_name, ensure_message_delivery_bundle,
         is_protocol_notice_history_message, is_workflow_chat_input_mode,
         limit_summary_input_messages, member_name_overrides_for_session, normalized_member_name,
         parse_agent_send_mentions, parse_mentions, parse_user_message_mentions,
-        prepare_chat_message, ResolvedChatMessageTarget,
-        prioritize_summary_agents, select_messages_to_compress_by_token,
+        prepare_chat_message, prioritize_summary_agents, select_messages_to_compress_by_token,
         should_include_message_in_history,
     };
     use crate::services::{
@@ -65,6 +61,31 @@ mod tests {
             Some("BackendEngineer")
         );
         assert_eq!(normalized_member_name(Some(" \t ")), None);
+    }
+
+    #[test]
+    fn explicit_free_chat_requires_visible_mentions() {
+        assert!(
+            parse_user_message_mentions(
+                "A note for later; email dev@example.com",
+                &serde_json::json!({"chat_input_mode": "free", "mentions": ["developer"]}),
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            parse_user_message_mentions(
+                "@reviewer inspect the patch",
+                &serde_json::json!({"chat_input_mode": "free", "mentions": ["developer"]}),
+            ),
+            vec!["reviewer"]
+        );
+        assert_eq!(
+            parse_user_message_mentions(
+                "Run this plan",
+                &serde_json::json!({"chat_input_mode": "workflow", "mentions": ["lead"]}),
+            ),
+            vec!["lead"]
+        );
     }
 
     #[test]
@@ -131,6 +152,7 @@ mod tests {
     #[test]
     fn build_message_analytics_metrics_uses_buckets_counts_and_attachment_sizes() {
         let message = ChatMessage {
+            client_op_key: None,
             id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
             sender_type: ChatSenderType::User,
@@ -247,6 +269,8 @@ mod tests {
             "#,
             r#"
             CREATE TABLE chat_messages (
+ client_op_key TEXT,
+
                 id BLOB PRIMARY KEY,
                 session_id BLOB NOT NULL,
                 sender_type TEXT NOT NULL
@@ -490,13 +514,12 @@ mod tests {
         assert!(!replay.created);
         assert_eq!(replay.message.id, first.message.id);
         assert_eq!(replay.message.content, "first body");
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM chat_messages WHERE session_id = ?1",
-        )
-        .bind(session.id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM chat_messages WHERE session_id = ?1")
+                .bind(session.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -558,12 +581,8 @@ mod tests {
         assert_eq!(mapping_count, 1);
     }
 
-    async fn setup_atomic_delivery_fixture() -> (
-        SqlitePool,
-        ChatSession,
-        ChatAgent,
-        ChatSessionAgent,
-    ) {
+    async fn setup_atomic_delivery_fixture()
+    -> (SqlitePool, ChatSession, ChatAgent, ChatSessionAgent) {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -691,11 +710,10 @@ mod tests {
                 .expect("count persisted bundle rows");
             assert_eq!(count, expected, "unexpected {table} row count");
         }
-        let outbox_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM chat_runtime_outbox")
-                .fetch_one(&pool)
-                .await
-                .expect("count atomic outbox rows");
+        let outbox_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_runtime_outbox")
+            .fetch_one(&pool)
+            .await
+            .expect("count atomic outbox rows");
         assert_eq!(outbox_count, first.runtime_revision);
     }
 
@@ -756,13 +774,11 @@ mod tests {
                 .all(|event| event.payload.queue.is_some())
         );
 
-        sqlx::query(
-            "DELETE FROM chat_runtime_outbox WHERE session_id = ?1 AND revision = 1",
-        )
-        .bind(session.id)
-        .execute(&pool)
-        .await
-        .expect("simulate replay retention");
+        sqlx::query("DELETE FROM chat_runtime_outbox WHERE session_id = ?1 AND revision = 1")
+            .bind(session.id)
+            .execute(&pool)
+            .await
+            .expect("simulate replay retention");
         let gap = service
             .replay_after(&pool, session.id, 0, 256)
             .await
@@ -841,11 +857,12 @@ mod tests {
                 .expect("resume unpublished outbox"),
             1
         );
-        let replayed = std::iter::from_fn(|| restarted_receiver.try_recv().ok())
-            .find_map(|event| match event {
+        let replayed = std::iter::from_fn(|| restarted_receiver.try_recv().ok()).find_map(
+            |event| match event {
                 ChatStreamEvent::RuntimeDelta { revision, .. } => Some(revision),
                 _ => None,
-            });
+            },
+        );
         assert_eq!(replayed, Some(2));
         let unpublished: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM chat_runtime_outbox WHERE published_at IS NULL",
@@ -1178,10 +1195,7 @@ mod tests {
             Some("backend-lead")
         );
         assert_eq!(
-            effective_agent_name(
-                &agent,
-                overrides.get(&session_agent.id).map(String::as_str)
-            ),
+            effective_agent_name(&agent, overrides.get(&session_agent.id).map(String::as_str)),
             "backend-lead"
         );
     }
@@ -1422,21 +1436,25 @@ mod tests {
     fn select_messages_to_compress_uses_token_budget() {
         let messages = vec![
             SimplifiedMessage {
+                message_id: None,
                 sender: "user:alice".to_string(),
                 content: "heavy ".repeat(500),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "user:bob".to_string(),
                 content: "small".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "agent:bot".to_string(),
                 content: "small".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "agent:bot".to_string(),
                 content: "small".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
@@ -1456,11 +1474,13 @@ mod tests {
     fn limit_summary_input_messages_keeps_all_when_under_limit() {
         let messages = vec![
             SimplifiedMessage {
+                message_id: None,
                 sender: "user:alice".to_string(),
                 content: "short".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "agent:bot".to_string(),
                 content: "short reply".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
@@ -1472,9 +1492,182 @@ mod tests {
         assert_eq!(before, after);
     }
 
+    #[tokio::test]
+    async fn context_reuses_cached_history_and_warning_then_invalidates_edited_prefix() {
+        let pool = setup_chat_message_pool().await;
+        let session = create_active_session(&pool).await;
+        let original = create_message(
+            &pool,
+            session.id,
+            ChatSenderType::User,
+            None,
+            "original history".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let source = super::build_simplified_messages(&pool, session.id)
+            .await
+            .unwrap();
+        let (threshold, percentage) = super::load_chat_compression_settings().await;
+        let result = super::CompressionResult {
+            messages: vec![SimplifiedMessage {
+                message_id: None,
+                sender: "system:summary".to_string(),
+                content: "cached archive marker".to_string(),
+                timestamp: Utc::now().to_rfc3339(),
+            }],
+            compression_type: CompressionType::Truncated,
+            warning: Some(super::CompressionWarning {
+                code: "COMPRESSION_FALLBACK".to_string(),
+                message: "Original messages archived".to_string(),
+                split_file_path: "archive.json".to_string(),
+            }),
+        };
+        super::cache_compression_result_in_memory(
+            session.id,
+            super::calculate_messages_fingerprint(&source),
+            source.len(),
+            threshold,
+            percentage,
+            super::estimate_token_count(&source),
+            &result,
+        );
+        let exact = super::build_full_context(&pool, session.id).await.unwrap();
+        assert!(exact.context_compacted);
+        assert_eq!(exact.messages[0]["content"], "cached archive marker");
+        assert_eq!(
+            exact.compression_warning.as_ref().unwrap().split_file_path,
+            "archive.json"
+        );
+        let appended = create_message(
+            &pool,
+            session.id,
+            ChatSenderType::User,
+            None,
+            "new turn".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let incremental = super::build_full_context(&pool, session.id).await.unwrap();
+        assert!(incremental.context_compacted);
+        assert_eq!(incremental.messages[0]["content"], "cached archive marker");
+        assert_eq!(
+            incremental.messages.last().unwrap()["message_id"],
+            appended.id.to_string()
+        );
+        assert_eq!(
+            incremental.compression_warning.as_ref().unwrap().code,
+            "COMPRESSION_FALLBACK"
+        );
+        sqlx::query("UPDATE chat_messages SET content = 'edited history' WHERE id = ?")
+            .bind(original.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let edited = super::build_full_context(&pool, session.id).await.unwrap();
+        assert!(!edited.context_compacted);
+        assert!(edited.compression_warning.is_none());
+        assert_eq!(edited.messages[0]["content"], "edited history");
+    }
+
+    #[test]
+    fn context_budget_clips_latest_unicode_message_and_keeps_provenance() {
+        let original = SimplifiedMessage {
+            message_id: Some(Uuid::new_v4()),
+            sender: "user:alice".to_string(),
+            content: "中文🙂é context ".repeat(100),
+            timestamp: "2026-11-24T00:00:00Z".to_string(),
+        };
+        let limited = super::truncate_messages_to_token_limit(&[original.clone()], 100);
+        assert_eq!(limited.len(), 1);
+        assert!(super::estimate_token_count(&limited) <= 100);
+        assert_eq!(limited[0].message_id, original.message_id);
+        assert_eq!(limited[0].timestamp, original.timestamp);
+        let (prefix, _) = limited[0]
+            .content
+            .split_once("\n[Content truncated")
+            .unwrap();
+        assert!(original.content.starts_with(prefix));
+        assert_eq!(original.content, "中文🙂é context ".repeat(100));
+        let (json, jsonl) = super::simplified_messages_to_jsonl(&limited);
+        assert_eq!(
+            json[0]["message_id"],
+            original.message_id.unwrap().to_string()
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(jsonl.trim()).unwrap(),
+            json[0]
+        );
+        assert!(super::truncate_messages_to_token_limit(&[original], 0).is_empty());
+    }
+
+    #[test]
+    fn context_budget_retains_recent_suffix_in_order() {
+        let messages = (0..3)
+            .map(|index| SimplifiedMessage {
+                message_id: Some(Uuid::new_v4()),
+                sender: "user:alice".to_string(),
+                content: format!("message {index}"),
+                timestamp: index.to_string(),
+            })
+            .collect::<Vec<_>>();
+        let budget = super::estimate_token_count(&messages[1..]);
+        let limited = super::truncate_messages_to_token_limit(&messages, budget);
+        assert_eq!(
+            limited.iter().map(|m| m.message_id).collect::<Vec<_>>(),
+            messages[1..]
+                .iter()
+                .map(|m| m.message_id)
+                .collect::<Vec<_>>()
+        );
+        assert!(super::estimate_token_count(&limited) <= budget);
+    }
+
+    #[tokio::test]
+    async fn summary_process_is_blocked_without_opt_in() {
+        let pool = setup_chat_message_pool().await;
+        let agent = create_agent_member(&pool, "summary-denied").await;
+        let error = super::call_agent_for_summary(
+            &agent,
+            "Do not execute",
+            std::path::Path::new("."),
+            false,
+        )
+        .await
+        .expect_err("must reject before executor/profile resolution or spawn");
+        assert!(
+            matches!(error, super::ChatServiceError::Validation(ref message)
+            if message == "AI history summaries require explicit opt-in")
+        );
+    }
+
+    #[test]
+    fn summary_inference_requires_explicit_opt_in_and_old_history_loads() {
+        use crate::services::config::ChatCompressionConfig;
+        assert!(!ChatCompressionConfig::default().allow_ai_summary);
+        let legacy: ChatCompressionConfig = serde_json::from_value(serde_json::json!({
+            "token_threshold": 50000, "compression_percentage": 25
+        }))
+        .unwrap();
+        assert!(!legacy.allow_ai_summary);
+        let enabled: ChatCompressionConfig = serde_json::from_value(serde_json::json!({
+            "allow_ai_summary": true
+        }))
+        .unwrap();
+        assert!(enabled.allow_ai_summary);
+        let message: SimplifiedMessage = serde_json::from_value(serde_json::json!({
+            "sender": "user:alice", "content": "legacy", "timestamp": "old"
+        }))
+        .unwrap();
+        assert!(message.message_id.is_none());
+    }
+
     #[test]
     fn summarization_prompt_identifies_openteams_as_source() {
         let prompt = build_summarization_prompt(&[SimplifiedMessage {
+            message_id: None,
             sender: "user:alice".to_string(),
             content: "Summarize this message.".to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -1488,16 +1681,19 @@ mod tests {
     fn limit_summary_input_messages_keeps_recent_slice_when_over_limit() {
         let messages = vec![
             SimplifiedMessage {
+                message_id: None,
                 sender: "user:a".to_string(),
                 content: "old ".repeat(300),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "agent:b".to_string(),
                 content: "middle ".repeat(300),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "user:c".to_string(),
                 content: "recent ".repeat(300),
                 timestamp: chrono::Utc::now().to_rfc3339(),
@@ -1506,12 +1702,16 @@ mod tests {
 
         let (limited, before, after) = limit_summary_input_messages(&messages, 200);
         assert!(limited.len() < messages.len());
-        assert_eq!(
-            limited.last().map(|m| m.content.as_str()),
-            Some(messages[2].content.as_str())
+        let latest = limited.last().expect("latest message is retained");
+        assert_eq!(latest.sender, messages[2].sender);
+        assert_eq!(latest.timestamp, messages[2].timestamp);
+        assert!(
+            latest
+                .content
+                .contains("Content truncated for context budget")
         );
         assert!(before > after);
-        assert!(after <= 200 || limited.len() == 1);
+        assert!(after <= 200);
     }
 
     #[test]
@@ -1531,6 +1731,7 @@ mod tests {
 
     fn make_chat_message(sender_type: ChatSenderType, meta: serde_json::Value) -> ChatMessage {
         ChatMessage {
+            client_op_key: None,
             id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
             sender_type,
@@ -1576,21 +1777,25 @@ mod tests {
         let workspace = std::path::Path::new(".");
         let messages = vec![
             SimplifiedMessage {
+                message_id: None,
                 sender: "user:alice".to_string(),
                 content: "A very long message that should exceed tiny threshold quickly".repeat(8),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "agent:bot".to_string(),
                 content: "Second long message for compression coverage".repeat(8),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "user:bob".to_string(),
                 content: "Recent message to keep".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "agent:bot".to_string(),
                 content: "Another recent message to keep".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
@@ -1653,16 +1858,19 @@ mod tests {
         let context_dir = tempfile::tempdir().expect("create temp context dir");
         let messages = vec![
             SimplifiedMessage {
+                message_id: None,
                 sender: "user:alice".to_string(),
                 content: "A very long message that should exceed tiny threshold quickly".repeat(8),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "agent:bot".to_string(),
                 content: "Second long message for compression coverage".repeat(8),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "user:bob".to_string(),
                 content: "Recent message to keep".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
@@ -1762,16 +1970,19 @@ mod tests {
         let context_dir = tempfile::tempdir().expect("create temp context dir");
         let messages = vec![
             SimplifiedMessage {
+                message_id: None,
                 sender: "user:alice".to_string(),
                 content: "A very long message that should exceed tiny threshold quickly".repeat(8),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "agent:bot".to_string(),
                 content: "Second long message for compression coverage".repeat(8),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "user:bob".to_string(),
                 content: "Recent message to keep".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
@@ -1861,21 +2072,25 @@ mod tests {
         let context_dir = tempfile::tempdir().expect("create temp context dir");
         let base_messages = vec![
             SimplifiedMessage {
+                message_id: None,
                 sender: "user:alice".to_string(),
                 content: "A very long message that should exceed threshold".repeat(200),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "agent:bot".to_string(),
                 content: "Another very long message for compression".repeat(200),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "user:bob".to_string(),
                 content: "small keep".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "agent:bot".to_string(),
                 content: "small keep too".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
@@ -1901,6 +2116,7 @@ mod tests {
 
         let mut appended = base_messages.clone();
         appended.push(SimplifiedMessage {
+            message_id: None,
             sender: "user:charlie".to_string(),
             content: "new tail message".to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -1947,11 +2163,13 @@ mod tests {
         let workspace = std::path::Path::new(".");
         let messages = vec![
             SimplifiedMessage {
+                message_id: None,
                 sender: "user:alice".to_string(),
                 content: "short message".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             SimplifiedMessage {
+                message_id: None,
                 sender: "agent:bot".to_string(),
                 content: "another short one".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
@@ -1974,5 +2192,21 @@ mod tests {
         assert_eq!(result.compression_type, CompressionType::None);
         assert_eq!(result.messages.len(), messages.len());
         assert!(result.warning.is_none());
+    }
+    #[test]
+    fn op_keys_are_strict_and_optional() {
+        for key in ["", "space key", "slash/key", "中文", &"x".repeat(65)] {
+            assert!(
+                super::normalized_client_message_id(Some(&serde_json::json!({"opKey": key})))
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            super::normalized_client_message_id(Some(&serde_json::json!({"opKey": "retry_1-A"})))
+                .unwrap()
+                .as_deref(),
+            Some("retry_1-A")
+        );
+        assert!(super::normalized_client_message_id(None).unwrap().is_none());
     }
 }

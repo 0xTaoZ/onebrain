@@ -1286,7 +1286,11 @@ impl ChatRunner {
         mut meta: Option<serde_json::Value>,
         message_id: Uuid,
     ) -> Result<PersistedChatMessageDeliveryBundle, ChatRunnerError> {
-        let client_message_id = if sender_type == ChatSenderType::User {
+        let client_message_id = if sender_type == ChatSenderType::User
+            || meta
+                .as_ref()
+                .is_some_and(|value| value.get("opKey").is_some())
+        {
             chat::normalized_client_message_id(meta.as_ref())?
         } else {
             None
@@ -2528,6 +2532,14 @@ impl ChatRunner {
             let ui_language = ui_config.language;
             let prompt_language = Self::resolve_prompt_language(source_message, &ui_language);
 
+            let continuation = self
+                .build_continuation_context(
+                    &session_agent,
+                    &agent,
+                    team_protocol.as_deref(),
+                    source_message,
+                )
+                .await;
             let prompt = self.build_prompt(
                 &agent,
                 source_message,
@@ -2540,7 +2552,25 @@ impl ChatRunner {
                 prompt_language,
                 team_protocol.as_deref(),
                 workflow_generation_blocked,
+                &continuation,
             );
+            if let Some(latest_message_id) = continuation.latest_message_id
+                && let Err(err) = ChatMemberContextCursor::stage(
+                    &self.db.pool,
+                    session_agent.id,
+                    run_id,
+                    latest_message_id,
+                    &continuation.prefix_hash,
+                )
+                .await
+            {
+                tracing::warn!(
+                    session_id = %session_id,
+                    run_id = %run_id,
+                    error = %err,
+                    "failed to stage member context cursor"
+                );
+            }
             let executor_prompt = ExecutorPrompt {
                 text: prompt.clone(),
                 images: match message_attachments.as_ref() {

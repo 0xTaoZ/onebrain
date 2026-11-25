@@ -1,3 +1,5 @@
+import { RemoteAccessBanner } from "@/components/RemoteAccessBanner";
+import { PaperChatSidebar } from "@/components/PaperChatSidebar";
 import React, {
   useCallback,
   useEffect,
@@ -2195,9 +2197,18 @@ function WorkspaceLayout() {
     onArchiveInboxItem: archiveInboxItem,
     teamPresets,
   };
+  const sidebar = theme === "paper" ? (
+    <PaperChatSidebar
+      activePage={activeAppPage}
+      workspaceNavigation={<ProjectSidebar {...projectSidebarProps} />}
+      onSessionSelect={handleSidebarSessionSelect}
+      onCreateSession={() => { setIsCreateSessionModalOpen(true); closeMobileSidebar(); }}
+      onNavigate={(page) => handleSidebarNavigate({ id: page, label: translate(`page.${page}`, pageTabConfig[page].label), icon: "", helper: "", targetPage: page })}
+    />
+  ) : <ProjectSidebar {...projectSidebarProps} />;
   return (
     <div
-      className={`h-full w-full flex bg-[var(--canvas)] text-[var(--ink)] font-sans antialiased overflow-hidden selection:bg-[var(--primary)] selection:text-white transition-colors duration-200 ${
+      className={`${theme === "paper" ? "paper-app-shell" : ""} h-full w-full flex bg-[var(--canvas)] text-[var(--ink)] font-sans antialiased overflow-hidden selection:bg-[var(--primary)] selection:text-white transition-colors duration-200 ${
         onboardingAppTransitionActive ? "animate-onboarding-app-enter" : ""
       }`}
     >
@@ -2297,10 +2308,10 @@ function WorkspaceLayout() {
 
       <aside
         className="relative h-full hidden md:block shrink-0"
-        style={{ width: desktopSidebarWidth }}
+        style={{ width: theme === "paper" ? 364 : desktopSidebarWidth }}
       >
-        <ProjectSidebar {...projectSidebarProps} />
-        <button
+        {sidebar}
+        {theme !== "paper" && <button
           type="button"
           className="group absolute -right-3 top-3 bottom-3 z-20 flex w-3 cursor-col-resize items-stretch justify-end outline-none"
           aria-label={translate("aria.resizeSidebar", "Resize sidebar")}
@@ -2314,7 +2325,7 @@ function WorkspaceLayout() {
                 : "bg-transparent group-hover:bg-[var(--hairline-tertiary)] group-focus-visible:bg-[var(--hairline-tertiary)]"
             }`}
           />
-        </button>
+        </button>}
       </aside>
 
       {isMobileSidebarOpen && (
@@ -2323,7 +2334,7 @@ function WorkspaceLayout() {
             onClick={() => setIsMobileSidebarOpen(false)}
             className="absolute inset-0 bg-[#000000]/40 backdrop-blur-xs"
           />
-          <div className="absolute top-0 left-0 bottom-0 w-64 bg-[var(--canvas)] animate-fade-in-right">
+          <div className={`absolute top-0 left-0 bottom-0 max-w-full bg-[var(--canvas)] animate-fade-in-right ${theme === "paper" ? "w-[364px]" : "w-64"}`}>
             <div className="absolute top-3 right-3 z-10">
               <button
                 type="button"
@@ -2334,14 +2345,15 @@ function WorkspaceLayout() {
                 <X className="h-4 w-4 text-[var(--ink-subtle)]" />
               </button>
             </div>
-            <ProjectSidebar {...projectSidebarProps} />
+            {sidebar}
           </div>
         </div>
       )}
 
-      <div className="flex-1 h-full min-w-0 overflow-hidden bg-[var(--canvas)] p-2 md:p-3">
+      <div className="paper-main-frame flex-1 h-full min-w-0 overflow-hidden bg-[var(--canvas)] p-2 md:p-3">
         <section className="flex h-full min-h-0 flex-col overflow-hidden gap-1">
-          <header className="h-8 bg-[var(--canvas)] flex items-center justify-between shrink-0 select-none z-10">
+          <RemoteAccessBanner />
+          <header className="paper-workspace-tabs h-8 bg-[var(--canvas)] flex items-center justify-between shrink-0 select-none z-10">
             <div className="flex items-center gap-3 flex-1 min-w-0 h-full">              <button
                 type="button"
                 onClick={() => setIsMobileSidebarOpen(true)}

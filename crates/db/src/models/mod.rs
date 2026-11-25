@@ -11,6 +11,7 @@ pub mod chat_permission;
 pub mod chat_run;
 pub mod chat_runtime_outbox;
 pub mod chat_session;
+pub mod chat_member_context_cursor;
 pub mod chat_session_agent;
 pub mod chat_session_path_index;
 pub mod chat_session_worktree;

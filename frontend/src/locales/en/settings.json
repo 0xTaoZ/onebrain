@@ -17,6 +17,7 @@
   "settings.appearance.darkThemeDefault": "Dark theme (Default)",
   "settings.appearance.desc": "Manage page language and display preferences.",
   "settings.appearance.lightThemeInverted": "Light theme (Inverted)",
+  "settings.appearance.paperTheme": "Warm white theme",
   "settings.appearance.pageLanguage": "Page language",
   "settings.appearance.systemTheme": "Follow system",
   "settings.appearance.theme": "Theme",

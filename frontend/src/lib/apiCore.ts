@@ -21,7 +21,12 @@ export const makeRequest = async (
   if (!headers.has('Content-Type') && !(options.body instanceof FormData)) {
     headers.set('Content-Type', 'application/json');
   }
-  return fetch(url, { ...options, headers });
+  const response = await fetch(url, { ...options, headers });
+  if (response.status === 401 && response.headers.get('x-openteams-lan-auth') === 'required'
+      && typeof window !== 'undefined' && window.location.protocol === 'https:') {
+    window.location.replace('/');
+  }
+  return response;
 };
 
 export const handleApiResponse = async <T, E = T>(

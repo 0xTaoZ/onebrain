@@ -18,6 +18,7 @@ use db::{
     DBService,
     models::{
         chat_agent::ChatAgent,
+        chat_member_context_cursor::ChatMemberContextCursor,
         chat_message::{ChatMessage, ChatSenderType},
         chat_message_queue::QueuedMessageStatus,
         chat_run::{

@@ -286,6 +286,10 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
                     "/initialize-workspace-git",
                     axum::routing::post(sessions::initialize_workspace_git_endpoint),
                 )
+                .route(
+                    "/members/{session_agent_id}/activity",
+                    get(runs::get_member_activity),
+                )
                 .route("/runs/{run_id}/log", get(runs::get_run_log))
                 .route("/runs/{run_id}/activity", get(runs::get_run_activity))
                 .route("/runs/{run_id}/diff", get(runs::get_run_diff))

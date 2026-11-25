@@ -18,38 +18,9 @@ fn limit_summary_input_messages(
     token_limit: u32,
 ) -> (Vec<SimplifiedMessage>, u32, u32) {
     let total_tokens = estimate_token_count(messages_to_compress);
-    if messages_to_compress.is_empty() || total_tokens <= token_limit {
-        return (messages_to_compress.to_vec(), total_tokens, total_tokens);
-    }
-
-    // Keep the most recent part of the compressed segment under token budget.
-    let mut selected_rev = Vec::new();
-    let mut selected_tokens = 0u32;
-    for message in messages_to_compress.iter().rev() {
-        let message_tokens = estimate_token_count(std::slice::from_ref(message)).max(1);
-        if !selected_rev.is_empty() && selected_tokens.saturating_add(message_tokens) > token_limit
-        {
-            break;
-        }
-        selected_rev.push(message.clone());
-        selected_tokens = selected_tokens.saturating_add(message_tokens);
-        if selected_tokens >= token_limit {
-            break;
-        }
-    }
-
-    if selected_rev.is_empty() {
-        selected_rev.push(
-            messages_to_compress
-                .last()
-                .expect("messages_to_compress must be non-empty")
-                .clone(),
-        );
-        selected_tokens = estimate_token_count(&selected_rev);
-    }
-
-    selected_rev.reverse();
-    (selected_rev, total_tokens, selected_tokens)
+    let selected = truncate_messages_to_token_limit(messages_to_compress, token_limit);
+    let selected_tokens = estimate_token_count(&selected);
+    (selected, total_tokens, selected_tokens)
 }
 
 fn all_agents_running(session_agents: &[ChatSessionAgent]) -> bool {
@@ -114,6 +85,7 @@ async fn try_summarize_with_agents(
     session_agents: &[ChatSessionAgent],
     messages_to_compress: &[SimplifiedMessage],
     workspace_path: &Path,
+    allow_ai_summary: bool,
 ) -> Option<String> {
     let (summary_input_messages, input_tokens_before_limit, input_tokens_after_limit) =
         limit_summary_input_messages(messages_to_compress, SUMMARY_INPUT_TOKEN_LIMIT);
@@ -168,7 +140,14 @@ async fn try_summarize_with_agents(
         let effective_workspace_path = workspace_override.unwrap_or(workspace_path);
 
         // Try to call the agent for summarization
-        match call_agent_for_summary(&agent, &summarize_prompt, effective_workspace_path).await {
+        match call_agent_for_summary(
+            &agent,
+            &summarize_prompt,
+            effective_workspace_path,
+            allow_ai_summary,
+        )
+        .await
+        {
             Ok(summary) => {
                 tracing::info!(
                     session_id = %session_id,
@@ -202,7 +181,13 @@ async fn call_agent_for_summary(
     agent: &ChatAgent,
     prompt: &str,
     workspace_path: &Path,
+    allow_ai_summary: bool,
 ) -> Result<String, ChatServiceError> {
+    if !allow_ai_summary {
+        return Err(ChatServiceError::Validation(
+            "AI history summaries require explicit opt-in".to_string(),
+        ));
+    }
     let executor_profile_id = parse_executor_profile_id(agent)?;
     let mut executor =
         ExecutorConfigs::get_cached().get_coding_agent_or_default(&executor_profile_id);
@@ -266,9 +251,7 @@ async fn call_agent_for_summary(
             }
         }
     } else {
-        status = Some(
-            wait_for_summary_process_exit(&mut spawned, &agent.name, &msg_store).await?,
-        );
+        status = Some(wait_for_summary_process_exit(&mut spawned, &agent.name, &msg_store).await?);
     }
 
     msg_store.push_finished();
@@ -477,6 +460,9 @@ fn select_messages_to_compress_by_token(
 fn calculate_messages_fingerprint(messages: &[SimplifiedMessage]) -> u64 {
     let mut hasher = DefaultHasher::new();
     for message in messages {
+        if let Some(message_id) = message.message_id {
+            hasher.write(message_id.as_bytes());
+        }
         hasher.write(message.sender.as_bytes());
         hasher.write_u8(0x1f);
         hasher.write(message.content.as_bytes());
@@ -954,19 +940,23 @@ pub async fn compress_messages_if_needed(
         "Compressing messages"
     );
 
-    // Try AI summarization with available agents
-    if !session_agents.is_empty()
+    // Enforce consent at the inference branch, including direct/manual callers.
+    let config = super::config::load_config_from_file(&config_path()).await;
+    if config.chat_compression.allow_ai_summary
+        && !session_agents.is_empty()
         && let Some(summary) = try_summarize_with_agents(
             pool,
             session_id,
             session_agents,
             messages_to_compress,
             workspace_path,
+            config.chat_compression.allow_ai_summary,
         )
         .await
     {
         // Create summary message and prepend to kept messages
         let summary_message = SimplifiedMessage {
+            message_id: None,
             sender: "system:summary".to_string(),
             content: format!("[History Summary]\n{}", summary),
             timestamp: Utc::now().to_rfc3339(),
@@ -1013,7 +1003,7 @@ pub async fn compress_messages_if_needed(
     // All agents failed - fallback to truncation
     tracing::warn!(
         session_id = %session_id,
-        "AI summarization failed, falling back to truncation"
+        "Using deterministic history archive fallback"
     );
 
     // Write messages to cutoff file in context directory
@@ -1061,9 +1051,10 @@ pub async fn compress_messages_if_needed(
     // Keep a compact summary marker at the front so history file always contains
     // "compressed context + remaining uncompressed messages".
     let mut result_messages = vec![SimplifiedMessage {
+        message_id: None,
         sender: "system:summary".to_string(),
         content: format!(
-            "[History Summary - Fallback]\nAI summarization failed; archived {} messages (~{} tokens) to {}",
+            "[History Summary - Fallback]\nHistory archived; {} messages (~{} tokens) to {}",
             messages_to_compress_count, selected_compress_tokens, cutoff_path_str
         ),
         timestamp: Utc::now().to_rfc3339(),
@@ -1077,7 +1068,7 @@ pub async fn compress_messages_if_needed(
         warning: Some(CompressionWarning {
             code: "COMPRESSION_FALLBACK".to_string(),
             message: format!(
-                "AI summarization failed or was ineffective; archived {} messages (~{} tokens) to cutoff file",
+                "History archived; {} messages (~{} tokens) to cutoff file",
                 messages_to_compress_count, selected_compress_tokens
             ),
             split_file_path: cutoff_path_str,

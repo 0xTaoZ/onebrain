@@ -22,6 +22,8 @@ pub struct ChatMessage {
     pub sender_id: Option<Uuid>,
     pub sender_session_agent_id: Option<Uuid>,
     pub content: String,
+    #[sqlx(default)]
+    pub client_op_key: Option<String>,
     #[ts(type = "string[]")]
     pub mentions: sqlx::types::Json<Vec<String>>,
     #[ts(type = "JsonValue")]
@@ -50,6 +52,7 @@ impl ChatMessage {
                       content,
                       mentions,
                       meta,
+                      client_op_key,
                       created_at
                FROM chat_messages
                WHERE id = $1"#,
@@ -73,6 +76,7 @@ impl ChatMessage {
                       messages.content,
                       messages.mentions,
                       messages.meta,
+                      messages.client_op_key,
                       messages.created_at
                FROM chat_message_idempotency idempotency
                JOIN chat_messages messages ON messages.id = idempotency.message_id
@@ -125,6 +129,7 @@ impl ChatMessage {
                           content,
                           mentions,
                           meta,
+                          client_op_key,
                           created_at
                    FROM chat_messages
                    WHERE session_id = $1
@@ -145,6 +150,7 @@ impl ChatMessage {
                           content,
                           mentions,
                           meta,
+                          client_op_key,
                           created_at
                    FROM chat_messages
                    WHERE session_id = $1
@@ -181,6 +187,7 @@ impl ChatMessage {
                     )
                     ELSE meta
                 END as meta,
+                client_op_key,
                 created_at
             FROM chat_messages
             WHERE session_id = ?
@@ -216,9 +223,9 @@ impl ChatMessage {
         sqlx::query_as::<_, ChatMessage>(
             r#"INSERT INTO chat_messages (
                    id, session_id, sender_type, sender_id, sender_session_agent_id,
-                   content, mentions, meta
+                   content, mentions, meta, client_op_key
                )
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                RETURNING id,
                          session_id,
                          sender_type,
@@ -227,6 +234,7 @@ impl ChatMessage {
                          content,
                          mentions,
                          meta,
+                         client_op_key,
                          created_at"#,
         )
         .bind(id)
@@ -237,6 +245,7 @@ impl ChatMessage {
         .bind(&data.content)
         .bind(mentions_json)
         .bind(meta_json)
+        .bind(data.meta.get("opKey").and_then(serde_json::Value::as_str))
         .fetch_one(pool)
         .await
     }
@@ -257,9 +266,9 @@ impl ChatMessage {
         sqlx::query_as::<_, ChatMessage>(
             r#"INSERT INTO chat_messages (
                    id, session_id, sender_type, sender_id, sender_session_agent_id,
-                   content, mentions, meta
+                   content, mentions, meta, client_op_key
                )
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                RETURNING id,
                          session_id,
                          sender_type,
@@ -268,6 +277,7 @@ impl ChatMessage {
                          content,
                          mentions,
                          meta,
+                         client_op_key,
                          created_at"#,
         )
         .bind(id)
@@ -278,6 +288,7 @@ impl ChatMessage {
         .bind(&data.content)
         .bind(mentions_json)
         .bind(meta_json)
+        .bind(data.meta.get("opKey").and_then(serde_json::Value::as_str))
         .fetch_one(&mut **transaction)
         .await
     }
@@ -315,7 +326,7 @@ impl ChatMessage {
                SET content = ?1, meta = ?2
                WHERE id = ?3
                RETURNING id, session_id, sender_type, sender_id, sender_session_agent_id,
-                         content, mentions, meta, created_at"#,
+                         content, mentions, meta, client_op_key, created_at"#,
         )
         .bind(content)
         .bind(meta_str)

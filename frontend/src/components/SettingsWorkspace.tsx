@@ -1,3 +1,5 @@
+import { LanAccessSettings } from "./LanAccessSettings";
+import { ContextEconomySettings } from "./ContextEconomySettings";
 import type React from 'react';
 import { useEffect, useState } from 'react';
 import {
@@ -760,7 +762,7 @@ export const SettingsWorkspace: React.FC = () => {
               <div className="settings-list-group rounded-lg border">
                 <div className="settings-theme-selector-row border-b border-[var(--hairline)] px-4 py-3.5">
                   <div
-                    className="grid grid-cols-3 gap-5"
+                    className="grid grid-cols-2 gap-5 sm:grid-cols-4"
                     aria-label={t('settings.appearance.theme')}
                   >
                     {([
@@ -775,13 +777,18 @@ export const SettingsWorkspace: React.FC = () => {
                         Icon: Sun,
                       },
                       {
+                        id: 'paper',
+                        label: translate('settings.appearance.paperTheme', 'Warm white'),
+                        Icon: Sun,
+                      },
+                      {
                         id: 'system',
                         label: t('settings.appearance.systemTheme'),
                         Icon: Monitor,
                       },
                     ] as const).map((option) => {
                       const selected = themePreference === option.id;
-                      const lightPreview = option.id === 'light';
+                      const lightPreview = option.id === 'light' || option.id === 'paper';
                       const systemPreview = option.id === 'system';
                       const Icon = option.Icon;
 
@@ -955,6 +962,9 @@ export const SettingsWorkspace: React.FC = () => {
                 />
               </div>
             </section>
+
+            <ContextEconomySettings />
+            <LanAccessSettings />
 
             <section className="space-y-2.5">
               <h4 className="settings-section-header">

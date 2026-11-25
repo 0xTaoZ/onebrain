@@ -2,6 +2,8 @@ import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from '@/App';
 import './index.css';
+import './styles/ui-theme.css';
+import './styles/ui-chat.css';
 
 const isMacOsTauri =
   '__TAURI__' in window && /Mac/.test(window.navigator.platform);

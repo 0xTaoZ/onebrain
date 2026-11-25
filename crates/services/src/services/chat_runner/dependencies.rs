@@ -21,6 +21,10 @@ const OPENTEAMS_HOME_DIR: &str = ".openteams";
 const OPENTEAMS_WORKSPACE_DIR: &str = ".openteams";
 const RUNS_DIR_NAME: &str = "runs";
 const CONTEXT_DIR_NAME: &str = "context";
+/// Limits for messages inlined into a resumed member's prompt.
+const CONTINUATION_MAX_MESSAGES: usize = 30;
+const CONTINUATION_MAX_MESSAGE_CHARS: usize = 2_000;
+const CONTINUATION_MAX_TOTAL_CHARS: usize = 12_000;
 const LEGACY_COMPACTED_CONTEXT_FILE_NAME: &str = "messages_compacted.background.jsonl";
 const RUN_RECORDS_DIR_NAME: &str = "run_records";
 const SHARED_PROTOCOL_DIR_NAME: &str = "protocol";

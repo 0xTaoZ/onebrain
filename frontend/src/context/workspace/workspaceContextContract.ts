@@ -31,6 +31,8 @@ import type {
 } from './workspaceContextTypes';
 
 export interface WorkspaceContextProps {
+  requestDispatchAcknowledgement?: (sessionId: string, pending: import('@/lib/chatQueueApi').NeedsAckDetails, retry: () => Promise<void>) => void;
+  dispatchAcknowledgements?: Record<string, import('@/lib/chatQueueApi').DispatchAcknowledgement>;
   theme: Theme;
   themePreference: ThemePreference;
   setTheme: (theme: ThemePreference) => void;

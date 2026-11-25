@@ -319,3 +319,26 @@ pub enum ChatRunnerError {
     #[error("invalid workflow plan: {0}")]
     InvalidWorkflowPlan(String),
 }
+
+/// What a resumed member's CLI session already has, so the prompt can skip it.
+#[derive(Debug, Clone, Default)]
+struct ContinuationContext {
+    /// Hash of the role and team protocol sent in this prompt.
+    prefix_hash: String,
+    /// The CLI session already received this exact role and team protocol.
+    prefix_unchanged: bool,
+    /// A committed cursor exists for this CLI session, so `new_messages` is exact.
+    has_cursor: bool,
+    /// Messages since this member's last successful turn, oldest first.
+    new_messages: Vec<ContinuationMessage>,
+    /// New messages left out because of the size limit.
+    omitted_messages: usize,
+    /// Newest message in the session when the prompt was built.
+    latest_message_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContinuationMessage {
+    sender: String,
+    content: String,
+}

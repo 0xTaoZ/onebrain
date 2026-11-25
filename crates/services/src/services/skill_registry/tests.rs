@@ -616,3 +616,11 @@ Open the page and inspect it carefully.
         );
     }
 }
+
+#[test]
+fn context_economy_is_packaged_with_stateless_helper() {
+    let skill = find_builtin_skill_by_name("context-economy").expect("context skill catalog entry");
+    assert!(skill.description.contains("repeated"));
+    let files = get_embedded_skill_files("context-economy");
+    assert!(files.iter().any(|(path, _)| path.ends_with("context_io.py")));
+}

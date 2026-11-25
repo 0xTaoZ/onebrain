@@ -1,3 +1,4 @@
+import { runtimeModelLabel } from "@/lib/runtimeModelLabel";
 import assert from "node:assert/strict";
 import type { AcpConfigOptionSnapshot } from "../../../../shared/types";
 import type { AcpCapabilityProbe, BaseCodingAgent } from "@/types";
@@ -241,3 +242,7 @@ assert.deepEqual(
 );
 
 console.log("ACP capability gates: PASS");
+const deepseekTuple = '["deepseek-account","deepseek-flash"]';
+assert.equal(canonicalRuntimeModelId(deepseekTuple), deepseekTuple, 'native ACP tuple IDs must never normalize to an empty model');
+
+assert.equal(runtimeModelLabel(deepseekTuple), "DeepSeek Flash");

@@ -2177,3 +2177,37 @@ async fn delivery_recovers_claim_bind_and_finalize_boundaries() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn ten_concurrent_op_key_retries_return_one_message() -> Result<()> {
+    let fixture = ChatDeliveryFixture::new("op-key-concurrent").await?;
+    let mut attempts = Vec::new();
+    for _ in 0..10 {
+        let pool = fixture.pool().clone();
+        let session_id = fixture.session.id;
+        attempts.push(tokio::spawn(async move {
+            chat::create_message_idempotent(
+                &pool,
+                session_id,
+                ChatSenderType::User,
+                None,
+                "one logical request".to_string(),
+                Some(json!({"opKey": "retry-key-10"})),
+            )
+            .await
+        }));
+    }
+    let mut ids = HashSet::new();
+    let mut created = 0;
+    for attempt in attempts {
+        let response = attempt.await??;
+        created += usize::from(response.created);
+        ensure!(response.message.client_op_key.as_deref() == Some("retry-key-10"));
+        ids.insert(response.message.id);
+    }
+    ensure!(ids.len() == 1 && created == 1);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_messages WHERE session_id = ?1 AND client_op_key = 'retry-key-10'")
+        .bind(fixture.session.id).fetch_one(fixture.pool()).await?;
+    ensure!(count == 1);
+    Ok(())
+}
