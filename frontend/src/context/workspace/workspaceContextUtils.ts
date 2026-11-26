@@ -948,6 +948,6 @@ export const filterMessagesForSession = (
 export const readInitialThemePreference = (): ThemePreference => {
   try {
     const cached = localStorage.getItem('openteams-theme-preference');
-    return isThemePreference(cached) ? cached : 'system';
-  } catch { return 'system'; }
+    return isThemePreference(cached) ? cached : 'paper';
+  } catch { return 'paper'; }
 };

@@ -155,7 +155,7 @@ const agentBrandMarks: Record<BaseCodingAgent, AgentBrandMark> = {
   },
   OPEN_TEAMS_CLI: {
     title: "OneBrain CLI",
-    logoSrc: "/logos/openteams-logo.svg",
+    logoSrc: "/logos/onebrain-logo.png",
   },
   PI: {
     title: "Pi",

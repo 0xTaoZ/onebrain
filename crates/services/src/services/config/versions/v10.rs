@@ -492,7 +492,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             config_version: "v10".to_string(),
-            theme: ThemeMode::System,
+            theme: ThemeMode::Paper,
             executor_profile: ExecutorProfileId::new(BaseCodingAgent::OpenTeamsCli),
             disclaimer_acknowledged: false,
             onboarding_acknowledged: false,
@@ -529,10 +529,10 @@ mod tests {
     use super::Config;
 
     #[test]
-    fn new_config_follows_system_appearance_and_browser_language() {
+    fn new_config_uses_warm_white_theme_and_browser_language() {
         let config = serde_json::to_value(Config::default()).expect("serialize default config");
 
-        assert_eq!(config["theme"], "SYSTEM");
+        assert_eq!(config["theme"], "PAPER");
         assert_eq!(config["language"], "BROWSER");
     }
 
