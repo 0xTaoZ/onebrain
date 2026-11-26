@@ -41,11 +41,12 @@ const DEFAULT_AGENT_EMPTY_OUTPUT_FALLBACK: AgentEmptyOutputFallback = AgentEmpty
     terminal_reason: None,
 };
 
-const COMPLETED_AGENT_EMPTY_OUTPUT_FALLBACK: AgentEmptyOutputFallback = AgentEmptyOutputFallback {
-    message: AGENT_COMPLETED_NO_OUTPUT_MESSAGE,
-    i18n_key: Some(AGENT_COMPLETED_NO_OUTPUT_I18N_KEY),
-    terminal_reason: Some(AGENT_COMPLETED_NO_OUTPUT_TERMINAL_REASON),
-};
+const COMPLETED_AGENT_EMPTY_OUTPUT_FALLBACK: AgentEmptyOutputFallback =
+    AgentEmptyOutputFallback {
+        message: AGENT_COMPLETED_NO_OUTPUT_MESSAGE,
+        i18n_key: Some(AGENT_COMPLETED_NO_OUTPUT_I18N_KEY),
+        terminal_reason: Some(AGENT_COMPLETED_NO_OUTPUT_TERMINAL_REASON),
+    };
 
 const PERMISSION_REJECTED_EMPTY_OUTPUT_FALLBACK: AgentEmptyOutputFallback =
     AgentEmptyOutputFallback {
@@ -269,7 +270,9 @@ impl ChatRunner {
             (raw_output.to_string(), false)
         };
 
-        if used_empty_output_fallback && let Some(i18n_key) = empty_output_fallback.i18n_key {
+        if used_empty_output_fallback
+            && let Some(i18n_key) = empty_output_fallback.i18n_key
+        {
             meta["i18n"] = serde_json::json!({
                 "key": i18n_key,
                 "params": {}
@@ -357,7 +360,8 @@ impl ChatRunner {
         retry_meta["attempt"] = serde_json::json!(protocol_retry_attempt);
         retry_meta["current_run_id"] = serde_json::json!(run_id);
         retry_meta["next_attempt"] = serde_json::json!(protocol_retry_attempt + 1);
-        retry_meta["error_code"] = serde_json::to_value(code).unwrap_or(serde_json::Value::Null);
+        retry_meta["error_code"] =
+            serde_json::to_value(code).unwrap_or(serde_json::Value::Null);
         retry_meta["retry_scheduled"] = serde_json::json!(true);
         if let Some(detail) = detail {
             retry_meta["error_detail"] = serde_json::json!(detail);
@@ -1115,14 +1119,8 @@ impl ChatRunner {
 
             // Read before handoff: if the user spoke while this run was working,
             // post the handoff but do not wake its target on possibly stale work.
-            let to_user = target
-                .trim()
-                .trim_start_matches('@')
-                .eq_ignore_ascii_case("you")
-                || target
-                    .trim()
-                    .trim_start_matches('@')
-                    .eq_ignore_ascii_case("user");
+            let to_user = target.trim().trim_start_matches('@').eq_ignore_ascii_case("you")
+                || target.trim().trim_start_matches('@').eq_ignore_ascii_case("user");
             let hold_handoff = user_messages_during_run > 0 && !to_user;
             if hold_handoff {
                 meta["handoff_held"] = serde_json::json!({
@@ -1579,7 +1577,9 @@ impl ChatRunner {
         };
 
         use super::super::{
-            workflow_orchestrator::{WorkflowOrchestrator, workflow_plan_agent_id},
+            workflow_orchestrator::{
+                WorkflowOrchestrator, workflow_plan_agent_id,
+            },
             workflow_runtime::{
                 WorkflowCardAgent, WorkflowCardState, build_workflow_planning_agents,
                 prompt_builders::plan_generation::{
@@ -1666,11 +1666,13 @@ impl ChatRunner {
         .await?;
         let available_agents: Vec<WorkflowCardAgent> = session_agents
             .iter()
-            .map(|session_agent| WorkflowCardAgent {
-                session_agent_id: session_agent.id.to_string(),
-                workflow_agent_session_id: None,
-                agent_id: workflow_plan_agent_id(session_agent),
-                name: session_agent.member_name.clone(),
+            .map(|session_agent| {
+                WorkflowCardAgent {
+                    session_agent_id: session_agent.id.to_string(),
+                    workflow_agent_session_id: None,
+                    agent_id: workflow_plan_agent_id(session_agent),
+                    name: session_agent.member_name.clone(),
+                }
             })
             .collect();
 
