@@ -542,6 +542,22 @@ impl ChatRunner {
         }
     }
 
+    /// User messages posted after `since`, other than the one being answered.
+    /// A run that finished after the user spoke may be acting on stale
+    /// instructions, so its handoffs to other agents should not wake them.
+    pub(super) fn user_messages_since(
+        messages: &[ChatMessage],
+        since: chrono::DateTime<Utc>,
+        source_message_id: Option<Uuid>,
+    ) -> usize {
+        messages
+            .iter()
+            .filter(|message| message.sender_type == ChatSenderType::User)
+            .filter(|message| Some(message.id) != source_message_id)
+            .filter(|message| message.created_at > since)
+            .count()
+    }
+
     pub(super) fn should_route_protocol_send(workflow_route_mode: bool, target: &str) -> bool {
         !workflow_route_mode || target.trim().eq_ignore_ascii_case("you")
     }
@@ -1024,6 +1040,15 @@ impl ChatRunner {
                 .as_ref()
                 .is_some_and(|message| chat::is_workflow_chat_input_mode(&message.meta.0));
         let mut send_count = 0usize;
+        let user_messages_during_run = match ChatRun::find_by_id(&self.db.pool, run_id).await {
+            Ok(Some(run)) => ChatMessage::find_by_session_id(&self.db.pool, session_id, None)
+                .await
+                .map(|messages| {
+                    Self::user_messages_since(&messages, run.created_at, Some(source_message_id))
+                })
+                .unwrap_or(0),
+            _ => 0,
+        };
 
         // handle send type message for agents in the current session
         for (index, message) in protocol_messages.into_iter().enumerate() {
@@ -1092,7 +1117,28 @@ impl ChatRunner {
                 );
             }
 
-            let routed_message = if let Some(ref session) = session {
+            // Read before handoff: if the user spoke while this run was working,
+            // post the handoff but do not wake its target on possibly stale work.
+            let to_user = target.trim().trim_start_matches('@').eq_ignore_ascii_case("you")
+                || target.trim().trim_start_matches('@').eq_ignore_ascii_case("user");
+            let hold_handoff = user_messages_during_run > 0 && !to_user;
+            if hold_handoff {
+                meta["handoff_held"] = serde_json::json!({
+                    "reason": "user_message_during_run",
+                    "user_messages": user_messages_during_run,
+                });
+                tracing::info!(
+                    session_id = %session_id,
+                    run_id = %run_id,
+                    target,
+                    user_messages_during_run,
+                    "held agent handoff: the user posted while the run was working"
+                );
+            }
+
+            let routed_message = if let Some(ref session) = session
+                && !hold_handoff
+            {
                 self.persist_and_dispatch_message(
                     session,
                     ChatSenderType::Agent,

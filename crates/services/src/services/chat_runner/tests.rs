@@ -6430,3 +6430,34 @@ Ask the user before any destructive action, dependency change or network access.
     );
     assert!(after_prompt < before_with_read);
 }
+
+#[test]
+fn handoffs_are_held_only_when_the_user_spoke_during_the_run() {
+    let started = Utc::now();
+    let mut answered = test_message("@coder add login", json!({}));
+    answered.created_at = started - chrono::Duration::seconds(5);
+    let mut before = test_message("earlier note", json!({}));
+    before.created_at = started - chrono::Duration::seconds(60);
+    let mut agent_reply = test_message_with_sender(
+        ChatSenderType::Agent,
+        Some(Uuid::new_v4()),
+        "progress update",
+        json!({}),
+    );
+    agent_reply.created_at = started + chrono::Duration::seconds(10);
+    let quiet = vec![before.clone(), answered.clone(), agent_reply.clone()];
+    assert_eq!(
+        ChatRunner::user_messages_since(&quiet, started, Some(answered.id)),
+        0,
+        "agent messages and earlier user messages do not hold a handoff"
+    );
+
+    let mut changed_mind = test_message("stop, use magic links instead", json!({}));
+    changed_mind.created_at = started + chrono::Duration::seconds(20);
+    let mut busy = quiet;
+    busy.push(changed_mind);
+    assert_eq!(
+        ChatRunner::user_messages_since(&busy, started, Some(answered.id)),
+        1
+    );
+}
