@@ -10,6 +10,13 @@
 </p>
 
 <p align="center">
+  <img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-7c5cff?style=flat-square">
+  <img alt="macOS" src="https://img.shields.io/badge/platform-macOS-1d1d1f?style=flat-square&logo=apple">
+  <img alt="Rust and Tauri" src="https://img.shields.io/badge/built%20with-Rust%20%C2%B7%20Tauri-b7410e?style=flat-square&logo=rust">
+  <img alt="Tokens saved" src="https://img.shields.io/badge/tokens%20saved-31%E2%80%9381%25-2b7d4a?style=flat-square">
+</p>
+
+<p align="center">
   English · <a href="README.zh-CN.md">简体中文</a> · <a href="README.de.md">Deutsch</a>
 </p>
 
