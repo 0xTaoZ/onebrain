@@ -122,3 +122,21 @@ body[data-mode="paper"] .paper-rail-person[data-status="i"] .agent-character-ima
 .ui-heatmap-cell[data-level="4"] { background: #2b7d4a; }
 .ui-heatmap figcaption { margin-top: 6px; font-size: 11px; color: var(--ink-tertiary); }
 .ui-heatmap-loading { height: 70px; }
+
+/* One-click sheet for adding installed agents to the current group. */
+.ui-sheet-backdrop { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; background: #0000002e; }
+.ui-sheet { width: min(440px, calc(100vw - 32px)); max-height: 80vh; overflow: auto; padding: 20px; border-radius: 16px; background: var(--surface-1); box-shadow: 0 12px 40px #0000002a; }
+.ui-sheet-head { display: flex; align-items: center; justify-content: space-between; font-size: 17px; }
+.ui-sheet-close { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; color: var(--ink-muted); }
+.ui-sheet-close:hover { background: var(--surface-2); }
+.ui-sheet-hint { margin: 8px 0 16px; font-size: 13px; line-height: 1.5; color: var(--ink-muted); }
+.ui-sheet-list { display: flex; flex-direction: column; gap: 4px; }
+.ui-sheet-list li { display: flex; align-items: center; gap: 12px; padding: 8px; border-radius: 12px; }
+.ui-sheet-list li:hover { background: var(--surface-2); }
+.ui-sheet-list .paper-person-avatar { width: 40px; height: 40px; }
+.ui-sheet-name { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.ui-sheet-name small { font-size: 12px; color: var(--ink-tertiary); }
+.ui-sheet-add, .ui-sheet-primary { padding: 6px 14px; border-radius: 999px; background: var(--primary); color: var(--on-primary); font-size: 13px; font-weight: 600; }
+.ui-sheet-add:disabled { opacity: .4; }
+.ui-sheet-primary { width: 100%; padding: 10px; }
+.ui-sheet-done { font-size: 12px; color: var(--ink-tertiary); }

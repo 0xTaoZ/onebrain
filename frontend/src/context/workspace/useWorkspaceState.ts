@@ -146,8 +146,10 @@ export const useWorkspaceState = () => {
   const [themePreference, setThemePreferenceState] =
     useState<ThemePreference>(readInitialThemePreference);
   const [systemTheme, setSystemTheme] = useState<Theme>(resolveSystemTheme);
-  const theme: Theme =
-    themePreference === 'system' ? systemTheme : themePreference;
+  // OneBrain ships one look: the warm white theme. Older stored choices are ignored.
+  void themePreference;
+  void systemTheme;
+  const theme = 'paper' as Theme;
 
   const [locale, setLocaleState] = useState<Locale>(resolveBrowserLocale);
   const [chatMessageFontSize, setChatMessageFontSizeState] =

@@ -760,7 +760,7 @@ export const SettingsWorkspace: React.FC = () => {
                 {translate('settings.appearance.group.appearance', 'Appearance')}
               </h4>
               <div className="settings-list-group rounded-lg border">
-                <div className="settings-theme-selector-row border-b border-[var(--hairline)] px-4 py-3.5">
+                <div className="settings-theme-selector-row hidden border-b border-[var(--hairline)] px-4 py-3.5">
                   <div
                     className="grid grid-cols-2 gap-5 sm:grid-cols-4"
                     aria-label={t('settings.appearance.theme')}

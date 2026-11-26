@@ -3,6 +3,7 @@ import { ArrowLeft, FolderKanban, MessageCircle, Plus, Search, Settings, Users, 
 import { useWorkspace } from '@/context/WorkspaceContext';
 import { AgentCharacterAvatar } from './AgentCharacterAvatar';
 import { MemberActivityHeatmap } from './MemberActivityHeatmap';
+import { AddAgentSheet } from './AddAgentSheet';
 import { copyPlainText } from '@/lib/clipboard';
 import { projectDisplayName } from '@/lib/projectDisplay';
 import type { Member, SidebarNavigationTarget } from '@/types';
@@ -25,6 +26,7 @@ export function PaperChatSidebar({ activePage, workspaceNavigation, onSessionSel
   const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null);
   const [showWorkspace, setShowWorkspace] = useState(false);
   const [query, setQuery] = useState('');
+  const [addOpen, setAddOpen] = useState(false);
   const visibleMembers = membersAsync.loading || membersAsync.error ? [] : members;
   const selectedMember = visibleMembers.find(member => member.id === selectedMemberId);
   const navigationVisible = showWorkspace || activePage !== 'workspace';
@@ -35,6 +37,7 @@ export function PaperChatSidebar({ activePage, workspaceNavigation, onSessionSel
 
   return (
     <div className="paper-navigation">
+      {addOpen && <AddAgentSheet onClose={() => setAddOpen(false)} onCreateGroup={onCreateSession} />}
       <nav className="paper-agent-rail" aria-label={zh ? '成员与工作台' : 'Members and workspace'}>
         <button type="button" className="paper-rail-person" aria-pressed={!navigationVisible && !selectedMember} onClick={showChats}>
           <span className="paper-person-avatar paper-self-avatar">{zh ? '我' : 'Me'}</span>
@@ -51,7 +54,7 @@ export function PaperChatSidebar({ activePage, workspaceNavigation, onSessionSel
           ))}
           {membersAsync.loading && <span className="paper-rail-hint">{zh ? '加载中' : 'Loading'}</span>}
         </div>
-        <button type="button" className="paper-rail-person paper-connect" onClick={() => onNavigate('team')}>
+        <button type="button" className="paper-rail-person paper-connect" onClick={() => setAddOpen(true)}>
           <span className="paper-connect-avatar"><Plus size={24} /></span><span>{zh ? '接入成员' : 'Add agent'}</span>
         </button>
         <div className="paper-rail-footer">
