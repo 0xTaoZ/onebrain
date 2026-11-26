@@ -71,7 +71,7 @@ export function PaperChatSidebar({ activePage, workspaceNavigation, onSessionSel
         </> : <>
           <div className="paper-profile">
             {selectedMember ? <PaperMemberAvatar member={selectedMember} /> : <span className="paper-person-avatar paper-self-avatar">{zh ? '我' : 'Me'}</span>}
-            <div><strong>{selectedMember?.name.replace(/^@/, '') ?? 'OpenTeams'}</strong><span>{selectedMember ? (zh ? '当前群成员资料' : 'Current group member') : (zh ? '你的协作空间' : 'Your team space')}</span></div>
+            <div><strong>{selectedMember?.name.replace(/^@/, '') ?? 'OneBrain'}</strong><span>{selectedMember ? (zh ? '当前群成员资料' : 'Current group member') : (zh ? '你的协作空间' : 'Your team space')}</span></div>
             <button type="button" className="paper-icon-button" aria-label={zh ? '管理成员' : 'Manage members'} onClick={() => onNavigate('team')}><Settings size={19} /></button>
           </div>
           {projects.length > 1 && <label className="paper-project-picker"><FolderKanban size={15} /><select aria-label={zh ? '选择项目' : 'Choose project'} value={selectedProjectId} onChange={event => { setSelectedMemberId(null); setSelectedProjectId(event.target.value); }}>
