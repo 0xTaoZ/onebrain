@@ -480,6 +480,17 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|app, event| match event {
+            // The close button keeps the app running in the Dock; Cmd+Q quits.
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } => {
+                api.prevent_close();
+                if let Some(window) = app.get_window(&label) {
+                    let _ = window.minimize();
+                }
+            }
             tauri::RunEvent::Exit => {
                 if let Some(state) = app.try_state::<BackendState>() {
                     state.stop();

@@ -713,9 +713,9 @@ function WorkspaceLayout() {
   const overlayForOnboardingState = (
     nextState: OnboardingState,
   ): OnboardingOverlay => {
-    if (!nextState.onboarding_completed_at) {
-      return { mode: "onboarding", state: nextState };
-    }
+    // OneBrain opens straight into the chat; the inherited multi-step
+    // onboarding is not shown. A starter group is created on first launch.
+    void nextState;
     return null;
   };
 
