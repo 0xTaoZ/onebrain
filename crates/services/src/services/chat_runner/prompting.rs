@@ -1051,8 +1051,19 @@ impl ChatRunner {
             markdown.push('\n');
         }
 
+        if let Some(handoff) = continuation.handoff.as_deref() {
+            markdown.push_str("## Team Handoffs\n");
+            markdown.push_str(handoff);
+            markdown.push('\n');
+        }
         markdown.push_str("## History\n");
-        markdown.push_str("Read history only when the task clearly depends on continuation, refinement, or prior context.  \n");
+        if continuation.handoff.is_some() {
+            markdown.push_str(
+                "Start from the team handoffs above. Read the history files only if they are not enough for the task.  \n",
+            );
+        } else {
+            markdown.push_str("Read history only when the task clearly depends on continuation, refinement, or prior context.  \n");
+        }
         markdown.push_str("Available files:\n");
         markdown.push_str("- `");
         markdown.push_str(&messages_rel.to_string_lossy());
@@ -2368,6 +2379,7 @@ impl ChatRunner {
         agent: &ChatAgent,
         team_protocol: Option<&str>,
         source_message: &ChatMessage,
+        members: &[(Uuid, String)],
     ) -> ContinuationContext {
         let mut context = ContinuationContext {
             prefix_hash: Self::prompt_prefix_hash(agent, team_protocol),
@@ -2387,25 +2399,37 @@ impl ChatRunner {
 
         let resumed = session_agent.state != ChatSessionAgentState::Dead
             && session_agent.agent_session_id.is_some();
-        if !resumed {
-            return context;
-        }
-        let cursor = match ChatMemberContextCursor::find(&self.db.pool, session_agent.id).await {
-            Ok(Some(cursor)) if cursor.agent_session_id == session_agent.agent_session_id => cursor,
-            Ok(_) => return context,
-            Err(err) => {
-                tracing::warn!(error = %err, "continuation context: failed to load cursor");
-                return context;
+        let cursor = if resumed {
+            match ChatMemberContextCursor::find(&self.db.pool, session_agent.id).await {
+                Ok(Some(cursor)) if cursor.agent_session_id == session_agent.agent_session_id => {
+                    Some(cursor)
+                }
+                Ok(_) => None,
+                Err(err) => {
+                    tracing::warn!(error = %err, "continuation context: failed to load cursor");
+                    None
+                }
             }
+        } else {
+            None
         };
-        context.prefix_unchanged =
-            cursor.prefix_hash.as_deref() == Some(context.prefix_hash.as_str());
-        if let Some((new_messages, omitted)) = cursor.last_message_id.and_then(|last_seen| {
-            Self::select_continuation_messages(&messages, last_seen, source_message.id)
-        }) {
-            context.has_cursor = true;
-            context.new_messages = new_messages;
-            context.omitted_messages = omitted;
+        if let Some(cursor) = cursor {
+            context.prefix_unchanged =
+                cursor.prefix_hash.as_deref() == Some(context.prefix_hash.as_str());
+            if let Some((new_messages, omitted)) = cursor.last_message_id.and_then(|last_seen| {
+                Self::select_continuation_messages(&messages, last_seen, source_message.id)
+            }) {
+                context.has_cursor = true;
+                context.new_messages = new_messages;
+                context.omitted_messages = omitted;
+            }
+        }
+        // A member without its own view of this session starts from the team
+        // handoffs instead of reading the whole history file.
+        if !context.has_cursor && messages.len() > 1 {
+            context.handoff = self
+                .build_handoff_brief(&messages, source_message, members, session_agent.id)
+                .await;
         }
         context
     }

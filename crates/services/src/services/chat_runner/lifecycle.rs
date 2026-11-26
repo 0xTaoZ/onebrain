@@ -2538,6 +2538,10 @@ impl ChatRunner {
                     &agent,
                     team_protocol.as_deref(),
                     source_message,
+                    &session_agents
+                        .iter()
+                        .map(|member| (member.session_agent_id, member.name.clone()))
+                        .collect::<Vec<_>>(),
                 )
                 .await;
             let prompt = self.build_prompt(
