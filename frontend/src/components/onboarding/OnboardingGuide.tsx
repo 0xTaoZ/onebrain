@@ -267,7 +267,7 @@ const fallbackRunnerOptions: DropdownSelectOption[] = [
   { id: 'codex', label: 'Codex' },
   { id: 'claude_code', label: 'Claude Code' },
   { id: 'gemini', label: 'Gemini CLI' },
-  { id: 'openteams_cli', label: 'OpenTeams CLI' },
+  { id: 'openteams_cli', label: 'OneBrain CLI' },
   { id: 'qwen_code', label: 'Qwen Code' },
   { id: 'opencode', label: 'OpenCode' },
 ];

@@ -41,7 +41,7 @@ export function LanAccessSettings() {
   return <section className="space-y-2.5" aria-labelledby="lan-settings-title">
     <h4 id="lan-settings-title" className="settings-section-header">{zh ? '手机与 iPad 内网访问' : 'Phone and iPad access over LAN'}</h4>
     <div className="settings-list-group rounded-lg border p-4 space-y-3">
-      <p className="settings-row-description">{zh ? '在同一内网通过浏览器控制这台电脑上的 OpenTeams。默认关闭，使用 HTTPS 和配对码。' : 'Control OpenTeams on this computer from a browser on the same LAN. Off by default; uses HTTPS and a pairing code.'}</p>
+      <p className="settings-row-description">{zh ? '在同一内网通过浏览器控制这台电脑上的 OneBrain。默认关闭，使用 HTTPS 和配对码。' : 'Control OneBrain on this computer from a browser on the same LAN. Off by default; uses HTTPS and a pairing code.'}</p>
       {!status?.enabled ? <div className="flex flex-wrap items-center gap-2">
         <input aria-label={zh ? '这台电脑的内网 IPv4 地址' : 'This computer’s private IPv4 address'} value={address} placeholder="192.168.1.10" onChange={event => setAddress(event.target.value)} className="rounded-md border border-[var(--hairline)] bg-[var(--surface-1)] px-3 py-2 text-sm" />
         <button type="button" disabled={!status || !address.trim() || busy} onClick={() => void act('enable')} className="rounded-md bg-[var(--primary)] px-3 py-2 text-sm text-white disabled:opacity-50">{zh ? '开启内网访问' : 'Enable LAN access'}</button>

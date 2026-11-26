@@ -69,7 +69,7 @@ export const agentBrandMarks: Record<BaseCodingAgent, AgentBrandMark> = {
     logoClassName: "h-8 w-8",
   },
   OPEN_TEAMS_CLI: {
-    title: "OpenTeams CLI",
+    title: "OneBrain CLI",
     logoSrc: "/logos/openteams-logo.svg",
   },
   PI: {

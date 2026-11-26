@@ -24,7 +24,7 @@ use utils::{response::ApiResponse, version::APP_VERSION};
 use crate::{DeploymentImpl, npx_browser_lifecycle};
 
 const GITHUB_LATEST_RELEASE_URL: &str =
-    "https://api.github.com/repos/openteams-lab/openteams/releases/latest";
+    "https://api.github.com/repos/0xTaoZ/onebrain/releases/latest";
 const NPX_UPDATE_PACKAGE_SPEC: &str = "@openteams-lab/openteams-web@latest";
 const NPX_UPDATE_PACKAGE_ENV: &str = "OPENTEAMS_NPX_UPDATE_PACKAGE";
 const NPX_UPDATE_STATE_FILE: &str = "prepared-package.json";

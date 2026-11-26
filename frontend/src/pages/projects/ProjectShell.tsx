@@ -46,7 +46,7 @@ export function ProjectShell() {
             Select a project
           </h1>
           <p className="mt-1 text-xs leading-relaxed text-[var(--ink-subtle)]">
-            GitHub integration is scoped to one OpenTeams project at a time.
+            GitHub integration is scoped to one OneBrain project at a time.
           </p>
         </div>
       </div>
