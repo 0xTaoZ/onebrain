@@ -335,6 +335,8 @@ struct ContinuationContext {
     omitted_messages: usize,
     /// Newest message in the session when the prompt was built.
     latest_message_id: Option<Uuid>,
+    /// Team handoffs for a member new to this session, in place of the history read.
+    handoff: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -6064,6 +6064,7 @@ fn resumed_prompt_skips_unchanged_role_and_lists_new_messages() {
         }],
         omitted_messages: 0,
         latest_message_id: Some(message.id),
+        handoff: None,
     };
     let prompt = ChatRunner::build_exact_markdown_prompt(
         &agent,
@@ -6195,7 +6196,10 @@ async fn member_activity_counts_runs_per_day_across_sessions_of_the_same_agent()
         .await
         .unwrap();
     assert_eq!(days.len(), 1);
-    assert_eq!(days[0].runs, 3, "both sessions of the same agent count; other agents do not");
+    assert_eq!(
+        days[0].runs, 3,
+        "both sessions of the same agent count; other agents do not"
+    );
 }
 
 /// Reproducible prompt-size benchmark for the member read cursor.
@@ -6210,7 +6214,10 @@ async fn member_activity_counts_runs_per_day_across_sessions_of_the_same_agent()
 #[test]
 #[ignore]
 fn context_token_benchmark() {
-    let turns: usize = std::env::var("BENCH_TURNS").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+    let turns: usize = std::env::var("BENCH_TURNS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
     let protocol = "Work in small verified steps. Before claiming a task is done, run the \
 project's tests and report the exact command and exit code. Keep replies short: what \
 changed, what was verified, what is left. Never edit files outside the assigned paths. \
@@ -6218,9 +6225,18 @@ When a review finds a problem, the author fixes it and the same reviewer checks 
 Ask the user before any destructive action, dependency change or network access. "
         .repeat(4);
     let roles = [
-        ("coder", "You implement features in the Rust backend and React frontend. "),
-        ("reviewer", "You review diffs for correctness, security and missing tests. "),
-        ("tester", "You write and run tests, reproduce bugs and report results. "),
+        (
+            "coder",
+            "You implement features in the Rust backend and React frontend. ",
+        ),
+        (
+            "reviewer",
+            "You review diffs for correctness, security and missing tests. ",
+        ),
+        (
+            "tester",
+            "You write and run tests, reproduce bugs and report results. ",
+        ),
     ];
     let agents = roles
         .iter()
@@ -6241,20 +6257,44 @@ Ask the user before any destructive action, dependency change or network access.
     ];
     let mut seed: u64 = 42;
     let mut next = |bound: usize| {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((seed >> 33) as usize) % bound
     };
     let tokens = ChatRunner::estimate_tokens_with_tiktoken;
 
     let mut history: Vec<ChatMessage> = Vec::new();
     let mut last_seen: Vec<Option<Uuid>> = vec![None; agents.len()];
+    let mut work_items: Vec<db::models::chat_work_item::ChatWorkItem> = Vec::new();
+    let members = agents
+        .iter()
+        .map(|agent| (agent.id, agent.name.clone()))
+        .collect::<Vec<_>>();
+    let brief_for = |history: &[ChatMessage],
+                     current: &ChatMessage,
+                     items: &[db::models::chat_work_item::ChatWorkItem],
+                     reader: Uuid| {
+        let brief = super::handoff::HandoffBrief::from_session(
+            history,
+            current.id,
+            items,
+            &[],
+            &members,
+            reader,
+        );
+        (!brief.is_empty()).then(|| brief.render())
+    };
     let (mut before_prompt, mut before_with_read, mut after_prompt) = (0u64, 0u64, 0u64);
     let mut last_turn = (0u32, 0u32, 0u32);
 
     for _ in 0..turns {
         let target = next(agents.len());
         let agent = &agents[target];
-        let body = (0..2 + next(4)).map(|_| sentences[next(sentences.len())]).collect::<Vec<_>>().join(" ");
+        let body = (0..2 + next(4))
+            .map(|_| sentences[next(sentences.len())])
+            .collect::<Vec<_>>()
+            .join(" ");
         let request = test_message(&format!("@{} {body}", agent.name), json!({}));
         history.push(request.clone());
 
@@ -6293,13 +6333,16 @@ Ask the user before any destructive action, dependency change or network access.
                     new_messages,
                     omitted_messages,
                     latest_message_id: Some(request.id),
+                    handoff: None,
                 }
             }
-            // First run of this member: full prompt plus a history read, same as before.
-            None => ContinuationContext::default(),
+            // First run of this member: full prompt plus the team handoffs instead of the history read.
+            None => ContinuationContext {
+                handoff: brief_for(&history, &request, &work_items, agent.id),
+                ..ContinuationContext::default()
+            },
         };
-        let after = tokens(&prompt(&continuation))
-            + if last_seen[target].is_none() { read_cost } else { 0 };
+        let after = tokens(&prompt(&continuation));
 
         before_prompt += u64::from(before);
         before_with_read += u64::from(before + read_cost);
@@ -6309,19 +6352,81 @@ Ask the user before any destructive action, dependency change or network access.
         let reply = test_message_with_sender(
             ChatSenderType::Agent,
             Some(agent.id),
-            &format!("{} {}", sentences[next(sentences.len())], sentences[next(sentences.len())]),
+            &format!(
+                "{} {}",
+                sentences[next(sentences.len())],
+                sentences[next(sentences.len())]
+            ),
             json!({ "sender": { "label": agent.name, "name": agent.name } }),
         );
         history.push(reply.clone());
         last_seen[target] = Some(reply.id);
+        work_items.push(db::models::chat_work_item::ChatWorkItem {
+            id: Uuid::new_v4(),
+            session_id: Uuid::nil(),
+            run_id: Uuid::new_v4(),
+            session_agent_id: agent.id,
+            agent_id: agent.id,
+            item_type: db::models::chat_work_item::ChatWorkItemType::Conclusion,
+            content: reply.content.clone(),
+            created_at: Utc::now(),
+        });
     }
+
+    // A member that has not seen this session joins now, such as a second reviewer.
+    let newcomer = test_agent(
+        "auditor",
+        &"You audit security-sensitive changes. ".repeat(8),
+    );
+    let request = test_message(
+        "@auditor review the login change for security issues",
+        json!({}),
+    );
+    history.push(request.clone());
+    let join_prompt = |continuation: &ContinuationContext| {
+        tokens(&ChatRunner::build_exact_markdown_prompt(
+            &newcomer,
+            &request,
+            Path::new("/workspace/.openteams/context/bench"),
+            Path::new("/workspace"),
+            &[],
+            None,
+            None,
+            &[],
+            language,
+            Some(protocol.as_str()),
+            false,
+            continuation,
+        ))
+    };
+    let full_history = history[..history.len() - 1]
+        .iter()
+        .map(|message| json!({ "sender": ChatRunner::resolve_message_sender_identity(message).label, "content": message.content }).to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let join_before = join_prompt(&ContinuationContext::default()) + tokens(&full_history);
+    let join_after = join_prompt(&ContinuationContext {
+        handoff: brief_for(&history, &request, &work_items, newcomer.id),
+        ..ContinuationContext::default()
+    });
 
     let saving = |before: u64| 100.0 * (before as f64 - after_prompt as f64) / before as f64;
     println!("\n| {turns} turns, 3 members (cl100k tokens) | total input | last turn |");
     println!("| --- | ---: | ---: |");
-    println!("| Before: full prompt, no history read | {before_prompt} | {} |", last_turn.0);
-    println!("| Before: full prompt + history file read | {before_with_read} | {} |", last_turn.1);
+    println!(
+        "| Before: full prompt, no history read | {before_prompt} | {} |",
+        last_turn.0
+    );
+    println!(
+        "| Before: full prompt + history file read | {before_with_read} | {} |",
+        last_turn.1
+    );
     println!("| After: read cursor | {after_prompt} | {} |", last_turn.2);
-    println!("\nSaving vs prompt only: {:.1}%  |  vs prompt + history read: {:.1}%", saving(before_prompt), saving(before_with_read));
+    println!("| New member joins after {turns} turns | {join_before} | {join_after} |");
+    println!(
+        "\nSaving vs prompt only: {:.1}%  |  vs prompt + history read: {:.1}%",
+        saving(before_prompt),
+        saving(before_with_read)
+    );
     assert!(after_prompt < before_with_read);
 }
