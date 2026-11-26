@@ -65,7 +65,7 @@ import {
 } from "@/lib/sourceControlEvents";
 import { markPendingIssueStatusSync } from "@/lib/pendingIssueStatusSync";
 import { notifyBuildStatsUsageUpdated } from "@/lib/buildStatsEvents";
-import { requestTeamMemberInviteNavigation } from "@/lib/teamNavigation";
+import { openGroupMemberPicker } from "@/lib/teamNavigation";
 import { openInSystemFileManager } from "@/lib/systemFileManager";
 import {
   flattenWorkspaceChanges,
@@ -1915,11 +1915,7 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
                 )}
                 <button
                   type="button"
-                  onClick={() =>
-                    requestTeamMemberInviteNavigation({
-                      projectId: selectedProjectId ?? undefined,
-                    })
-                  }
+                  onClick={openGroupMemberPicker}
                   className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[var(--hairline)] bg-[var(--surface-1)] text-[var(--ink-subtle)] transition hover:border-[var(--hairline-strong)] hover:bg-[var(--surface-3)] hover:text-[var(--ink)]"
                   title={t("inviteMember")}
                   data-tooltip-nowrap

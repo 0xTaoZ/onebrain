@@ -1,6 +1,7 @@
+import { AgentProfileSheet } from './AgentProfileSheet';
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
-import { agentRuntimeApi, chatAgentsApi, chatSessionsApi, sessionAgentsApi } from '@/lib/api';
+import { agentRuntimeApi, chatAgentsApi, sessionAgentsApi } from '@/lib/api';
 import { useWorkspace } from '@/context/WorkspaceContext';
 import { AgentCharacterAvatar } from './AgentCharacterAvatar';
 
@@ -29,29 +30,6 @@ function handleFor(runner: string): string {
 type Runtime = { runner: string; ready: boolean };
 
 /**
- * Create a group with every coding agent that can run on this Mac, so a new
- * user starts in a working chat instead of an empty screen. No project needed.
- */
-export async function createStarterGroup(title: string): Promise<string> {
-  const session = await chatSessionsApi.create({ title, workspace_path: null });
-  const runners = (await agentRuntimeApi.list()).runners
-    .filter(status => status.installed && status.executable)
-    .map(status => status.runner_type);
-  const agents = await chatAgentsApi.list();
-  for (const runner of runners) {
-    const agent = agents.find(candidate => candidate.runner_type === runner) ?? await chatAgentsApi.create({
-      name: handleFor(runner),
-      runner_type: runner,
-      system_prompt: null,
-      tools_enabled: null,
-      model_name: null,
-    });
-    await sessionAgentsApi.add(session.id, { agent_id: agent.id, workspace_path: null, allowed_skill_ids: null });
-  }
-  return session.id;
-}
-
-/**
  * One-click way to bring installed coding agents into the current group.
  * Lists the agent CLIs found on this Mac; adding one creates the member and joins it.
  */
@@ -59,6 +37,7 @@ export function AddAgentSheet({ onClose, onCreateGroup }: { onClose: () => void;
   const { activeSessionId, members, refreshMembers, showToast, locale } = useWorkspace();
   const zh = locale === 'zh';
   const [runtimes, setRuntimes] = useState<Runtime[] | null>(null);
+  const [editingMemberId, setEditingMemberId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
@@ -69,13 +48,11 @@ export function AddAgentSheet({ onClose, onCreateGroup }: { onClose: () => void;
       .catch(() => setRuntimes([]));
   }, []);
 
-  const inGroup = (runner: string) => members.some(member => member.runner === runner);
-
   const add = async (runner: string) => {
     if (!activeSessionId) return;
     setBusy(runner);
     try {
-      const existing = (await chatAgentsApi.list()).find(agent => agent.runner_type === runner);
+      const existing = (await chatAgentsApi.list()).find(agent => agent.runner_type === runner && agent.owner_project_id === null);
       const agent = existing ?? await chatAgentsApi.create({
         name: handleFor(runner),
         runner_type: runner,
@@ -83,7 +60,8 @@ export function AddAgentSheet({ onClose, onCreateGroup }: { onClose: () => void;
         tools_enabled: null,
         model_name: null,
       });
-      await sessionAgentsApi.add(activeSessionId, { agent_id: agent.id, workspace_path: null, allowed_skill_ids: null });
+      const member = await sessionAgentsApi.add(activeSessionId, { agent_id: agent.id, workspace_path: null, allowed_skill_ids: null });
+      setEditingMemberId(member.id);
       await refreshMembers();
       showToast(zh ? `已加入：@${agent.name}` : `Added @${agent.name}`);
     } catch (error) {
@@ -92,6 +70,8 @@ export function AddAgentSheet({ onClose, onCreateGroup }: { onClose: () => void;
       setBusy(null);
     }
   };
+
+  if (editingMemberId) return <AgentProfileSheet memberId={editingMemberId} onClose={() => setEditingMemberId(null)} />;
 
   return (
     <div className="ui-sheet-backdrop" role="dialog" aria-modal="true" aria-label={zh ? '加入成员' : 'Add agents'} onClick={onClose}>
@@ -119,22 +99,25 @@ export function AddAgentSheet({ onClose, onCreateGroup }: { onClose: () => void;
           </p>
         ) : (
           <ul className="ui-sheet-list">
-            {runtimes.map(({ runner, ready }) => (
-              <li key={runner}>
-                <span className="paper-person-avatar"><AgentCharacterAvatar identity={runner}>{runtimeDisplayName(runner)[0]}</AgentCharacterAvatar></span>
-                <span className="ui-sheet-name">
-                  <strong>{runtimeDisplayName(runner)}</strong>
-                  <small>{ready ? `@${handleFor(runner)}` : (zh ? '已安装，但还不能运行' : 'Installed but not runnable yet')}</small>
-                </span>
-                {inGroup(runner) ? (
-                  <span className="ui-sheet-done">{zh ? '已在群里' : 'In group'}</span>
-                ) : (
-                  <button type="button" className="ui-sheet-add" disabled={!ready || busy !== null} onClick={() => void add(runner)}>
-                    {busy === runner ? '…' : (zh ? '加入' : 'Add')}
-                  </button>
-                )}
-              </li>
-            ))}
+            {runtimes.map(({ runner, ready }) => {
+              const member = members.find(item => item.runner === runner);
+              return (
+                <li key={runner}>
+                  <span className="paper-person-avatar"><AgentCharacterAvatar identity={runner}>{runtimeDisplayName(runner)[0]}</AgentCharacterAvatar></span>
+                  <span className="ui-sheet-name">
+                    <strong>{runtimeDisplayName(runner)}</strong>
+                    <small>{ready ? `@${handleFor(runner)}` : (zh ? '已安装，但还不能运行' : 'Installed but not runnable yet')}</small>
+                  </span>
+                  {member ? (
+                    <button type="button" className="ui-sheet-done" onClick={() => setEditingMemberId(member.id)}>{zh ? '设置' : 'Configure'}</button>
+                  ) : (
+                    <button type="button" className="ui-sheet-add" disabled={!ready || busy !== null} onClick={() => void add(runner)}>
+                      {busy === runner ? '…' : (zh ? '加入' : 'Add')}
+                    </button>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>

@@ -700,8 +700,11 @@ pub async fn get_member_activity(
     State(deployment): State<DeploymentImpl>,
     Path(session_agent_id): Path<Uuid>,
 ) -> Result<ResponseJson<ApiResponse<Vec<DailyRunCount>>>, ApiError> {
-    let days =
-        DailyRunCount::for_session_agent(&deployment.db().pool, session_agent_id, MEMBER_ACTIVITY_DAYS)
-            .await?;
+    let days = DailyRunCount::for_session_agent(
+        &deployment.db().pool,
+        session_agent_id,
+        MEMBER_ACTIVITY_DAYS,
+    )
+    .await?;
     Ok(ResponseJson(ApiResponse::success(days)))
 }

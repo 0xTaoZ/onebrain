@@ -370,15 +370,10 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const refreshSessions = useCallback(async (): Promise<void> => {
     const projectId = selectedProjectIdRef.current;
-    if (!projectId) {
-      setSessionsAsync(succeed([]));
-      clearSessionScopedState();
-      return;
-    }
-
     setSessionsAsync(beginLoad);
     try {
-      const backend = await chatSessionsApi.list('active', projectId);
+      const rows = await chatSessionsApi.list('active', projectId || undefined);
+      const backend = projectId ? rows : rows.filter((session) => !session.project_id);
       if (selectedProjectIdRef.current !== projectId) return;
       const ignoredSessionAgentIds = new Set(
         optimisticallyStoppedSessionAgentIdsRef.current,
@@ -461,7 +456,6 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
       setSessionsAsync((prev) => fail(prev, err));
     }
   }, [
-    clearSessionScopedState,
     syncActiveSessionSelection,
     syncSessionAgentActivityIndicator,
     syncSessionWorkflowErrorIndicator,
@@ -470,14 +464,10 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const refreshArchivedSessions = useCallback(async (): Promise<void> => {
     const projectId = selectedProjectIdRef.current;
-    if (!projectId) {
-      setArchivedSessionsAsync(succeed([]));
-      return;
-    }
-
     setArchivedSessionsAsync(beginLoad);
     try {
-      const backend = await chatSessionsApi.list('archived', projectId);
+      const rows = await chatSessionsApi.list('archived', projectId || undefined);
+      const backend = projectId ? rows : rows.filter((session) => !session.project_id);
       if (selectedProjectIdRef.current !== projectId) return;
       setArchivedSessionsAsync(succeed(mapSessions(backend, null)));
     } catch (err) {

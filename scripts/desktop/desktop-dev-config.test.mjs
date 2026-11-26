@@ -54,17 +54,10 @@ test('tauri build syncs desktop icons from the shared frontend logo', () => {
   );
 });
 
-test('linux normalizes icon-square from Tauri output without changing macOS or Windows sources', () => {
-  const syncIconsScript = readFileSync(
-    join(root, 'scripts', 'desktop', 'sync-icons.js'),
-    'utf8'
-  );
-
-  assert.match(
-    syncIconsScript,
-    /if \(process\.platform === 'linux'\) \{\s*return path\.join\(generatedDir, 'icon\.png'\);\s*\}\s*\n\s*return sourcePng;/,
-    'only Linux should use the Tauri-normalized RGBA icon for icon-square.png'
-  );
+test('desktop icon sync uses the official PNG and the generated RGBA bundle icon', () => {
+  const script = readFileSync(join(root, 'scripts', 'desktop', 'sync-icons.js'), 'utf8');
+  assert.match(script, /frontend\/public\/logos\/onebrain-logo\.png/);
+  assert.match(script, /copyFileSync\(path\.join\(generated, 'icon\.png'\), path\.join\(icons, 'icon-square\.png'\)\)/);
 });
 
 test('beforeDevCommand does not prepare the sidecar during tauri dev startup', () => {

@@ -1,3 +1,9 @@
+export const GROUP_MEMBER_PICKER_EVENT = "onebrain:open-group-member-picker";
+
+export function openGroupMemberPicker(): void {
+  window.dispatchEvent(new Event(GROUP_MEMBER_PICKER_EVENT));
+}
+
 export type TeamMemberInviteNavigationTarget = {
   projectId?: string;
 };

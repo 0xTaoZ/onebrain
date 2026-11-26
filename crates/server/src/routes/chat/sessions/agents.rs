@@ -106,7 +106,10 @@ pub async fn create_session_agent(
             workspace_path,
             allowed_skill_ids,
             project_member_id: None,
-            execution_config: MemberExecutionConfig::default(),
+            execution_config: MemberExecutionConfig {
+                mcp: Some(Default::default()),
+                ..Default::default()
+            },
         },
         Uuid::new_v4(),
     )

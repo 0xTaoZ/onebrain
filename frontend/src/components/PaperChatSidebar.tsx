@@ -1,9 +1,10 @@
+import { AgentProfileSheet } from './AgentProfileSheet';
 import { useId, useState, type ReactNode } from 'react';
 import { ArrowLeft, FolderKanban, MessageCircle, Plus, Search, Settings, Users, X } from 'lucide-react';
 import { useWorkspace } from '@/context/WorkspaceContext';
 import { AgentCharacterAvatar } from './AgentCharacterAvatar';
 import { MemberActivityHeatmap } from './MemberActivityHeatmap';
-import { AddAgentSheet } from './AddAgentSheet';
+import { openGroupMemberPicker } from '@/lib/teamNavigation';
 import { copyPlainText } from '@/lib/clipboard';
 import { projectDisplayName } from '@/lib/projectDisplay';
 import type { Member, SidebarNavigationTarget } from '@/types';
@@ -25,8 +26,8 @@ export function PaperChatSidebar({ activePage, workspaceNavigation, onSessionSel
   const [tab, setTab] = useState<'chats' | 'contacts'>('chats');
   const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null);
   const [showWorkspace, setShowWorkspace] = useState(false);
+  const [editingMemberId, setEditingMemberId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  const [addOpen, setAddOpen] = useState(false);
   const visibleMembers = membersAsync.loading || membersAsync.error ? [] : members;
   const selectedMember = visibleMembers.find(member => member.id === selectedMemberId);
   const navigationVisible = showWorkspace || activePage !== 'workspace';
@@ -37,7 +38,7 @@ export function PaperChatSidebar({ activePage, workspaceNavigation, onSessionSel
 
   return (
     <div className="paper-navigation">
-      {addOpen && <AddAgentSheet onClose={() => setAddOpen(false)} onCreateGroup={onCreateSession} />}
+      {editingMemberId && <AgentProfileSheet key={editingMemberId} memberId={editingMemberId} onClose={() => setEditingMemberId(null)} />}
       <nav className="paper-agent-rail" aria-label={zh ? '成员与工作台' : 'Members and workspace'}>
         <button type="button" className="paper-rail-person" aria-pressed={!navigationVisible && !selectedMember} onClick={showChats}>
           <span className="paper-person-avatar paper-self-avatar">{zh ? '我' : 'Me'}</span>
@@ -54,7 +55,7 @@ export function PaperChatSidebar({ activePage, workspaceNavigation, onSessionSel
           ))}
           {membersAsync.loading && <span className="paper-rail-hint">{zh ? '加载中' : 'Loading'}</span>}
         </div>
-        <button type="button" className="paper-rail-person paper-connect" onClick={() => setAddOpen(true)}>
+        <button type="button" className="paper-rail-person paper-connect" onClick={openGroupMemberPicker}>
           <span className="paper-connect-avatar"><Plus size={24} /></span><span>{zh ? '接入成员' : 'Add agent'}</span>
         </button>
         <div className="paper-rail-footer">
@@ -73,9 +74,9 @@ export function PaperChatSidebar({ activePage, workspaceNavigation, onSessionSel
           <div className="paper-original-navigation">{workspaceNavigation}</div>
         </> : <>
           <div className="paper-profile">
-            {selectedMember ? <PaperMemberAvatar member={selectedMember} /> : <span className="paper-person-avatar paper-self-avatar">{zh ? '我' : 'Me'}</span>}
+            {selectedMember ? <PaperMemberAvatar member={selectedMember} /> : <img className="paper-person-avatar" src="/logos/onebrain-logo.png" alt="" />}
             <div><strong>{selectedMember?.name.replace(/^@/, '') ?? 'OneBrain'}</strong><span>{selectedMember ? (zh ? '当前群成员资料' : 'Current group member') : (zh ? '你的协作空间' : 'Your team space')}</span></div>
-            <button type="button" className="paper-icon-button" aria-label={zh ? '管理成员' : 'Manage members'} onClick={() => onNavigate('team')}><Settings size={19} /></button>
+            <button type="button" className="paper-icon-button" aria-label={selectedMember ? (zh ? '成员设置' : 'Member settings') : (zh ? '添加成员' : 'Add members')} onClick={() => selectedMember ? setEditingMemberId(selectedMember.id) : openGroupMemberPicker()}><Settings size={19} /></button>
           </div>
           {projects.length > 1 && <label className="paper-project-picker"><FolderKanban size={15} /><select aria-label={zh ? '选择项目' : 'Choose project'} value={selectedProjectId} onChange={event => { setSelectedMemberId(null); setSelectedProjectId(event.target.value); }}>
             {projects.map(project => <option key={project.id} value={project.id}>{projectDisplayName(project)}</option>)}
@@ -84,7 +85,7 @@ export function PaperChatSidebar({ activePage, workspaceNavigation, onSessionSel
             <button type="button" role="tab" aria-selected={tab === 'chats'} aria-controls={`${panelId}-paper-chats-panel`} id={`${panelId}-paper-chats-tab`} onClick={() => { setTab('chats'); setSelectedMemberId(null); }}><MessageCircle size={17} />{zh ? '聊天' : 'Chats'}</button>
             <button type="button" role="tab" aria-selected={tab === 'contacts'} aria-controls={`${panelId}-paper-contacts-panel`} id={`${panelId}-paper-contacts-tab`} onClick={() => setTab('contacts')}><Users size={17} />{zh ? '通讯录' : 'Contacts'}</button>
           </div>
-          <button type="button" className="paper-create-group" onClick={tab === 'chats' ? onCreateSession : () => onNavigate('team')}><Plus size={20} />{tab === 'chats' ? (zh ? '建群' : 'New group') : (zh ? '添加成员' : 'Add member')}</button>
+          <button type="button" className="paper-create-group" onClick={tab === 'chats' ? onCreateSession : openGroupMemberPicker}><Plus size={20} />{tab === 'chats' ? (zh ? '建群' : 'New group') : (zh ? '添加成员' : 'Add member')}</button>
           <label className="paper-conversation-search"><Search size={16} /><input aria-label={zh ? '搜索会话或成员' : 'Search conversations or members'} placeholder={zh ? '搜索' : 'Search'} value={query} onChange={event => setQuery(event.target.value)} />{query && <button type="button" aria-label={zh ? '清除搜索' : 'Clear search'} onClick={() => setQuery('')}><X size={14} /></button>}</label>
           <div className="paper-conversation-scroll" role="tabpanel" id={`${panelId}-${tab === 'chats' ? 'paper-chats-panel' : 'paper-contacts-panel'}`} aria-labelledby={`${panelId}-${tab === 'chats' ? 'paper-chats-tab' : 'paper-contacts-tab'}`}>
             {tab === 'chats' ? <>

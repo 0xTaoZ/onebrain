@@ -28,8 +28,7 @@ pub async fn wait_for_parent_exit() {
 
     #[cfg(unix)]
     {
-        wait_until_parent_changes(expected, std::os::unix::process::parent_id, POLL_INTERVAL)
-            .await;
+        wait_until_parent_changes(expected, std::os::unix::process::parent_id, POLL_INTERVAL).await;
     }
 
     #[cfg(not(unix))]
@@ -92,7 +91,10 @@ mod tests {
         });
 
         tokio::time::sleep(Duration::from_millis(30)).await;
-        assert!(!watch.is_finished(), "watch ended while the owner was alive");
+        assert!(
+            !watch.is_finished(),
+            "watch ended while the owner was alive"
+        );
 
         parent.store(1, Ordering::SeqCst);
         tokio::time::timeout(Duration::from_secs(1), watch)

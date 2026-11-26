@@ -14,6 +14,8 @@ use tauri::{
 };
 
 mod backend_lifecycle;
+#[cfg(target_os = "macos")]
+mod macos_reopen;
 mod update;
 
 use backend_lifecycle::BackendState;
@@ -461,6 +463,8 @@ fn main() {
             let child = spawn_backend(port)?;
 
             app.manage(BackendState::new(child));
+            #[cfg(target_os = "macos")]
+            macos_reopen::install(app.handle(), port);
 
             if let Some(window) = app.get_window("main") {
                 #[cfg(windows)]
@@ -480,16 +484,9 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|app, event| match event {
-            // The close button keeps the app running in the Dock; Cmd+Q quits.
-            tauri::RunEvent::WindowEvent {
-                label,
-                event: tauri::WindowEvent::CloseRequested { api, .. },
-                ..
-            } => {
-                api.prevent_close();
-                if let Some(window) = app.get_window(&label) {
-                    let _ = window.minimize();
-                }
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::ExitRequested { api, .. } if macos_reopen::installed() => {
+                api.prevent_exit();
             }
             tauri::RunEvent::Exit => {
                 if let Some(state) = app.try_state::<BackendState>() {

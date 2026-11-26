@@ -1,4 +1,3 @@
-use base64::Engine as _;
 use std::{sync::Arc, time::Instant};
 
 use axum::{
@@ -8,6 +7,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use base64::Engine as _;
 
 use super::{AuthState, COOKIE, SESSION_TTL, hash, random_secret, same_hash};
 
@@ -232,7 +232,9 @@ pub(super) fn error(status: StatusCode, message: &str) -> Response {
         .headers_mut()
         .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     if status == StatusCode::UNAUTHORIZED {
-        response.headers_mut().insert("x-openteams-lan-auth", "required".parse().unwrap());
+        response
+            .headers_mut()
+            .insert("x-openteams-lan-auth", "required".parse().unwrap());
     }
     response
 }

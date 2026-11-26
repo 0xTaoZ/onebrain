@@ -8,6 +8,7 @@
   "settings.account.desc": "Gérez les configurations de profil développeur.",
   "settings.account.emailEndpoint": "Compte",
   "settings.account.title": "Paramètres du compte",
+  "settings.appearance.paperTheme": "Blanc chaud",
   "settings.appearance.chatMessageFontSize": "Taille du texte des messages",
   "settings.appearance.chatMessageFontSizeDesc": "Ajuste la taille du texte des messages utilisateur et du corps des réponses Agent.",
   "settings.appearance.chatMessageFontSizeOption": "{size}px",

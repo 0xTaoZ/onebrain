@@ -64,7 +64,7 @@ pub async fn create_session_with_project_members(
     for member in default_members {
         let project_member_id: Uuid = member.try_get("project_member_id")?;
         let agent_id: Uuid = member.try_get("agent_id")?;
-        let member_name: String = member.try_get("member_name")?;
+        let member_name: Option<String> = member.try_get("member_name")?;
         // For isolated sessions, do NOT backfill workspace_path from
         // project member or session defaults. Keeping it None ensures the
         // ChatRunner resolver always runs worktree resolution (lazy-create
@@ -98,7 +98,15 @@ pub async fn create_session_with_project_members(
                 execution_config,
                 state
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'idle')
+            VALUES (
+                ?1, ?2, ?3,
+                COALESCE(
+                    NULLIF(TRIM(?4), ''),
+                    (SELECT NULLIF(TRIM(name), '') FROM chat_agents WHERE id = ?3),
+                    'member_' || LOWER(SUBSTR(HEX(?1), 1, 8))
+                ),
+                ?5, ?6, ?7, ?8, 'idle'
+            )
             "#,
         )
         .bind(Uuid::new_v4())
@@ -134,6 +142,7 @@ mod session_creation_tests {
             .expect("create sqlite memory pool");
 
         for statement in [
+            "CREATE TABLE chat_agents (id BLOB PRIMARY KEY, name TEXT NOT NULL)",
             r#"
             CREATE TABLE chat_sessions (
                 id BLOB PRIMARY KEY,
@@ -276,6 +285,17 @@ mod session_creation_tests {
         )
         .await;
 
+        sqlx::query("INSERT INTO chat_agents (id, name) VALUES (?1, 'legacy-agent')")
+            .bind(included_agent_id)
+            .execute(&pool)
+            .await
+            .expect("insert agent with legacy member");
+        sqlx::query("UPDATE project_members SET member_name = NULL WHERE agent_id = ?1")
+            .bind(included_agent_id)
+            .execute(&pool)
+            .await
+            .expect("simulate a legacy member without an alias");
+
         let session = create_session_with_project_members(
             &pool,
             &CreateChatSession {
@@ -295,6 +315,7 @@ mod session_creation_tests {
             .expect("list session agents");
         assert_eq!(session_agents.len(), 1);
         assert_eq!(session_agents[0].agent_id, included_agent_id);
+        assert_eq!(session_agents[0].member_name, "legacy-agent");
         assert_eq!(
             session_agents[0].workspace_path.as_deref(),
             Some("/agent/workspace")

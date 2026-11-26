@@ -8,6 +8,7 @@
   "settings.account.desc": "開発者プロフィール設定を管理します。",
   "settings.account.emailEndpoint": "アカウント",
   "settings.account.title": "アカウント設定",
+  "settings.appearance.paperTheme": "暖かみのある白",
   "settings.appearance.chatMessageFontSize": "メッセージ本文の文字サイズ",
   "settings.appearance.chatMessageFontSizeDesc": "ユーザーメッセージ本文とAgent返信本文のサイズを調整します。",
   "settings.appearance.chatMessageFontSizeOption": "{size}px",

@@ -220,8 +220,7 @@ check(
     source.includes("h-12 -mb-2 items-start pb-2 pt-1.5") &&
     source.includes("h-10 items-center") &&
     source.includes("ChevronsRight") &&
-    source.includes("requestTeamMemberInviteNavigation({") &&
-    source.includes("projectId: selectedProjectId ?? undefined") &&
+    source.includes("onClick={openGroupMemberPicker}") &&
     memberInviteSource.includes("data-tooltip-nowrap") &&
     !memberRailSource.includes('"..."') &&
     source.includes("selectedSidebarMemberId") &&

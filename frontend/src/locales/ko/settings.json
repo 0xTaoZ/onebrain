@@ -8,6 +8,7 @@
   "settings.account.desc": "개발자 프로필 구성을 관리합니다.",
   "settings.account.emailEndpoint": "계정",
   "settings.account.title": "계정 설정",
+  "settings.appearance.paperTheme": "따뜻한 흰색",
   "settings.appearance.chatMessageFontSize": "메시지 본문 글꼴 크기",
   "settings.appearance.chatMessageFontSizeDesc": "사용자 메시지 본문과 Agent 답변 본문 크기를 함께 조정합니다.",
   "settings.appearance.chatMessageFontSizeOption": "{size}px",

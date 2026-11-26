@@ -69,7 +69,7 @@ import {
   teamPresetsApi,
   type VersionCheckResponse,
 } from "@/lib/api";
-import { createStarterGroup } from "@/components/AddAgentSheet";
+import { AddAgentSheet } from "@/components/AddAgentSheet";
 import { useVersionUpdate } from "@/hooks/useVersionUpdate";
 import {
   ONBOARDING_GUIDE_RESET_EVENT,
@@ -84,6 +84,7 @@ import {
   type IssueNavigationTarget,
 } from "@/lib/issueNavigation";
 import {
+  GROUP_MEMBER_PICKER_EVENT,
   TEAM_MEMBER_INVITE_NAVIGATION_EVENT,
   TEAM_MEMBER_INVITE_TARGET_CHANGED_EVENT,
   requestTeamMemberInviteNavigation,
@@ -518,6 +519,12 @@ function WorkspaceLayout() {
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
   const [isCreateSessionModalOpen, setIsCreateSessionModalOpen] =
     useState(false);
+  const [isGroupMemberPickerOpen, setIsGroupMemberPickerOpen] = useState(false);
+  useEffect(() => {
+    const openPicker = () => setIsGroupMemberPickerOpen(true);
+    window.addEventListener(GROUP_MEMBER_PICKER_EVENT, openPicker);
+    return () => window.removeEventListener(GROUP_MEMBER_PICKER_EVENT, openPicker);
+  }, []);
   const [isGlobalSearchOpen, setIsGlobalSearchOpen] = useState(false);
   const [onboardingOverlay, setOnboardingOverlay] =
     useState<OnboardingOverlay>(null);
@@ -1434,19 +1441,15 @@ function WorkspaceLayout() {
     closeMobileSidebar();
   };
 
-  // Always land in a chat: the current group, the first group, or a new one
-  // filled with the agents installed on this Mac.
   const goHome = async () => {
-    try {
-      const sessionId =
-        activeSessionId || sessions[0]?.id || (await createStarterGroup(locale === "zh" ? "我的团队" : "My team"));
-      if (!sessions.some((session) => session.id === sessionId)) await refreshSessions();
+    const sessionId = activeSessionId || sessions[0]?.id;
+    if (sessionId) {
       replaceActiveTab(createSessionTab(sessionId));
       setActiveSessionId(sessionId);
-      void refreshMembers().catch(() => undefined);
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : String(error), "warning");
+      return;
     }
+    if (sessionsAsync.loading || sessionsAsync.error) return;
+    await handleCreateDefaultSession({ focusComposer: false });
   };
 
   const handleCloseTab = (closingTab: WorkspaceTab) => {
@@ -1474,15 +1477,7 @@ function WorkspaceLayout() {
     }
   };
 
-  const starterGroupRequested = useRef(false);
-  useEffect(() => {
-    if (starterGroupRequested.current) return;
-    if (sessionsAsync.loading || sessionsAsync.error || sessions.length > 0) return;
-    starterGroupRequested.current = true;
-    void goHome();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionsAsync.loading, sessionsAsync.error, sessions.length]);
-
+  const creatingChat = useRef(false);
   const handleCreateDefaultSession = async (options?: {
     projectId?: string | null;
     workspacePath?: string | null;
@@ -1490,26 +1485,23 @@ function WorkspaceLayout() {
   }) => {
     const focusComposer = options?.focusComposer ?? true;
     const projectId = options?.projectId?.trim() || selectedProjectId;
-    if (!projectId) {
-      showToast(
-        translate(
-          'createSession.noProject',
-          'Please select a project first',
-        ),
-        'warning',
-      );
-      return;
-    }
+    if (creatingChat.current) return;
+    creatingChat.current = true;
     const defaultSessionTitle = translate(
       'createSession.defaultTitle',
       'Default Session',
     );
 
     try {
-      const backendSession = await projectApi.createSession(projectId, {
-        title: defaultSessionTitle,
-        workspace_path: options?.workspacePath ?? activeProjectWorkspacePath ?? null,
-      });
+      const backendSession = projectId
+        ? await projectApi.createSession(projectId, {
+            title: defaultSessionTitle,
+            workspace_path: options?.workspacePath ?? activeProjectWorkspacePath ?? null,
+          })
+        : await chatSessionsApi.create({
+            title: defaultSessionTitle,
+            workspace_path: options?.workspacePath ?? null,
+          });
       const mappedSession = mapSession(backendSession, {
         activeSessionId: backendSession.id,
       });
@@ -1533,6 +1525,7 @@ function WorkspaceLayout() {
         });
       }
       void refreshSessions();
+      return backendSession.id;
     } catch (err) {
       showToast(
         err instanceof Error
@@ -1540,7 +1533,15 @@ function WorkspaceLayout() {
           : String(err ?? 'Failed to create session'),
         'error',
       );
+    } finally {
+      creatingChat.current = false;
     }
+  };
+
+  const openNewChat = () => {
+    void handleCreateDefaultSession({ focusComposer: false }).then(id => {
+      if (id) setIsGroupMemberPickerOpen(true);
+    });
   };
 
   const handlePrimarySidebarAction = (action: SidebarPrimaryAction) => {
@@ -1550,7 +1551,8 @@ function WorkspaceLayout() {
       return;
     }
     if (action.id === "new-session") {
-      setIsCreateSessionModalOpen(true);
+      if (selectedProjectId) setIsCreateSessionModalOpen(true);
+      else openNewChat();
       closeMobileSidebar();
       return;
     }
@@ -1591,9 +1593,8 @@ function WorkspaceLayout() {
   });
   useCommandHandler('session.create', {
     scope: 'global',
-    enabled: Boolean(selectedProjectId),
-    disabledReason: selectedProjectId ? undefined : t('shortcuts.reason.selectProject'),
-    execute: () => setIsCreateSessionModalOpen(true),
+    enabled: true,
+    execute: openNewChat,
   });
   useCommandHandler('build-stats.open', {
     scope: 'global',
@@ -2225,7 +2226,7 @@ function WorkspaceLayout() {
       activePage={activeAppPage}
       workspaceNavigation={<ProjectSidebar {...projectSidebarProps} />}
       onSessionSelect={handleSidebarSessionSelect}
-      onCreateSession={() => { setIsCreateSessionModalOpen(true); closeMobileSidebar(); }}
+      onCreateSession={openNewChat}
       onNavigate={(page) => handleSidebarNavigate({ id: page, label: translate(`page.${page}`, pageTabConfig[page].label), icon: "", helper: "", targetPage: page })}
     />
   ) : <ProjectSidebar {...projectSidebarProps} />;
@@ -2261,6 +2262,13 @@ function WorkspaceLayout() {
           onClose={versionUpdate.snooze}
           closeAriaLabel={t('toast.dismissNotification')}
           className="min-h-[92px] max-w-[min(430px,calc(100vw-40px))] py-4"
+        />
+      )}
+
+      {isGroupMemberPickerOpen && (
+        <AddAgentSheet
+          onClose={() => setIsGroupMemberPickerOpen(false)}
+          onCreateGroup={openNewChat}
         />
       )}
 

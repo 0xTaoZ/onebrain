@@ -1984,6 +1984,7 @@ version = "1.0.28"
 dependencies = [
  "directories",
  "libc",
+ "objc",
  "portpicker",
  "serde",
  "serde_json",

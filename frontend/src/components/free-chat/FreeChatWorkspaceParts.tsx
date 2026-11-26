@@ -66,7 +66,6 @@ import {
 } from "@/lib/sourceControlEvents";
 import { markPendingIssueStatusSync } from "@/lib/pendingIssueStatusSync";
 import { notifyBuildStatsUsageUpdated } from "@/lib/buildStatsEvents";
-import { requestTeamMemberInviteNavigation } from "@/lib/teamNavigation";
 import { openInSystemFileManager } from "@/lib/systemFileManager";
 import {
   flattenWorkspaceChanges,

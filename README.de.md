@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/cover.webp" width="200" alt="OneBrain: Pixel-Agents rund um ein gemeinsames Gehirn">
+  <img src="frontend/public/logos/onebrain-logo.png" width="200" alt="OneBrain: Pixel-Agents rund um ein gemeinsames Gehirn">
 </p>
 
 <h1 align="center">OneBrain</h1>
