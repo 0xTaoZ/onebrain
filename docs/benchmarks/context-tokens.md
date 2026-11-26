@@ -29,10 +29,3 @@ Reproduce:
 ```sh
 BENCH_TURNS=30 cargo test -p services --lib context_token_benchmark -- --ignored --nocapture
 ```
-
-## Limits
-
-- cl100k is not the exact tokenizer of every model; percentages are more reliable than absolute counts.
-- The "before" upper line assumes the agent reads the whole history on each run. Real agents read it only when they decide they need it, so real savings fall between the two "before" lines.
-- Provider-side prompt caching is not modelled here. A real-run benchmark with recorded input, cache-read and output tokens and latency is the next step.
-- About 1,000 tokens per run are the fixed output format instructions, which are still resent every run.
