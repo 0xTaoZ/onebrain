@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
-import { agentRuntimeApi, chatAgentsApi, sessionAgentsApi } from '@/lib/api';
+import { agentRuntimeApi, chatAgentsApi, chatSessionsApi, sessionAgentsApi } from '@/lib/api';
 import { useWorkspace } from '@/context/WorkspaceContext';
 import { AgentCharacterAvatar } from './AgentCharacterAvatar';
 
@@ -27,6 +27,29 @@ function handleFor(runner: string): string {
 }
 
 type Runtime = { runner: string; ready: boolean };
+
+/**
+ * Create a group with every coding agent that can run on this Mac, so a new
+ * user starts in a working chat instead of an empty screen. No project needed.
+ */
+export async function createStarterGroup(title: string): Promise<string> {
+  const session = await chatSessionsApi.create({ title, workspace_path: null });
+  const runners = (await agentRuntimeApi.list()).runners
+    .filter(status => status.installed && status.executable)
+    .map(status => status.runner_type);
+  const agents = await chatAgentsApi.list();
+  for (const runner of runners) {
+    const agent = agents.find(candidate => candidate.runner_type === runner) ?? await chatAgentsApi.create({
+      name: handleFor(runner),
+      runner_type: runner,
+      system_prompt: null,
+      tools_enabled: null,
+      model_name: null,
+    });
+    await sessionAgentsApi.add(session.id, { agent_id: agent.id, workspace_path: null, allowed_skill_ids: null });
+  }
+  return session.id;
+}
 
 /**
  * One-click way to bring installed coding agents into the current group.

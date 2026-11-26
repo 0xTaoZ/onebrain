@@ -69,6 +69,7 @@ import {
   teamPresetsApi,
   type VersionCheckResponse,
 } from "@/lib/api";
+import { createStarterGroup } from "@/components/AddAgentSheet";
 import { useVersionUpdate } from "@/hooks/useVersionUpdate";
 import {
   ONBOARDING_GUIDE_RESET_EVENT,
@@ -488,6 +489,7 @@ function WorkspaceLayout() {
     refreshProjects,
     createProject,
     refreshSessions,
+    sessionsAsync,
     renameSession,
     archiveSession,
     pinSession,
@@ -1377,11 +1379,7 @@ function WorkspaceLayout() {
     }
 
     if (item.targetPage === "workspace") {
-      const nextSessionId = activeSessionId || sessions[0]?.id;
-      if (nextSessionId) {
-        replaceActiveTab(createSessionTab(nextSessionId));
-        setActiveSessionId(nextSessionId);
-      }
+      void goHome();
       closeMobileSidebar();
       return;
     }
@@ -1436,9 +1434,25 @@ function WorkspaceLayout() {
     closeMobileSidebar();
   };
 
+  // Always land in a chat: the current group, the first group, or a new one
+  // filled with the agents installed on this Mac.
+  const goHome = async () => {
+    try {
+      const sessionId =
+        activeSessionId || sessions[0]?.id || (await createStarterGroup(locale === "zh" ? "我的团队" : "My team"));
+      if (!sessions.some((session) => session.id === sessionId)) await refreshSessions();
+      replaceActiveTab(createSessionTab(sessionId));
+      setActiveSessionId(sessionId);
+      void refreshMembers().catch(() => undefined);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : String(error), "warning");
+    }
+  };
+
   const handleCloseTab = (closingTab: WorkspaceTab) => {
     if (openTabs.length <= 1) {
-      showToast(t("toast.keepOneTab"), "warning");
+      // Closing the last page returns to the chat instead of trapping the user.
+      if (closingTab.kind !== "session") void goHome();
       return;
     }
 
@@ -1459,6 +1473,15 @@ function WorkspaceLayout() {
       }
     }
   };
+
+  const starterGroupRequested = useRef(false);
+  useEffect(() => {
+    if (starterGroupRequested.current) return;
+    if (sessionsAsync.loading || sessionsAsync.error || sessions.length > 0) return;
+    starterGroupRequested.current = true;
+    void goHome();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionsAsync.loading, sessionsAsync.error, sessions.length]);
 
   const handleCreateDefaultSession = async (options?: {
     projectId?: string | null;
