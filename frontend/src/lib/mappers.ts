@@ -30,6 +30,7 @@ import type {
 } from '@/types';
 import type { ProjectMemberWithRuntime } from '../../../shared/types';
 import { parseStructuredAgentReply } from './parseStructuredReply';
+import { formatTokenUsage, summarizeTokenUsage } from './tokenUsage';
 
 // -----------------------------------------------------------------------------
 // Avatar / monogram derivation
@@ -292,8 +293,8 @@ interface MapMessageOptions {
 }
 
 /**
- * Backend messages do not carry per-message cost; `cost` is left undefined.
- * Callers that compute live cost client-side should set it themselves.
+ * Agent replies carry their run's token usage; `cost` shows it as one line
+ * with the cache hit rate. Other messages leave it undefined.
  */
 export const mapMessage = (
   backend: BackendChatMessage,
@@ -361,6 +362,13 @@ export const mapMessage = (
     referenceMessageId: referenceMessageIdFromMeta(backend.meta),
     attachments: attachmentsFromMeta(backend.meta),
     isAgent: backend.sender_type === 'agent' || undefined,
+    cost:
+      backend.sender_type === 'agent'
+        ? (() => {
+            const usage = summarizeTokenUsage(backend.meta);
+            return usage ? formatTokenUsage(usage) : undefined;
+          })()
+        : undefined,
     runId: runIdFromMeta(backend.meta),
     sessionAgentId: sessionAgentIdFromMeta(backend.meta),
     sourceMessageId: sourceMessageIdFromMeta(backend.meta),
