@@ -6197,3 +6197,131 @@ async fn member_activity_counts_runs_per_day_across_sessions_of_the_same_agent()
     assert_eq!(days.len(), 1);
     assert_eq!(days[0].runs, 3, "both sessions of the same agent count; other agents do not");
 }
+
+/// Reproducible prompt-size benchmark for the member read cursor.
+///
+/// Replays a fixed three-member conversation and counts cl100k tokens sent to
+/// each mentioned member under two strategies:
+/// - before: every run resends role and protocol; history lives in a file the
+///   agent must read to catch up (reported both without and with that read);
+/// - after: a resumed member gets an unchanged-prefix note plus only the
+///   messages it has not seen.
+/// Run with: BENCH_TURNS=30 cargo test -p services --lib context_token_benchmark -- --ignored --nocapture
+#[test]
+#[ignore]
+fn context_token_benchmark() {
+    let turns: usize = std::env::var("BENCH_TURNS").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+    let protocol = "Work in small verified steps. Before claiming a task is done, run the \
+project's tests and report the exact command and exit code. Keep replies short: what \
+changed, what was verified, what is left. Never edit files outside the assigned paths. \
+When a review finds a problem, the author fixes it and the same reviewer checks again. \
+Ask the user before any destructive action, dependency change or network access. "
+        .repeat(4);
+    let roles = [
+        ("coder", "You implement features in the Rust backend and React frontend. "),
+        ("reviewer", "You review diffs for correctness, security and missing tests. "),
+        ("tester", "You write and run tests, reproduce bugs and report results. "),
+    ];
+    let agents = roles
+        .iter()
+        .map(|(name, role)| test_agent(name, &role.repeat(8)))
+        .collect::<Vec<_>>();
+    let language = ResolvedPromptLanguage {
+        setting: "english",
+        code: "en",
+        instruction: "You MUST respond in English.",
+    };
+    let sentences = [
+        "The login handler now validates the redirect target against the allow list.",
+        "Tests in crates/services pass, but the frontend build warns about a large chunk.",
+        "Please check the error path when the token endpoint times out.",
+        "I added a regression test for the empty state and updated the snapshot.",
+        "The migration is additive: a new table, no changes to existing columns.",
+        "Reproduced the flaky test; it depends on wall-clock time and needs a fixed clock.",
+    ];
+    let mut seed: u64 = 42;
+    let mut next = |bound: usize| {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((seed >> 33) as usize) % bound
+    };
+    let tokens = ChatRunner::estimate_tokens_with_tiktoken;
+
+    let mut history: Vec<ChatMessage> = Vec::new();
+    let mut last_seen: Vec<Option<Uuid>> = vec![None; agents.len()];
+    let (mut before_prompt, mut before_with_read, mut after_prompt) = (0u64, 0u64, 0u64);
+    let mut last_turn = (0u32, 0u32, 0u32);
+
+    for _ in 0..turns {
+        let target = next(agents.len());
+        let agent = &agents[target];
+        let body = (0..2 + next(4)).map(|_| sentences[next(sentences.len())]).collect::<Vec<_>>().join(" ");
+        let request = test_message(&format!("@{} {body}", agent.name), json!({}));
+        history.push(request.clone());
+
+        let history_file = history[..history.len() - 1]
+            .iter()
+            .map(|message| json!({ "sender": ChatRunner::resolve_message_sender_identity(message).label, "content": message.content }).to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prompt = |continuation: &ContinuationContext| {
+            ChatRunner::build_exact_markdown_prompt(
+                agent,
+                &request,
+                Path::new("/workspace/.openteams/context/bench"),
+                Path::new("/workspace"),
+                &[],
+                None,
+                None,
+                &[],
+                language,
+                Some(protocol.as_str()),
+                false,
+                continuation,
+            )
+        };
+
+        let before = tokens(&prompt(&ContinuationContext::default()));
+        let read_cost = tokens(&history_file);
+        let continuation = match last_seen[target] {
+            Some(seen) => {
+                let (new_messages, omitted_messages) =
+                    ChatRunner::select_continuation_messages(&history, seen, request.id).unwrap();
+                ContinuationContext {
+                    prefix_hash: ChatRunner::prompt_prefix_hash(agent, Some(&protocol)),
+                    prefix_unchanged: true,
+                    has_cursor: true,
+                    new_messages,
+                    omitted_messages,
+                    latest_message_id: Some(request.id),
+                }
+            }
+            // First run of this member: full prompt plus a history read, same as before.
+            None => ContinuationContext::default(),
+        };
+        let after = tokens(&prompt(&continuation))
+            + if last_seen[target].is_none() { read_cost } else { 0 };
+
+        before_prompt += u64::from(before);
+        before_with_read += u64::from(before + read_cost);
+        after_prompt += u64::from(after);
+        last_turn = (before, before + read_cost, after);
+
+        let reply = test_message_with_sender(
+            ChatSenderType::Agent,
+            Some(agent.id),
+            &format!("{} {}", sentences[next(sentences.len())], sentences[next(sentences.len())]),
+            json!({ "sender": { "label": agent.name, "name": agent.name } }),
+        );
+        history.push(reply.clone());
+        last_seen[target] = Some(reply.id);
+    }
+
+    let saving = |before: u64| 100.0 * (before as f64 - after_prompt as f64) / before as f64;
+    println!("\n| {turns} turns, 3 members (cl100k tokens) | total input | last turn |");
+    println!("| --- | ---: | ---: |");
+    println!("| Before: full prompt, no history read | {before_prompt} | {} |", last_turn.0);
+    println!("| Before: full prompt + history file read | {before_with_read} | {} |", last_turn.1);
+    println!("| After: read cursor | {after_prompt} | {} |", last_turn.2);
+    println!("\nSaving vs prompt only: {:.1}%  |  vs prompt + history read: {:.1}%", saving(before_prompt), saving(before_with_read));
+    assert!(after_prompt < before_with_read);
+}
