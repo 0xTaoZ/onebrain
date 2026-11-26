@@ -1,85 +1,93 @@
-# OneBrain
+<p align="center">
+  <img src="docs/assets/cover.webp" width="220" alt="OneBrain: pixel-art agents around a shared brain">
+</p>
 
-A desktop workspace where several coding agents share one group chat and one project memory. Only the agents you mention run, and each one reads only what it has not seen yet.
+<h1 align="center">OneBrain</h1>
 
-```mermaid
-xychart-beta
-    title "Input tokens over a whole conversation"
-    x-axis "Conversation length (turns)" [10, 30, 60, 100]
-    y-axis "Thousand tokens" 0 --> 650
-    line [18.8, 85.2, 258.5, 633.3]
-    line [12.9, 37.1, 72.9, 123.4]
-```
+<p align="center">
+  <b>A team of coding agents with one shared brain.</b><br>
+  Only the agent you mention runs, and it reads only what it has not seen.
+</p>
 
-Upper line: every agent rereads the session history when it needs context. Lower line: OneBrain.
+<p align="center">
+  English · <a href="README.zh-CN.md">简体中文</a> · <a href="README.de.md">Deutsch</a>
+</p>
+
+<p align="center">
+  <img src="docs/assets/token-chart-en.svg" width="820" alt="Tokens for one turn stay flat with OneBrain while rereading history grows; savings of 31 to 81 percent">
+</p>
+
+## What is different
+
+|  | Common multi-agent setup | OneBrain |
+| --- | --- | --- |
+| An agent catches up | rereads the history | reads only what is new to it |
+| A new agent joins | gets the transcript | gets a short team handoff |
+| Who runs | everyone, or an orchestrator that decides | only the agent you mention |
+| Memory | kept inside each agent | one shared brain that people can read |
+| You change your mind mid-run | the chain keeps going | handoffs wait for you |
+| Cost of one turn | grows with the conversation | stays around 1,000 tokens |
 
 ## Results
 
 Three agents (coder, reviewer, tester) in one conversation, one agent mentioned per turn. Both columns give the agents the same information.
 
-| Conversation length | Rereading history | OneBrain | Saved | Last turn |
-| ---: | ---: | ---: | ---: | ---: |
-| 10 turns | 18,752 | 12,859 | 31% | 2,313 → 1,392 |
-| 30 turns | 85,208 | 37,135 | 56% | 4,289 → 1,035 |
-| 60 turns | 258,464 | 72,928 | 72% | 7,194 → 1,041 |
-| 100 turns | 633,264 | 123,388 | 81% | 11,348 → 1,469 |
-
-The last column is the point. When agents reread history, every turn costs more than the one before. With OneBrain the cost of a turn stays around a thousand tokens however long the conversation gets.
-
-An agent that joins late, for example a second reviewer called in after 100 turns, starts with 1,611 tokens instead of 11,364.
-
-| Joins after | Rereading history | OneBrain | Saved |
+| Conversation length | Rereading history | OneBrain | Saved |
 | ---: | ---: | ---: | ---: |
-| 10 turns | 2,324 | 1,587 | 32% |
-| 30 turns | 4,308 | 1,595 | 63% |
-| 60 turns | 7,215 | 1,556 | 78% |
-| 100 turns | 11,364 | 1,611 | 86% |
+| 10 turns | 18,752 | 12,859 | **31%** |
+| 30 turns | 85,208 | 37,135 | **56%** |
+| 60 turns | 258,464 | 72,928 | **72%** |
+| 100 turns | 633,264 | 123,388 | **81%** |
 
-Every number comes from one command that replays a fixed conversation through the production prompt builder:
+An agent that joins late, such as a second reviewer called in after 100 turns, starts with 1,611 tokens instead of 11,364 (**86%** less).
+
+Every number comes from one command that replays a fixed conversation through the real prompt builder:
 
 ```sh
 BENCH_TURNS=30 cargo test -p services --lib context_token_benchmark -- --ignored --nocapture
 ```
 
-Method: [docs/benchmarks/context-tokens.md](docs/benchmarks/context-tokens.md).
+Method and all rows: [docs/benchmarks/context-tokens.md](docs/benchmarks/context-tokens.md)
 
 ## How it saves tokens
 
-Agents from different vendors cannot share a provider cache, so OneBrain does not try to share transcripts between them. Each agent keeps its own conversation, and only small, stable pieces cross between agents.
+Agents from different vendors cannot share a provider cache. So OneBrain does not pass transcripts around. Each agent keeps its own conversation, and only small, stable pieces move between agents.
 
 **Mention to run.** An agent runs only when someone mentions it. Idle agents cost nothing.
 
-**A read cursor per agent.** A resumed agent receives the messages posted since its last run, not the whole history. Its role and the team rules are not resent while they stay the same. The cursor moves forward only after a run succeeds, so a failed run never hides messages from the next one.
+**A read cursor per agent.** A resumed agent receives the messages posted since its last run. Its role and the team rules are not resent while they stay the same. The cursor moves only after a run succeeds, so a failed run never hides messages.
 
-**Team handoffs for newcomers.** An agent that is new to a conversation gets your latest requests, each other agent's latest conclusion and changed files, and the decisions recorded so far. All of it comes from data the session already stores, so no extra model call is made to write a summary. The full history stays one file read away.
+**Team handoffs.** An agent new to a conversation gets your latest requests, each other agent's latest conclusion and changed files, and the decisions recorded so far. It is built from data the session already stores, so no model call is spent on writing a summary.
 
-**Handoffs wait for you.** If you post while an agent is working, its handoffs to other agents are shown but do not wake them. A chain of agents does not keep running on instructions you have just changed.
+**Handoffs wait for you.** If you post while an agent is working, its handoffs to other agents are shown but do not wake them. The chain stops at your new message instead of running on old instructions.
 
-**Cache hit rate on every reply.** Each agent reply shows fresh input, cached input and output tokens, with the share served from the provider cache. Providers count cached tokens differently, so the numbers are normalised before they are compared.
+**Cache hit rate on every reply.** Each reply shows fresh input, cached input and output, with the share served from the provider cache. Providers count cached tokens differently, and OneBrain normalises them before showing a rate.
 
 ## The shared brain
 
-Most agent setups keep their knowledge inside each agent: a long chat history, or memory files only the agent that wrote them reads. OneBrain keeps one memory for the whole team, and it is meant to be read by people as much as by agents. The design:
+Most agent setups keep what they learn inside each agent: a long chat history, or memory files only that agent reads. OneBrain keeps one memory for the whole team, written for people as much as for agents.
 
-- Decisions, rules, lessons and handoffs are plain Markdown files. Any agent CLI can open them, people can read them, and git shows how they changed.
-- Every entry keeps its source: the message it came from, or the file and lines it describes. When those files change, the entry is marked out of date so it does not quietly mislead the next agent.
+The design:
+
+- Decisions, rules, lessons and handoffs are plain Markdown. Any agent CLI can open them, you can read them, and git shows how they changed.
+- Every entry keeps its source: the message it came from, or the file and lines it describes. When those files change, the entry is flagged as out of date.
 - Agents propose entries; you approve them. Nothing becomes team knowledge without a person seeing it.
 
-Live today: shared records written by agents, team handoffs built from them, and per-agent read cursors. In progress: a page in the app to browse, approve and edit the brain, with stale entries flagged.
+Live today: shared records, team handoffs and per-agent read cursors. In progress: a brain page in the app to browse, approve and edit entries.
 
-The idea came first and the app came second. Before OneBrain existed, the same approach kept several coding agents on one machine in step through shared Markdown files and a written set of rules. OneBrain turns that habit into a product.
+The method came before the app. Several coding agents on one machine were already kept in step through shared Markdown files and a written set of rules. OneBrain turns that working habit into a product.
 
 ## Also in the app
 
 - Group chat in a warm white theme, with pixel-art avatars for each agent runtime and a GitHub-style heatmap of each agent's daily runs.
-- The backend shuts down with the app, even after a crash or a force quit, and stops the agent processes it started.
-- Optional Git worktree per conversation, so agents do not write over your working copy.
+- The backend shuts down with the app, even after a crash or force quit, and stops the agent processes it started.
+- Optional Git worktree per conversation, so agents never write over your working copy.
 
-Runtimes: Claude Code, Codex, Gemini CLI, Qwen Code, OpenCode, Amp and more.
+Works with Claude Code, Codex, Gemini CLI, Qwen Code, OpenCode, Amp and more.
 
-## Stack
+## Build from source
 
-Rust (Axum, SQLx, SQLite) for the backend, React and TypeScript for the frontend, Tauri for the desktop app.
+Rust (Axum, SQLx, SQLite), React and TypeScript, Tauri.
 
 ```sh
 pnpm install
@@ -89,4 +97,4 @@ cargo test -p db -p services
 
 ## Credits
 
-Apache License 2.0. OneBrain is built on [OpenTeams](https://github.com/openteams-lab/openteams), also Apache-2.0; see [NOTICE](NOTICE).
+Apache License 2.0. Built on [OpenTeams](https://github.com/openteams-lab/openteams), also Apache-2.0; see [NOTICE](NOTICE).
