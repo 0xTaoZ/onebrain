@@ -560,7 +560,7 @@ export const SettingsWorkspace: React.FC = () => {
         setPrivacySettingsMessage(
           translate(
             'settings.privacy.errorReporting.restartNotice',
-            'Restart OpenTeams for the error reporting change to take effect.',
+            'Restart OneBrain for the error reporting change to take effect.',
           ),
         );
       }

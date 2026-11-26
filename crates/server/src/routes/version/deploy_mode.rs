@@ -46,7 +46,7 @@ fn mock_latest_release_from_env() -> Result<Option<GitHubLatestRelease>, String>
     let html_url = match env::var(MOCK_RELEASE_URL_ENV) {
         Ok(url) if !url.trim().is_empty() => url,
         _ => format!(
-            "https://github.com/openteams-lab/openteams/releases/tag/{}",
+            "https://github.com/0xTaoZ/onebrain/releases/tag/{}",
             tag_name
         ),
     };

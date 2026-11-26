@@ -14,5 +14,5 @@ export function RemoteAccessBanner() {
       if (!response.ok) throw new Error('logout failed');
     } finally { window.location.reload(); }
   };
-  return <div className="flex shrink-0 items-center justify-between gap-2 bg-[var(--surface-2)] px-3 py-2 text-xs text-[var(--ink-subtle)]"><span>{zh ? '内网远程会话：正在控制运行 OpenTeams 的电脑' : 'LAN session: controlling the computer running OpenTeams'}</span><button type="button" disabled={busy} onClick={() => void logout()} className="shrink-0 text-[var(--primary)]">{zh ? '退出' : 'Sign out'}</button></div>;
+  return <div className="flex shrink-0 items-center justify-between gap-2 bg-[var(--surface-2)] px-3 py-2 text-xs text-[var(--ink-subtle)]"><span>{zh ? '内网远程会话：正在控制运行 OneBrain 的电脑' : 'LAN session: controlling the computer running OneBrain'}</span><button type="button" disabled={busy} onClick={() => void logout()} className="shrink-0 text-[var(--primary)]">{zh ? '退出' : 'Sign out'}</button></div>;
 }
