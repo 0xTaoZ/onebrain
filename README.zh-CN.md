@@ -1,43 +1,61 @@
 <p align="center">
-  <img src="docs/assets/cover.webp" width="220" alt="OneBrain：围着共享大脑工作的像素风 Agent">
+  <img src="docs/assets/cover.webp" width="200" alt="OneBrain：围着共享大脑工作的像素风 Agent">
 </p>
 
 <h1 align="center">OneBrain</h1>
 
 <p align="center">
-  <b>一群编程 Agent，共用一个大脑。</b><br>
-  只有被 @ 的成员才会运行，而且它只读自己还没看过的内容。
+  <b>把你的编程 Agent 拉进一个群聊。</b><br>
+  Claude Code、Codex、Gemini 在你的 Mac 上一起干活。<br>
+  每个成员只读自己没看过的内容，长对话最多能省 81% 的 token。
+</p>
+
+<p align="center">
+  100 轮对话 <b>省 81% token</b> · 每轮固定 <b>约 1,000 token</b>，聊多久都不涨 · 没被 @ 的成员 <b>0 token</b>
+</p>
+
+<p align="center">
+  <a href="https://github.com/0xTaoZ/onebrain/releases/latest"><b>⬇ 下载 macOS 版</b></a>
+  &nbsp;·&nbsp; <a href="README.md">English</a> · 简体中文 · <a href="README.de.md">Deutsch</a>
 </p>
 
 <p align="center">
   <img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-7c5cff?style=flat-square">
-  <img alt="macOS" src="https://img.shields.io/badge/platform-macOS-1d1d1f?style=flat-square&logo=apple">
-  <img alt="Rust and Tauri" src="https://img.shields.io/badge/built%20with-Rust%20%C2%B7%20Tauri-b7410e?style=flat-square&logo=rust">
-  <img alt="Tokens saved" src="https://img.shields.io/badge/tokens%20saved-31%E2%80%9381%25-2b7d4a?style=flat-square">
+  <img alt="macOS Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-1d1d1f?style=flat-square&logo=apple">
+  <img alt="本地运行，无需账号" src="https://img.shields.io/badge/本地运行-无需账号-2b7d4a?style=flat-square">
 </p>
+
+## 安装
+
+1. 在 [Releases](https://github.com/0xTaoZ/onebrain/releases/latest) 下载 `OneBrain_x.y.z_aarch64.dmg`。适用于 Apple 芯片的 Mac（M1 及以后）。
+2. 打开下载的文件，把 **OneBrain** 拖进 **应用程序**。
+3. 第一次打开时，macOS 会拦下不是来自 App Store 或付费开发者账号的应用。打开 **系统设置 → 隐私与安全性**，往下翻，点 **仍要打开**。如果提示"已损坏"，在终端运行一次：
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/OneBrain.app
+   ```
+4. 电脑上至少装好并登录一个编程 Agent，比如 Claude Code、Codex 或 Gemini CLI。OneBrain 用的是你自己的订阅，不会接触你的密钥。新建一个群，拉进成员，用 `@` 叫其中一位开始干活。
+
+## 为什么做这个
+
+我平时同时用好几个编程 Agent。花掉的 token 大部分都用在它们一遍又一遍地重读聊天记录上；想让它们互相交接，只能在几个终端之间来回复制。OneBrain 把它们放进同一个群，并且只给每个成员它真正需要的内容。
 
 <p align="center">
-  <a href="README.md">English</a> · 简体中文 · <a href="README.de.md">Deutsch</a>
+  <img src="docs/assets/token-chart-zh.svg" width="820" alt="单轮 token：OneBrain 保持平稳，每次重读历史则持续上涨；整段对话节省 31% 到 81%">
 </p>
 
-<p align="center">
-  <img src="docs/assets/token-chart-zh.svg" width="820" alt="单轮 token 消耗：OneBrain 保持平稳，每次重读历史则持续上涨；整段对话节省 31% 到 81%">
-</p>
+## 和其他工具比
 
-## 不一样在哪里
+|  | 会话管理器<br><sub>并排开几个终端</sub> | 云端群聊 | OneBrain |
+| --- | :---: | :---: | :---: |
+| 支持多家的 Agent | ✓ | ✓ | ✓ |
+| Agent 在同一个群里互相交接 | – | ✓ | ✓ |
+| 本地运行，无需注册账号 | ✓ | – | ✓ |
+| 中途加入的成员只读一份简短交接，不读全部历史 | – | – | ✓ |
+| 公开、可复现的省 token 测试 | – | – | ✓ |
 
-|  | 常见的多 Agent 做法 | OneBrain |
-| --- | --- | --- |
-| Agent 跟上进度 | 重读历史 | 只读它没看过的新内容 |
-| 新成员加入 | 拿到整段聊天记录 | 拿到一份简短的团队交接 |
-| 谁会运行 | 所有人，或由调度 Agent 决定 | 只有你 @ 的那一位 |
-| 记忆 | 各自存在每个 Agent 里 | 一个人也能读的共享大脑 |
-| 运行中途你改了主意 | 接力照常进行 | 交接会等你 |
-| 单轮成本 | 随对话越来越高 | 稳定在 1,000 token 左右 |
+## 数据
 
-## 测试结果
-
-三个成员（开发、审核、测试）在同一个对话里，每轮 @ 其中一位。两列提供给 Agent 的信息完全相同。
+三个成员（开发、审核、测试），每轮 @ 其中一位。两列提供给 Agent 的信息完全相同。
 
 | 对话长度 | 每次重读历史 | OneBrain | 节省 |
 | ---: | ---: | ---: | ---: |
@@ -46,51 +64,38 @@
 | 60 轮 | 258,464 | 72,928 | **72%** |
 | 100 轮 | 633,264 | 123,388 | **81%** |
 
-中途加入的成员，比如第 100 轮才叫进来的第二位审核，起步只需要 1,611 个 token，而不是 11,364 个（少 **86%**）。
+第 100 轮才叫进来的审核员，起步只用 **1,611** 个 token，而不是 **11,364** 个。
 
-所有数字都来自同一条命令：用真实的 prompt 构建代码重放一段固定的对话。
+所有数字都来自同一条命令：用真实的 prompt 构建代码重放一段固定对话，你可以自己验证。
 
 ```sh
 BENCH_TURNS=30 cargo test -p services --lib context_token_benchmark -- --ignored --nocapture
 ```
 
-测试方法和完整数据：[docs/benchmarks/context-tokens.md](docs/benchmarks/context-tokens.md)
+测试方法：[docs/benchmarks/context-tokens.md](docs/benchmarks/context-tokens.md)
 
-## 怎么省下来的
+## 原理
 
 不同厂商的 Agent 没法共用缓存，所以 OneBrain 不在成员之间传聊天记录。每个 Agent 保留自己的对话，成员之间只传小而稳定的内容。
 
-**被 @ 才运行。** 没人 @ 的成员不运行，不花一个 token。
-
-**每个成员一个已读位置。** 续接对话的成员只收到它上次之后的新消息；角色设定和团队规则没变，就不重发。只有运行成功，已读位置才会前进，失败的运行不会让消息被跳过。
-
-**团队交接。** 新加入的成员会拿到你最近的请求、其他成员最近一次的结论和改动的文件，以及已经记录下来的决定。这些都来自会话里已有的数据，不需要额外调用模型去写总结。
-
-**交接会等你。** Agent 干活期间你发了新消息，它发给其他成员的交接会显示出来，但不会叫醒对方。接力停在你的新消息这里，不会按旧的要求继续跑。
-
-**每条回复都显示缓存命中率。** 每条回复下面写着新输入、缓存命中和输出的 token 数，以及命中缓存的比例。各家统计缓存的方式不同，OneBrain 会先统一口径再显示。
+- **被 @ 才运行。** 没人叫的成员不运行。
+- **每个成员一个已读位置。** 续接的成员只收到上次之后的新消息；角色和团队规则没变就不重发。
+- **团队交接。** 新成员拿到你最近的请求、其他成员最近的结论和改动的文件，以及已记录的决定。全部来自群里已有的数据，不额外调用模型写总结。
+- **交接会等你。** Agent 干活时你发了新消息，它的交接会显示出来，但不会叫醒下一位，没人会按你刚改掉的要求继续干。
+- **每条回复显示缓存命中率。** 新输入、缓存命中和输出，各家口径统一后再显示。
 
 ## 共享大脑
 
-大多数 Agent 工具把学到的东西留在每个 Agent 自己那里：一段很长的聊天记录，或者只有它自己读的记忆文件。OneBrain 给整个团队一份共同的记忆，而且是写给人看的，不只是给 Agent 看。
+大多数 Agent 工具把学到的东西留在每个 Agent 自己那里。OneBrain 给整个团队一份共同的记忆：决定、规则、经验和交接，都是普通的 Markdown，任何 Agent 都能打开，你能直接读，git 能记录每次改动。每一条都记着来源，Agent 提议，由你批准。
 
-设计如下：
+已上线：共享记录、团队交接、每个成员的已读位置。下一步：App 里的大脑页面，可以浏览、批准和编辑。
 
-- 决定、规则、经验和交接都是普通的 Markdown 文件。任何 Agent 工具都能打开，你能直接读，git 能看到每一次改动。
-- 每一条都记着来源：出自哪条消息，或者描述的是哪个文件的哪几行。那些文件一改，这一条就会被标记为过期。
-- Agent 只能提议，由你来批准。没有经过人看过的内容，不会变成团队知识。
+## 其他
 
-已上线：共享记录、团队交接、每个成员的已读位置。进行中：App 里的大脑页面，可以浏览、批准和编辑每一条。
-
-先有方法，后有 App。在 OneBrain 出现之前，同一台电脑上的几个编程 Agent 就已经靠共享的 Markdown 文件和一套成文的规则保持同步。OneBrain 把这个习惯做成了产品。
-
-## 其他功能
-
-- 暖白色的群聊界面，每种运行时配一个像素风头像，每位成员都有一张 GitHub 风格的每日运行热力图。
-- 后台随 App 一起退出，崩溃或强制退出也一样，并且会停掉它启动的 Agent 进程。
+- 暖白色的群聊界面，每种运行时配一个像素风头像。
+- 每个成员都有一张 GitHub 风格的每日运行热力图。
+- 后台随 App 一起退出，崩溃时也一样，并会停掉它启动的 Agent 进程。
 - 每个对话可以用独立的 Git worktree，Agent 不会改到你正在用的工作目录。
-
-支持 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Amp 等。
 
 ## 从源码构建
 
@@ -102,6 +107,6 @@ pnpm run check
 cargo test -p db -p services
 ```
 
-## 致谢
+---
 
-Apache License 2.0。基于 [OpenTeams](https://github.com/openteams-lab/openteams)（同为 Apache-2.0）开发，详见 [NOTICE](NOTICE)。
+<sub>Apache License 2.0。基于 OpenTeams（Apache-2.0）开发，详见 NOTICE。</sub>
