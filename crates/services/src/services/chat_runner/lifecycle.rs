@@ -2575,6 +2575,33 @@ impl ChatRunner {
                     "failed to stage member context cursor"
                 );
             }
+            // Snapshot the working tree first, so the user can undo this run's changes.
+            {
+                let repo = PathBuf::from(&workspace_path);
+                let label = run_id.to_string();
+                match tokio::task::spawn_blocking(move || git::create_checkpoint(&repo, &label)).await {
+                    Ok(Ok(Some(checkpoint))) => {
+                        if let Err(err) = db::models::chat_run_checkpoint::ChatRunCheckpoint::create(
+                            &self.db.pool,
+                            run_id,
+                            session_id,
+                            &workspace_path,
+                            &checkpoint,
+                        )
+                        .await
+                        {
+                            tracing::warn!(run_id = %run_id, error = %err, "failed to store run checkpoint");
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(err)) => {
+                        tracing::warn!(run_id = %run_id, error = %err, "failed to snapshot working tree");
+                    }
+                    Err(err) => {
+                        tracing::warn!(run_id = %run_id, error = %err, "checkpoint task failed");
+                    }
+                }
+            }
             let executor_prompt = ExecutorPrompt {
                 text: prompt.clone(),
                 images: match message_attachments.as_ref() {
