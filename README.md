@@ -89,7 +89,7 @@ A reviewer joining at 100 turns starts with 1,775 input tokens versus 11,528 whe
 
 ## The team brain
 
-Vendor memories stay with their vendor: what Claude learns, Codex never sees. OneBrain keeps one memory for the whole team in `~/OneBrain/brain`, a folder that follows the `AGENTS.md` convention:
+Vendor memories stay with their vendor: what Claude learns, Codex never sees. OneBrain keeps one memory for the whole team in `~/OneBrain/brain`, a folder that follows the `AGENTS.md` convention. It gets better the more you use it: every decision an agent writes down is there for the next agent, whichever vendor runs it.
 
 - **Kept by the agents.** They read the index, open only the files a task needs, and write down decisions, rules and handoffs as they work. Collecting memory costs no extra model call.
 - **Every change is signed.** The folder is a git repository. After each run the changes are committed with the agent as author, so each line traces back to an agent and a run.
@@ -107,6 +107,8 @@ Vendor memories stay with their vendor: what Claude learns, Codex never sees. On
 ## Why I built it
 
 I use several coding agents on the same task. Most of what they cost went into reading the same history again and again, and getting a second opinion meant copying the request, the diff and the last answer from one terminal to another. OneBrain puts them in one chat, gives each one only what it has not seen, and keeps what the team decides in files the next agent can read.
+
+Before writing it I read how LobeHub, AionUi and PiBot handle memory, undo and scheduling, and rebuilt the ideas I liked in Rust with fewer tokens in mind. Keeping memory in plain files that agents edit comes from poteto's [brainmaxxing](https://github.com/poteto/brainmaxxing).
 
 ## Build from source
 

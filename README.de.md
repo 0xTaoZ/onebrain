@@ -89,7 +89,7 @@ Ein Reviewer, der nach 100 Runden dazukommt, startet mit 1.775 Eingabe-Tokens. B
 
 ## Das Team-Gehirn
 
-Was ein Anbieter sich merkt, bleibt bei diesem Anbieter: Was Claude lernt, sieht Codex nie. OneBrain führt ein Gedächtnis für das ganze Team in `~/OneBrain/brain`, einem Ordner nach der `AGENTS.md`-Konvention:
+Was ein Anbieter sich merkt, bleibt bei diesem Anbieter: Was Claude lernt, sieht Codex nie. OneBrain führt ein Gedächtnis für das ganze Team in `~/OneBrain/brain`, einem Ordner nach der `AGENTS.md`-Konvention. Es wird mit jeder Nutzung besser: Was ein Agent festhält, steht dem nächsten zur Verfügung, egal von welchem Anbieter er kommt.
 
 - **Von den Agents gepflegt.** Sie lesen den Index, öffnen nur, was die Aufgabe braucht, und halten Entscheidungen, Regeln und Übergaben fest. Dafür ist kein zusätzlicher Modellaufruf nötig.
 - **Jede Änderung ist signiert.** Der Ordner ist ein Git-Repository. Nach jedem Lauf werden die Änderungen mit dem Agent als Autor committet, jede Zeile lässt sich einem Agent und einem Lauf zuordnen.
@@ -107,6 +107,8 @@ Was ein Anbieter sich merkt, bleibt bei diesem Anbieter: Was Claude lernt, sieht
 ## Warum es OneBrain gibt
 
 Ich lasse mehrere Coding-Agents an derselben Aufgabe arbeiten. Der größte Teil der Kosten ging dafür drauf, denselben Verlauf immer wieder zu lesen, und für eine zweite Meinung musste ich Anfrage, Diff und letzte Antwort zwischen Terminals kopieren. OneBrain holt sie in einen Chat, gibt jedem nur, was er noch nicht gesehen hat, und hält fest, was das Team entscheidet, in Dateien, die der nächste Agent lesen kann.
+
+Vorher habe ich mir angesehen, wie LobeHub, AionUi und PiBot Gedächtnis, Rückgängig-Machen und Zeitpläne lösen, und die Ideen, die mir gefielen, in Rust neu gebaut, mit möglichst wenigen Tokens. Die Idee, das Gedächtnis in normalen Dateien zu halten, die Agents selbst bearbeiten, stammt aus potetos [brainmaxxing](https://github.com/poteto/brainmaxxing).
 
 ## Aus dem Quellcode bauen
 

@@ -89,7 +89,7 @@ OneBrain 直接用你已经装好的 CLI 和你自己的订阅，不碰你的密
 
 ## 共享大脑
 
-各家厂商的记忆都只留在自己那里：Claude 学到的，Codex 看不到。OneBrain 给整个团队一份记忆，放在 `~/OneBrain/brain`，按 `AGENTS.md` 的约定组织：
+各家厂商的记忆都只留在自己那里：Claude 学到的，Codex 看不到。OneBrain 给整个团队一份记忆，放在 `~/OneBrain/brain`，按 `AGENTS.md` 的约定组织。它越用越好用：任何一个 Agent 记下的决定，下一个 Agent 都能用上，不管它是哪家厂商的。
 
 - **由 Agent 自己维护。** 先读索引，只打开任务需要的文件，边干活边记下决定、规则和交接。积累记忆不额外调用模型。
 - **每处改动都有署名。** 这个文件夹是一个 git 仓库。每次运行结束，改动以那个 Agent 的名字提交，每一行都能追到是哪个 Agent、哪次运行写的。
@@ -107,6 +107,8 @@ OneBrain 直接用你已经装好的 CLI 和你自己的订阅，不碰你的密
 ## 为什么做这个
 
 我会让好几个编程 Agent 做同一件事。大部分花费都用在一遍遍重读同样的历史上；想听第二个意见，就得把需求、diff 和上一个回答从一个终端复制到另一个终端。OneBrain 把它们放进一个群，每个只给它没看过的内容，团队定下的事写进下一个 Agent 能读的文件里。
+
+动手之前，我读了 LobeHub、AionUi 和 PiBot 怎么做记忆、撤销和定时任务，把喜欢的思路用 Rust 重新实现，并且尽量少用 Token。"把记忆放在 Agent 能直接编辑的普通文件里"这个想法来自 poteto 的 [brainmaxxing](https://github.com/poteto/brainmaxxing)。
 
 ## 从源码构建
 
