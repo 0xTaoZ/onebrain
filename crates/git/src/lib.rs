@@ -10,9 +10,11 @@ use thiserror::Error;
 use ts_rs::TS;
 use utils::diff::{Diff, DiffChangeKind, FileDiffDetails, compute_line_change_counts};
 
+mod checkpoint;
 mod cli;
 mod validation;
 
+pub use checkpoint::{CheckpointError, create_checkpoint, restore_checkpoint};
 use cli::{ChangeType, StatusDiffEntry, StatusDiffOptions};
 pub use cli::{GitCli, GitCliError, StatusEntry, WorktreeStatus};
 pub use utils::path::ALWAYS_SKIP_DIRS;
