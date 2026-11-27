@@ -27,19 +27,11 @@ import {
   prioritizeSessions,
 } from "@/components/ProjectSidebar";
 import { GlobalSearchDialog } from "@/components/GlobalSearchDialog";
-import {
-  OnboardingGuide,
-} from "@/components/onboarding/OnboardingGuide";
 import { CommandPaletteHintCard } from "@/components/onboarding/CommandPaletteHintCard";
 import { VersionUpdatePage } from "@/components/version-update/VersionUpdatePage";
-import { GitHubRepositoryPage } from "@/pages/GitHubRepositoryPage";
-import { IssuePage } from "@/pages/IssuePage";
-import { RoutingPage } from "@/pages/RoutingPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { BuildStatsPage } from "@/pages/BuildStatsPage";
 import { AgentsPage } from "@/pages/AgentsPage";
-import { TeamPage } from "@/pages/TeamPage";
-import { TeamTemplatesPage } from "@/pages/TeamTemplatesPage";
 import {
   Activity,
   AlertTriangle,
@@ -1078,16 +1070,6 @@ function WorkspaceLayout() {
     }
 
     switch (activeAppPage) {
-      case "team":
-        return <TeamPage />;
-      case "issue":
-        return <IssuePage />;
-      case "team-templates":
-        return <TeamTemplatesPage />;
-      case "routing":
-        return <RoutingPage />;
-      case "github":
-        return <GitHubRepositoryPage />;
       case "providers":
         return <SettingsPage />;
       case "build-stats":
@@ -2306,22 +2288,6 @@ function WorkspaceLayout() {
         translate={translate}
       />
 
-      {onboardingOverlay?.mode === "onboarding" && (
-        <OnboardingGuide
-          initialState={onboardingOverlay.state ?? onboardingState}
-          locale={locale}
-          theme={theme}
-          themePreference={themePreference}
-          t={t}
-          teamPresets={teamPresets}
-          onCreateProjectFromOnboarding={handleCreateOnboardingProject}
-          onPreviewLocaleChange={setLocale}
-          onPreviewAppearanceChange={handleOnboardingPreviewAppearanceChange}
-          onClose={() => setOnboardingOverlay(null)}
-          onComplete={handleOnboardingCompleted}
-          onStateChange={handleOnboardingStateChange}
-        />
-      )}
       {onboardingOverlay?.mode === "upgrade" && (
         <VersionUpdatePage
           currentVersion={currentUpgradeVersion}
