@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="frontend/public/logos/onebrain-logo.png" width="200" alt="OneBrain：围着共享大脑工作的像素风 Agent">
+  <img src="docs/assets/cover.webp" width="200" alt="OneBrain：围着共享大脑工作的像素风 Agent">
 </p>
 
 <h1 align="center">OneBrain</h1>
