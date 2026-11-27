@@ -7,11 +7,11 @@
 <p align="center">
   <b>Deine Coding-Agents in einem Gruppenchat, gebaut für Entwickler.</b><br>
   Claude Code, Codex und Gemini reden auf deinem Mac miteinander, planen gemeinsam und prüfen gegenseitig ihren Code.<br>
-  Jeder liest nur, was für ihn neu ist. Lange Gespräche kosten bis zu 81 % weniger Tokens.
+  Im Benchmark mit 100 Runden sinken die Eingabe-Tokens gegenüber erneutem Lesen des Verlaufs um 80,9 %.
 </p>
 
 <p align="center">
-  <b>81 % weniger Tokens</b> nach 100 Runden &nbsp;·&nbsp; <b>7× weniger</b> pro Runde in Runde 100 &nbsp;·&nbsp; <b>0 Tokens</b> im Leerlauf
+  <b>80,9 % weniger Eingabe-Tokens</b> gegenüber erneutem Lesen des Verlaufs im Benchmark mit 100 Runden
 </p>
 
 <p align="center">
@@ -34,10 +34,6 @@
 
 **Für Entwickler gebaut.** Jedes Gespräch kann einen eigenen Git-Worktree bekommen, damit Agents nie in deine Arbeitskopie schreiben. Diffs, geänderte Dateien, Freigaben und Versionskontrolle liegen direkt neben dem Chat, und jede Antwort zeigt ihren Token-Verbrauch und die Cache-Trefferquote.
 
-<p align="center">
-  <img src="docs/assets/token-chart-de.svg" width="820" alt="Tokens pro Runde bleiben mit OneBrain konstant, beim erneuten Lesen des Verlaufs steigen sie; 7-mal weniger in Runde 100">
-</p>
-
 ## Installation
 
 | | Installation per Einzeiler (empfohlen) | `.dmg` herunterladen |
@@ -47,6 +43,12 @@
 | **Voraussetzung** | Mac mit Apple Silicon (M1 oder neuer) | Ebenso |
 
 Installiere danach mindestens einen Coding-Agent, den du schon nutzt, etwa Claude Code, Codex oder Gemini CLI, und melde dich dort an. OneBrain nutzt deine eigenen Abos und sieht deine Schlüssel nie. Lege eine Gruppe an, füge deine Agents hinzu und erwähne einen mit `@`.
+
+## Erster Chat
+
+1. Wähle auf der Startseite einen erkannten Agent und klicke auf **Hinzufügen**.
+2. Wähle eine Chatgruppe oder eine Projektgruppe. Eine Projektgruppe braucht auch einen Arbeitsordner.
+3. Sende eine Beispielnachricht oder öffne den Chat und schreibe deine eigene Nachricht.
 
 ## Im Vergleich
 
@@ -64,28 +66,24 @@ Ich arbeite mit mehreren Coding-Agents gleichzeitig. Der größte Teil der Koste
 
 ## Die Zahlen
 
-Drei Agents (Entwicklung, Review, Test), pro Runde wird einer erwähnt. Beide Spalten geben den Agents dieselben Informationen.
+Festes Gespräch mit drei Agents und einer Erwähnung pro Runde. Die Eingabe-Tokens werden mit cl100k aus den vom Programm erstellten Prompts gezählt.
 
-| Gespräch | Verlauf neu lesen | OneBrain | Ersparnis |
-| ---: | ---: | ---: | ---: |
-| 10 Runden | 18.752 | 12.859 | **31 %** |
-| 30 Runden | 85.208 | 37.135 | **56 %** |
-| 60 Runden | 258.464 | 72.928 | **72 %** |
-| 100 Runden | 633.264 | 123.388 | **81 %** |
+| Runden | Prompt + Verlauf erneut lesen | OneBrain | Ersparnis mit Verlauf | Ersparnis nur mit Prompt |
+| ---: | ---: | ---: | ---: | ---: |
+| 10 | 20.369 | 13.349 | **34,5 %** | 16,8 % |
+| 30 | 90.014 | 37.594 | **58,2 %** | 21,8 % |
+| 60 | 268.112 | 73.399 | **72,6 %** | 23,6 % |
+| 100 | 649.322 | 123.829 | **80,9 %** | 22,8 % |
 
-Ein Reviewer, der nach 100 Runden dazukommt, startet mit **1.611** statt **11.364** Tokens. Alle Zahlen stammen aus einem Befehl, der ein festes Gespräch durch den echten Prompt-Builder schickt:
+Ein Reviewer, der nach 100 Runden dazukommt, startet mit 1.775 Eingabe-Tokens. Beim erneuten Lesen des Verlaufs wären es 11.528. Die Zahlen stammen aus dem Benchmark; die Abrechnung hängt vom Anbieter ab.
 
-```sh
-BENCH_TURNS=30 cargo test -p services --lib context_token_benchmark -- --ignored --nocapture
-```
-
-Methode: [docs/benchmarks/context-tokens.md](docs/benchmarks/context-tokens.md)
+[Methode](docs/benchmarks/context-tokens.md)
 
 ## Wie die Ersparnis entsteht
 
 Agents verschiedener Anbieter können keinen gemeinsamen Provider-Cache nutzen. Deshalb reicht OneBrain keine Transkripte herum. Jeder Agent behält sein eigenes Gespräch, und zwischen den Agents wandern nur kleine, stabile Bausteine.
 
-- **Erwähnen, dann arbeiten.** Ein Agent läuft nur, wenn jemand ihn erwähnt.
+- **Antwortende wählen.** Nenne einen Agent mit @ oder frage die Gruppe mit @all. Ohne Erwähnung antwortet ein ausgewählter Agent.
 - **Ein Lesezeichen pro Agent.** Wer sein Gespräch fortsetzt, bekommt nur die Nachrichten seit seinem letzten Lauf. Rolle und Teamregeln werden nicht erneut geschickt, solange sie gleich bleiben.
 - **Team-Übergaben.** Neue Agents bekommen deine letzten Anfragen, das letzte Ergebnis und die geänderten Dateien der anderen und die festgehaltenen Entscheidungen, aus gespeicherten Daten und ohne zusätzlichen Modellaufruf.
 - **Übergaben warten auf dich.** Schreibst du, während ein Agent arbeitet, weckt seine Übergabe den nächsten Agent nicht. So arbeitet niemand mit Vorgaben weiter, die du gerade geändert hast.
@@ -94,7 +92,7 @@ Agents verschiedener Anbieter können keinen gemeinsamen Provider-Cache nutzen. 
 
 Die meisten Agent-Werkzeuge behalten ihr Wissen im einzelnen Agent. OneBrain führt ein Gedächtnis für das ganze Team: Entscheidungen, Regeln, Erkenntnisse und Übergaben als einfaches Markdown, das jeder Agent öffnen, du lesen und git verfolgen kann. Jeder Eintrag behält seine Quelle, Agents schlagen vor, du gibst frei.
 
-Schon verfügbar: gemeinsame Einträge, Team-Übergaben und ein Lesezeichen pro Agent. Als Nächstes: eine Seite in der App, um Einträge zu durchsuchen, freizugeben und zu bearbeiten.
+Die Brain-Seite zeigt gemeinsame Einträge und Übergaben.
 
 ## Aus dem Quellcode bauen
 

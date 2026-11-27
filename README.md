@@ -7,11 +7,11 @@
 <p align="center">
   <b>Your coding agents, in one group chat, built for developers.</b><br>
   Claude Code, Codex and Gemini talk to each other on your Mac, plan work together and review each other's code.<br>
-  Each one reads only what is new to it, so long conversations cost up to 81% fewer tokens.
+  Each agent reads new context. In a 100-turn replay, input tokens fell 80.9% versus rereading the full history.
 </p>
 
 <p align="center">
-  <b>81% fewer tokens</b> over 100 turns &nbsp;·&nbsp; <b>7× less</b> per turn by turn 100 &nbsp;·&nbsp; <b>0 tokens</b> while idle
+  <b>80.9% fewer input tokens</b> vs. rereading history in a 100-turn benchmark
 </p>
 
 <p align="center">
@@ -34,10 +34,6 @@
 
 **Built for developers.** Each conversation can get its own Git worktree, so agents never write over your working copy. Diffs, file changes, approvals and source control live next to the chat, and every reply shows its token use and cache hit rate.
 
-<p align="center">
-  <img src="docs/assets/token-chart-en.svg" width="820" alt="Tokens for one turn stay flat with OneBrain while rereading history grows; 7 times less by turn 100">
-</p>
-
 ## Install
 
 | | One-line install (recommended) | Download the `.dmg` |
@@ -47,6 +43,12 @@
 | **Needs** | A Mac with Apple Silicon (M1 or later) | Same |
 
 Then install and sign in to at least one coding agent you already use, such as Claude Code, Codex or Gemini CLI. OneBrain uses your own subscriptions and never sees your keys. Create a group, add your agents, and mention one with `@`.
+
+## First chat
+
+1. On the welcome screen, pick a detected Agent and click **Add**.
+2. Choose a chat group or a project group. A project group also needs a working folder.
+3. Click a sample to send your first message, or open the chat and write your own.
 
 ## How it compares
 
@@ -64,28 +66,24 @@ I use several coding agents at once. Most of what they cost went into reading th
 
 ## The numbers
 
-Three agents (coder, reviewer, tester), one mentioned per turn. Both columns give the agents the same information.
+Fixed three-agent conversation with one mention per turn. Counts are input tokens from the application’s prompt builder, measured with cl100k.
 
-| Conversation | Rereading history | OneBrain | Saved |
-| ---: | ---: | ---: | ---: |
-| 10 turns | 18,752 | 12,859 | **31%** |
-| 30 turns | 85,208 | 37,135 | **56%** |
-| 60 turns | 258,464 | 72,928 | **72%** |
-| 100 turns | 633,264 | 123,388 | **81%** |
+| Turns | Prompt + history reread | OneBrain | Saved vs. rereading | Saved vs. prompt only |
+| ---: | ---: | ---: | ---: | ---: |
+| 10 | 20,369 | 13,349 | **34.5%** | 16.8% |
+| 30 | 90,014 | 37,594 | **58.2%** | 21.8% |
+| 60 | 268,112 | 73,399 | **72.6%** | 23.6% |
+| 100 | 649,322 | 123,829 | **80.9%** | 22.8% |
 
-A reviewer called in after 100 turns starts with **1,611** tokens instead of **11,364**. Every number comes from one command that replays a fixed conversation through the real prompt builder:
+A reviewer joining at 100 turns starts with 1,775 input tokens versus 11,528 when rereading history. These are benchmark measurements, not provider bills.
 
-```sh
-BENCH_TURNS=30 cargo test -p services --lib context_token_benchmark -- --ignored --nocapture
-```
-
-Method: [docs/benchmarks/context-tokens.md](docs/benchmarks/context-tokens.md)
+[Method](docs/benchmarks/context-tokens.md)
 
 ## How it saves tokens
 
 Agents from different vendors cannot share a provider cache, so OneBrain does not pass transcripts around. Each agent keeps its own conversation, and only small, stable pieces move between agents.
 
-- **Mention to run.** An agent runs only when someone mentions it.
+- **Choose who answers.** Use @ to name one agent, or @all to ask the group. A message without a mention goes to one selected agent.
 - **A read cursor per agent.** A resumed agent gets the messages since its last run. Its role and the team rules are not resent while they stay the same.
 - **Team handoffs.** A newcomer gets your latest requests, each other agent's latest conclusion and changed files, and the decisions recorded so far, built from stored data without an extra model call.
 - **Handoffs wait for you.** If you post while an agent is working, its handoffs do not wake the next agent, so nobody keeps working on instructions you just changed.
@@ -94,7 +92,7 @@ Agents from different vendors cannot share a provider cache, so OneBrain does no
 
 Most agent tools keep what they learn inside each agent. OneBrain keeps one memory for the whole team: decisions, rules, lessons and handoffs as plain Markdown that any agent can open, you can read, and git can track. Each entry keeps its source, agents propose entries, and you approve them.
 
-Live today: shared records, team handoffs and per-agent read cursors. Next: a brain page in the app to browse, approve and edit entries.
+The Brain page shows shared entries and handoffs.
 
 ## Build from source
 

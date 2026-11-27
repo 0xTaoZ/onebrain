@@ -518,6 +518,8 @@ function WorkspaceLayout() {
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
   const [isCreateSessionModalOpen, setIsCreateSessionModalOpen] =
     useState(false);
+  const [welcomeSessionId, setWelcomeSessionId] = useState<string | null>(null);
+  const [welcomeGroup, setWelcomeGroup] = useState<{ runners?: string[] } | null>(null);
   const [isGroupMemberPickerOpen, setIsGroupMemberPickerOpen] = useState(false);
   useEffect(() => {
     const openPicker = () => setIsGroupMemberPickerOpen(true);
@@ -1086,8 +1088,16 @@ function WorkspaceLayout() {
         return <BrainPage />;
       case "workspace":
       default:
-        if (!sessionsAsync.loading && !sessionsAsync.error && sessions.length === 0) {
-          return <WelcomeGuide onCreateGroup={openNewChat} />;
+        if (welcomeSessionId === activeSessionId ||
+            (!sessionsAsync.loading && !sessionsAsync.error && sessions.length === 0)) {
+          return <WelcomeGuide
+            sessionId={welcomeSessionId === activeSessionId ? welcomeSessionId : null}
+            onCreateGroup={runners => {
+              setWelcomeGroup({ runners });
+              openNewChat();
+            }}
+            onFinish={() => setWelcomeSessionId(null)}
+          />;
         }
         return (
           <div className="h-full w-full flex flex-col min-h-0">
@@ -2276,7 +2286,17 @@ function WorkspaceLayout() {
 
       <AppPanels />
       {isNewGroupOpen && (
-        <NewGroupSheet onClose={() => setIsNewGroupOpen(false)} onCreated={openCreatedGroup} />
+        <NewGroupSheet
+          preferredRunners={welcomeGroup?.runners}
+          onClose={() => {
+            setIsNewGroupOpen(false);
+            setWelcomeGroup(null);
+          }}
+          onCreated={sessionId => {
+            if (welcomeGroup || sessions.length === 0) setWelcomeSessionId(sessionId);
+            openCreatedGroup(sessionId);
+          }}
+        />
       )}
 
       {isGroupMemberPickerOpen && (

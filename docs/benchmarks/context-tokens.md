@@ -6,27 +6,17 @@ How many input tokens a mentioned agent receives per run, before and after the m
 
 Three members (coder, reviewer, tester), one member mentioned per turn, one reply per run. Token counts use the cl100k tokenizer.
 
-| Turns | Before: prompt + history read | After | Saving | Last turn, before → after |
-| ---: | ---: | ---: | ---: | ---: |
-| 10 | 18,752 | 12,859 | 31% | 2,313 → 1,392 |
-| 30 | 85,208 | 37,135 | 56% | 4,289 → 1,035 |
-| 60 | 258,464 | 72,928 | 72% | 7,194 → 1,041 |
-| 100 | 633,264 | 123,388 | 81% | 11,348 → 1,469 |
+| Turns | Prompt + history read | Incremental input | Saved vs. history reread | Saved vs. prompt only | Last turn, reread → incremental |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 | 20,369 | 13,349 | 34.5% | 16.8% | 2,478 → 1,396 |
+| 30 | 90,014 | 37,594 | 58.2% | 21.8% | 4,447 → 1,032 |
+| 60 | 268,112 | 73,399 | 72.6% | 23.6% | 7,362 → 1,048 |
+| 100 | 649,322 | 123,829 | 80.9% | 22.8% | 11,499 → 1,459 |
 
-Before the change, an agent that needs earlier context reads the session history file, which grows with every message, so the cost per turn grows with the conversation. After the change, a resumed agent receives only the messages it has not seen, so the cost per turn stays roughly flat.
 
-Against the prompt alone (an agent that never reads history and therefore misses context), the saving is 10–15%. That part comes from not resending an unchanged role and team protocol.
+For the 100-turn replay, the prompt-only baseline used 160,346 input tokens. The same replay used 649,322 when the baseline also reread history. These baselines represent different amounts of input. Counts exclude provider prices, cache discounts, and output tokens.
 
-### A new member joins
-
-A member that has no view of the session yet, such as a second reviewer, starts from a team handoff instead of reading the history: the latest requests from the user, each other member's latest conclusion and changed files, and the shared records. The handoff is built from data the session already stores, so it costs no extra model call.
-
-| Joins after | Before: prompt + history read | After: team handoff | Saving |
-| ---: | ---: | ---: | ---: |
-| 10 turns | 2,324 | 1,587 | 32% |
-| 30 turns | 4,308 | 1,595 | 63% |
-| 60 turns | 7,215 | 1,556 | 78% |
-| 100 turns | 11,364 | 1,611 | 86% |
+At turn 100, a new reviewer received 1,775 input tokens in a handoff, compared with 11,528 for the history reread baseline, a reduction of 84.6%. The handoff is built from stored data without an extra model call.
 
 ## Method
 
@@ -38,5 +28,7 @@ A member that has no view of the session yet, such as a second reviewer, starts 
 Reproduce:
 
 ```sh
-BENCH_TURNS=30 cargo test -p services --lib context_token_benchmark -- --ignored --nocapture
+for turns in 10 30 60 100; do
+  BENCH_TURNS=$turns cargo test -p services --lib context_token_benchmark -- --ignored --nocapture
+done
 ```

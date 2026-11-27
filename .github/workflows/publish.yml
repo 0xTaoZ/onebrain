@@ -30,7 +30,9 @@ jobs:
     runs-on: ubuntu-latest
     if: |
       github.event_name == 'workflow_dispatch' ||
-      (github.event.release.prerelease == false && !startsWith(github.event.release.tag_name, 'remote-'))
+      (github.event.release.prerelease == false &&
+       !startsWith(github.event.release.tag_name, 'remote-') &&
+       contains(github.event.release.assets.*.name, 'latest.json'))
     steps:
       - name: Resolve release metadata
         id: meta

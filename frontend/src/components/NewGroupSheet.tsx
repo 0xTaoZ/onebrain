@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Folder, MessageCircle, MessagesSquare, X } from 'lucide-react';
 import { agentRuntimeApi, chatAgentsApi, chatSessionsApi, filesystemApi, sessionAgentsApi } from '@/lib/api';
 import { useWorkspace } from '@/context/WorkspaceContext';
@@ -12,7 +12,11 @@ type Runtime = { runner: string; ready: boolean };
  * Create a direct chat, a chat group or a project group in one step:
  * pick the type, tick the agents, and for a project choose its folder.
  */
-export function NewGroupSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (sessionId: string) => void }) {
+export function NewGroupSheet({ onClose, onCreated, preferredRunners }: {
+  onClose: () => void;
+  onCreated: (sessionId: string) => void;
+  preferredRunners?: string[];
+}) {
   const { locale, showToast } = useWorkspace();
   const zh = locale === 'zh';
   const [kind, setKind] = useState<Kind>('chat');
@@ -20,6 +24,7 @@ export function NewGroupSheet({ onClose, onCreated }: { onClose: () => void; onC
   const [selected, setSelected] = useState<string[]>([]);
   const [folder, setFolder] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const draftSessionId = useRef<string | null>(null);
 
   useEffect(() => {
     agentRuntimeApi.list()
@@ -28,17 +33,18 @@ export function NewGroupSheet({ onClose, onCreated }: { onClose: () => void; onC
           .filter(status => status.installed)
           .map(status => ({ runner: status.runner_type, ready: status.executable }));
         setRuntimes(found);
-        setSelected(found.filter(item => item.ready).map(item => item.runner));
+        setSelected(found.filter(item => item.ready && (!preferredRunners || preferredRunners.includes(item.runner))).map(item => item.runner));
       })
       .catch(() => setRuntimes([]));
-  }, []);
+  }, [preferredRunners]);
 
   const ready = useMemo(() => (runtimes ?? []).filter(item => item.ready), [runtimes]);
 
   const choose = (next: Kind) => {
     setKind(next);
-    // A direct chat has exactly one agent; groups start with everyone who can run.
-    setSelected(next === 'direct' ? ready.slice(0, 1).map(item => item.runner) : ready.map(item => item.runner));
+    if (next === 'direct') {
+      setSelected(current => current.length ? current.slice(0, 1) : ready.slice(0, 1).map(item => item.runner));
+    }
   };
 
   const toggle = (runner: string) => {
@@ -71,19 +77,23 @@ export function NewGroupSheet({ onClose, onCreated }: { onClose: () => void; onC
     if (!canCreate) return;
     setBusy(true);
     try {
-      const session = await chatSessionsApi.create({ title, workspace_path: kind === 'project' ? folder : null });
+      const sessionId = draftSessionId.current ?? (await chatSessionsApi.create({
+        title,
+        workspace_path: kind === 'project' ? folder : null,
+      })).id;
+      draftSessionId.current = sessionId;
       const agents = await chatAgentsApi.list();
       for (const runner of selected) {
-        const agent = agents.find(candidate => candidate.runner_type === runner) ?? await chatAgentsApi.create({
+        const agent = agents.find(candidate => candidate.runner_type === runner && candidate.owner_project_id === null) ?? await chatAgentsApi.create({
           name: handleFor(runner),
           runner_type: runner,
           system_prompt: null,
           tools_enabled: null,
           model_name: null,
         });
-        await sessionAgentsApi.add(session.id, { agent_id: agent.id, workspace_path: null, allowed_skill_ids: null });
+        await sessionAgentsApi.add(sessionId, { agent_id: agent.id, workspace_path: null, allowed_skill_ids: null });
       }
-      onCreated(session.id);
+      onCreated(sessionId);
       onClose();
     } catch (error) {
       showToast(error instanceof Error ? error.message : String(error));
@@ -99,16 +109,16 @@ export function NewGroupSheet({ onClose, onCreated }: { onClose: () => void; onC
   ];
 
   return (
-    <div className="ui-sheet-backdrop" role="dialog" aria-modal="true" aria-label={zh ? '新建' : 'New chat'} onClick={onClose}>
+    <div className="ui-sheet-backdrop" role="dialog" aria-modal="true" aria-label={zh ? '新建' : 'New chat'} onClick={busy ? undefined : onClose}>
       <div className="ui-sheet" onClick={event => event.stopPropagation()}>
         <div className="ui-sheet-head">
           <strong>{zh ? '新建' : 'New chat'}</strong>
-          <button type="button" className="ui-sheet-close" onClick={onClose} aria-label={zh ? '关闭' : 'Close'}><X size={18} /></button>
+          <button type="button" className="ui-sheet-close" disabled={busy} onClick={onClose} aria-label={zh ? '关闭' : 'Close'}><X size={18} /></button>
         </div>
 
         <div className="ui-kind-row" role="radiogroup">
           {kinds.map(({ id, label, hint, Icon }) => (
-            <button key={id} type="button" role="radio" aria-checked={kind === id} className="ui-kind" onClick={() => choose(id)}>
+            <button key={id} type="button" role="radio" aria-checked={kind === id} className="ui-kind" disabled={busy || !!draftSessionId.current} onClick={() => choose(id)}>
               <Icon size={18} /><strong>{label}</strong><small>{hint}</small>
             </button>
           ))}
@@ -124,7 +134,7 @@ export function NewGroupSheet({ onClose, onCreated }: { onClose: () => void; onC
         ) : (
           <div className="ui-pick-grid">
             {runtimes.map(({ runner, ready: runnable }) => (
-              <button key={runner} type="button" className="ui-pick" aria-pressed={selected.includes(runner)} disabled={!runnable} onClick={() => toggle(runner)}>
+              <button key={runner} type="button" className="ui-pick" aria-pressed={selected.includes(runner)} disabled={!runnable || busy || !!draftSessionId.current} onClick={() => toggle(runner)}>
                 <span className="paper-person-avatar"><AgentCharacterAvatar identity={runner}>{runtimeDisplayName(runner)[0]}</AgentCharacterAvatar></span>
                 <span>{runtimeDisplayName(runner)}</span>
                 {!runnable && <small>{zh ? '需要登录' : 'Sign in first'}</small>}
@@ -136,7 +146,7 @@ export function NewGroupSheet({ onClose, onCreated }: { onClose: () => void; onC
         {kind === 'project' && (
           <>
             <p className="ui-sheet-label">{zh ? '项目文件夹' : 'Project folder'}</p>
-            <button type="button" className="ui-folder" onClick={() => void pickFolder()}>
+            <button type="button" className="ui-folder" disabled={busy || !!draftSessionId.current} onClick={() => void pickFolder()}>
               <Folder size={16} />{folder ?? (zh ? '选择文件夹…' : 'Choose a folder…')}
             </button>
           </>
