@@ -166,3 +166,13 @@ body[data-mode="paper"] .agent-character-image { display: block; width: 100%; he
 .ui-brain-change-files { display: flex; flex-wrap: wrap; gap: 8px; }
 .ui-link { border: 0; padding: 0; background: none; color: var(--primary); font: inherit; font-size: 12px; cursor: pointer; }
 @media (max-width: 900px) { .ui-brain-body { grid-template-columns: 1fr; } }
+
+/* Subscription quota bars */
+.ui-quota { display: grid; gap: 2px; margin-top: 4px; }
+.ui-quota-row { display: grid; grid-template-columns: 40px 1fr 32px; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-tertiary); }
+.ui-quota-reset { grid-column: 2 / 4; font-size: 10px; }
+.ui-quota-track { height: 4px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
+.ui-quota-track span { display: block; height: 100%; background: var(--success); }
+.ui-quota-row[data-level="mid"] .ui-quota-track span { background: #ff9500; }
+.ui-quota-row[data-level="high"] .ui-quota-track span { background: #ff3b30; }
+.ui-quota-value { text-align: right; font-variant-numeric: tabular-nums; }

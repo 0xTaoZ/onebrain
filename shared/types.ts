@@ -857,6 +857,18 @@ export type BrainFile = { path: string, bytes: number, tokens: number,
  */
 always_read: boolean, last_author: string | null, last_changed: string | null, };
 
+export type QuotaWindow = { used_percent: number, window_minutes: number,
+/**
+ * Unix seconds when the window resets.
+ */
+resets_at: number | null, };
+
+export type RuntimeQuota = { runner: string, plan: string | null, primary: QuotaWindow | null, secondary: QuotaWindow | null, limit_reached: boolean,
+/**
+ * When the CLI recorded these numbers (its last turn).
+ */
+observed_at: string | null, };
+
 export type BrainChange = { commit: string, author: string, at: string, message: string, files: Array<string>, };
 
 export type BrainOverview = { dir: string, tracked: boolean, files: Array<BrainFile>,

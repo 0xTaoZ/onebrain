@@ -5,6 +5,7 @@ import { useWorkspace } from '@/context/WorkspaceContext';
 import { AgentCharacterAvatar } from './AgentCharacterAvatar';
 import { MemberActivityHeatmap } from './MemberActivityHeatmap';
 import { openAppPanel } from './AppPanels';
+import { QuotaBars, useRuntimeQuota } from './QuotaBars';
 import { openGroupMemberPicker } from '@/lib/teamNavigation';
 import { copyPlainText } from '@/lib/clipboard';
 import { projectDisplayName } from '@/lib/projectDisplay';
@@ -25,6 +26,12 @@ export function PaperChatSidebar({ activePage, workspaceNavigation, onSessionSel
   const zh = locale === 'zh';
   const panelId = useId();
   const [tab, setTab] = useState<'chats' | 'contacts'>('chats');
+  const quotas = useRuntimeQuota();
+  // A member without a chosen model shows that it uses its CLI's default.
+  const modelLabel = (member: Member) =>
+    !member.modelName || member.modelName.toUpperCase() === member.modelName && member.modelName === member.runner
+      ? (zh ? '默认模型' : 'Default model')
+      : member.modelName;
   const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null);
 
   const [showWorkspace, setShowWorkspace] = useState(false);
@@ -114,9 +121,9 @@ export function PaperChatSidebar({ activePage, workspaceNavigation, onSessionSel
               {membersAsync.loading && <p className="paper-list-notice" role="status">{zh ? '正在加载成员…' : 'Loading members…'}</p>}
               {visibleMembers.filter(member => member.name.toLocaleLowerCase().includes(query.toLocaleLowerCase())).map(member => <div key={member.id} className="paper-contact">
                 <button type="button" className="paper-contact-heading" aria-expanded={selectedMember?.id === member.id} onClick={() => setSelectedMemberId(selectedMember?.id === member.id ? null : member.id)}>
-                  <PaperMemberAvatar member={member} /><span><strong>{member.name.replace(/^@/, '')}</strong><small>{member.modelName || member.roleDetail}</small></span><span className="paper-contact-expand">{selectedMember?.id === member.id ? '−' : '+'}</span>
+                  <PaperMemberAvatar member={member} /><span><strong>{member.name.replace(/^@/, '')}</strong><small>{modelLabel(member)}</small>{(() => { const quota = quotas.find(item => item.runner === member.runner); return quota ? <QuotaBars quota={quota} zh={zh} /> : null; })()}</span><span className="paper-contact-expand">{selectedMember?.id === member.id ? '−' : '+'}</span>
                 </button>
-                {selectedMember?.id === member.id && <div className="paper-contact-detail"><span className="paper-status" data-status={member.status}><i />{status(member)}</span><p>{member.roleDetail}</p><MemberActivityHeatmap sessionAgentId={member.id} label={total => (zh ? `近半年运行 ${total} 次` : `${total} runs in the last 6 months`)} /><button type="button" onClick={() => { void copyPlainText(`@${member.name.replace(/^@/, '')} `).then(ok => showToast(ok ? (zh ? '已复制成员称呼，粘贴到聊天输入框即可。' : 'Mention copied. Paste it into the composer.') : (zh ? '复制失败，请在输入框中输入 @ 选择成员。' : 'Could not copy. Type @ in the composer.'))); }}>{zh ? '复制 @称呼' : 'Copy @mention'}</button></div>}
+                {selectedMember?.id === member.id && <div className="paper-contact-detail"><span className="paper-status" data-status={member.status}><i />{status(member)}</span><p>{member.roleDetail}</p><button type="button" onClick={() => setEditingMemberId(member.id)}>{zh ? `换模型（现在：${modelLabel(member)}）` : `Change model (now: ${modelLabel(member)})`}</button><MemberActivityHeatmap sessionAgentId={member.id} label={total => (zh ? `近半年运行 ${total} 次` : `${total} runs in the last 6 months`)} /><button type="button" onClick={() => { void copyPlainText(`@${member.name.replace(/^@/, '')} `).then(ok => showToast(ok ? (zh ? '已复制成员称呼，粘贴到聊天输入框即可。' : 'Mention copied. Paste it into the composer.') : (zh ? '复制失败，请在输入框中输入 @ 选择成员。' : 'Could not copy. Type @ in the composer.'))); }}>{zh ? '复制 @称呼' : 'Copy @mention'}</button></div>}
               </div>)}
               {!membersAsync.loading && !membersAsync.error && !visibleMembers.length && <p className="paper-list-notice">{zh ? '群聊还没有成员，添加后即可分派任务。' : 'Add a member to this group to assign tasks.'}</p>}
               {activeSessionId && <button type="button" className="paper-manage-members" onClick={() => onNavigate('brain')}>{zh ? '共享大脑' : 'Shared brain'}</button>}

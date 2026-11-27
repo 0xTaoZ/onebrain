@@ -338,6 +338,8 @@ fn generate_types_content() -> String {
         server::routes::chat::brain::BrainRestoreRequest::decl(),
         server::routes::chat::brain::BrainFileContent::decl(),
         services::services::brain::BrainFile::decl(),
+        services::services::quota::QuotaWindow::decl(),
+        services::services::quota::RuntimeQuota::decl(),
         services::services::brain::BrainChange::decl(),
         services::services::brain::BrainOverview::decl(),
         services::services::brain::BrainSearchHit::decl(),

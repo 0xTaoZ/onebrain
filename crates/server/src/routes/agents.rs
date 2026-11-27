@@ -21,6 +21,7 @@ use crate::{DeploymentImpl, error::ApiError};
 pub fn router() -> Router<DeploymentImpl> {
     Router::new()
         .route("/agents/runtime", get(get_runtime))
+        .route("/agents/quota", get(get_quota))
         .route("/agents/runtime/refresh", post(refresh_runtime_heavy))
         .route("/agents/runtime/refresh/heavy", post(refresh_runtime_heavy))
         .route("/agents/runtime/refresh/light", post(refresh_runtime_light))
@@ -40,6 +41,15 @@ struct RuntimeDiagnosticsQuery {
 #[derive(Debug, Default, Deserialize)]
 struct RuntimeRefreshQuery {
     workspace_path: Option<PathBuf>,
+}
+
+/// Subscription quota the agent CLIs recorded locally (for now: Codex).
+async fn get_quota()
+-> Result<ResponseJson<ApiResponse<Vec<services::services::quota::RuntimeQuota>>>, ApiError> {
+    let quotas = tokio::task::spawn_blocking(services::services::quota::all_quotas)
+        .await
+        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+    Ok(ResponseJson(ApiResponse::success(quotas)))
 }
 
 async fn get_runtime() -> Result<ResponseJson<ApiResponse<AgentRuntimeListResponse>>, ApiError> {

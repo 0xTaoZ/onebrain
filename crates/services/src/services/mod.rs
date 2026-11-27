@@ -44,6 +44,7 @@ pub use project::{
 #[cfg(feature = "qa-mode")]
 pub mod qa_repos;
 pub mod queued_message;
+pub mod quota;
 pub mod remote_client;
 pub mod repo;
 pub mod repo_integration;

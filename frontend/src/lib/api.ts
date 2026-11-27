@@ -155,6 +155,7 @@ import type {
   UndoRunResult,
   ChatAuditEvent,
   BrainOverview,
+  RuntimeQuota,
   BrainFileContent,
   BrainSearchHit,
   ChatSchedule,
@@ -1571,6 +1572,12 @@ export const chatSchedulesApi = {
     handleApiResponse<ChatSchedulePreview>(
       await makeRequest(`/api/chat/schedules/preview`, { method: "POST", body: JSON.stringify(input) }),
     ),
+};
+
+export const quotaApi = {
+  /** Subscription quota the agent CLIs recorded on this machine. */
+  list: async (): Promise<RuntimeQuota[]> =>
+    handleApiResponse<RuntimeQuota[]>(await makeRequest(`/api/agents/quota`)),
 };
 
 export const brainApi = {
