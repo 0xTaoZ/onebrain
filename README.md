@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="frontend/public/logos/onebrain-logo.png" width="200" alt="OneBrain: pixel-art agents around a shared brain">
+  <img src="docs/assets/cover.webp" width="200" alt="OneBrain: pixel-art agents around a shared brain">
 </p>
 
 <h1 align="center">OneBrain</h1>
