@@ -18,6 +18,7 @@ import { detectShortcutRuntime } from "@/shortcuts/platform";
 import { getTauriAppWindow, getTauriInvoke } from "@/lib/tauriBridge";
 import { WorkflowWorkspace } from "@/components/WorkflowWorkspace";
 import { CreateAgentSessionModal } from "@/components/CreateAgentSessionModal";
+import { NewGroupSheet } from "@/components/NewGroupSheet";
 import { DiffViewTab } from "@/components/DiffViewTab";
 import { WorktreeMergeConflictsSection } from "@/pages/worktree/WorktreeMergeConflictsSection";
 import { NotificationToast } from "@/components/NotificationToast";
@@ -1538,9 +1539,13 @@ function WorkspaceLayout() {
     }
   };
 
-  const openNewChat = () => {
-    void handleCreateDefaultSession({ focusComposer: false }).then(id => {
-      if (id) setIsGroupMemberPickerOpen(true);
+  const [isNewGroupOpen, setIsNewGroupOpen] = useState(false);
+  const openNewChat = () => setIsNewGroupOpen(true);
+  const openCreatedGroup = (sessionId: string) => {
+    void refreshSessions().then(() => {
+      replaceActiveTab(createSessionTab(sessionId));
+      setActiveSessionId(sessionId);
+      void refreshMembers().catch(() => undefined);
     });
   };
 
@@ -2263,6 +2268,10 @@ function WorkspaceLayout() {
           closeAriaLabel={t('toast.dismissNotification')}
           className="min-h-[92px] max-w-[min(430px,calc(100vw-40px))] py-4"
         />
+      )}
+
+      {isNewGroupOpen && (
+        <NewGroupSheet onClose={() => setIsNewGroupOpen(false)} onCreated={openCreatedGroup} />
       )}
 
       {isGroupMemberPickerOpen && (

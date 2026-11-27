@@ -15,6 +15,8 @@ const NAMES: Record<string, string> = {
   DEEPSEEK_HARNESS: 'DeepSeek Harness',
   CURSOR_AGENT: 'Cursor',
   COPILOT: 'Copilot',
+  OPENTEAMS_CLI: 'OneBrain CLI',
+  PI: 'Pi',
 };
 
 /** Human name for a runtime such as CLAUDE_CODE. */
@@ -23,7 +25,7 @@ export function runtimeDisplayName(runner: string): string {
 }
 
 /** Short handle used for @mentions, such as "claude". */
-function handleFor(runner: string): string {
+export function handleFor(runner: string): string {
   return runtimeDisplayName(runner).split(' ')[0].toLowerCase();
 }
 
