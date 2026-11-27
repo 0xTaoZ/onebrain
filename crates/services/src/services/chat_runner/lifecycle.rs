@@ -1079,14 +1079,14 @@ impl ChatRunner {
         session: &ChatSession,
         mentions: &[String],
         meta: &serde_json::Value,
+        content: &str,
     ) -> Result<Option<ResolvedSessionMember>, ChatRunnerError> {
-        if !mentions.is_empty()
-            || meta
-                .get("chat_input_mode")
-                .and_then(serde_json::Value::as_str)
-                != Some("workflow")
-        {
+        if !mentions.is_empty() {
             return Ok(None);
+        }
+        if meta.get("chat_input_mode").and_then(serde_json::Value::as_str) != Some("workflow") {
+            // Chat mode: someone still answers, picked without a model call.
+            return self.auto_route_chat_member(session, content, None).await;
         }
 
         let session_agents =
@@ -1110,6 +1110,7 @@ impl ChatRunner {
         sender_session_agent_id: Option<Uuid>,
         mentions: &[String],
         meta: &serde_json::Value,
+        content: &str,
     ) -> Result<(Vec<ResolvedMessageDelivery>, Vec<String>), ChatRunnerError> {
         let chain_depth = meta
             .get("chain_depth")
@@ -1125,7 +1126,7 @@ impl ChatRunner {
 
         if sender_type == ChatSenderType::User
             && let Some(default_member) = self
-                .resolve_default_member_for_user_payload(session, mentions, meta)
+                .resolve_default_member_for_user_payload(session, mentions, meta, content)
                 .await?
         {
             return Ok((
@@ -1140,6 +1141,13 @@ impl ChatRunner {
             ));
         }
 
+        let expanded;
+        let mentions: &[String] = if sender_type == ChatSenderType::User {
+            expanded = self.expand_everyone(session.id, mentions).await;
+            &expanded
+        } else {
+            mentions
+        };
         let mut resolved = Vec::with_capacity(mentions.len());
         let mut missing = Vec::new();
         let mut seen_members = HashSet::with_capacity(mentions.len());
@@ -1319,6 +1327,7 @@ impl ChatRunner {
                     existing.sender_session_agent_id,
                     &existing.mentions.0,
                     &existing.meta.0,
+                    &existing.content,
                 )
                 .await?;
             let bundle = chat::ensure_message_delivery_bundle(
@@ -1368,6 +1377,7 @@ impl ChatRunner {
                 sender_session_agent_id,
                 &data.mentions,
                 &data.meta,
+                &data.content,
             )
             .await?;
         let mut bundle = chat::create_message_delivery_bundle_with_id(
@@ -1388,6 +1398,7 @@ impl ChatRunner {
                     bundle.message.sender_session_agent_id,
                     &bundle.message.mentions.0,
                     &bundle.message.meta.0,
+                    &bundle.message.content,
                 )
                 .await?;
             bundle = chat::ensure_message_delivery_bundle(
@@ -1482,6 +1493,12 @@ impl ChatRunner {
             }
         }
 
+        // "@所有人" from the user asks every member once; agents cannot broadcast.
+        let mentions = if message.sender_type == ChatSenderType::User {
+            self.expand_everyone(session_id, &mentions).await
+        } else {
+            mentions
+        };
         for (ordinal, mention) in mentions.into_iter().enumerate() {
             if message.sender_type == ChatSenderType::Agent
                 && mention.eq_ignore_ascii_case(RESERVED_USER_HANDLE)
@@ -1522,6 +1539,93 @@ impl ChatRunner {
         }
     }
 
+    /// Chat mode: pick who answers a message that mentions nobody, without a
+    /// model call (see `routing::pick_member`), falling back to the lead.
+    /// `this_message` excludes the message being routed when it is already saved.
+    async fn auto_route_chat_member(
+        &self,
+        session: &ChatSession,
+        content: &str,
+        this_message: Option<(Uuid, chrono::DateTime<chrono::Utc>)>,
+    ) -> Result<Option<ResolvedSessionMember>, ChatRunnerError> {
+        let session_agents =
+            ChatSessionAgent::find_all_for_session(&self.db.pool, session.id).await?;
+        if session_agents.is_empty() {
+            return Ok(None);
+        }
+        let agents = ChatAgent::find_all(&self.db.pool).await?;
+        let live: Vec<&ChatSessionAgent> = session_agents
+            .iter()
+            .filter(|member| member.state != ChatSessionAgentState::Dead)
+            .collect();
+        let candidates: Vec<routing::RouteCandidate<'_>> = live
+            .iter()
+            .map(|member| routing::RouteCandidate {
+                id: member.id,
+                name: member.member_name.as_str(),
+                role: agents
+                    .iter()
+                    .find(|agent| agent.id == member.agent_id)
+                    .map(|agent| agent.system_prompt.as_str())
+                    .unwrap_or(""),
+                busy: matches!(
+                    member.state,
+                    ChatSessionAgentState::Running | ChatSessionAgentState::Stopping
+                ),
+            })
+            .collect();
+        let recent = ChatMessage::find_by_session_id(&self.db.pool, session.id, Some(8))
+            .await
+            .unwrap_or_default();
+        let replying_to = recent
+            .iter()
+            .filter(|earlier| match this_message {
+                Some((id, at)) => earlier.id != id && earlier.created_at <= at,
+                None => true,
+            })
+            .max_by_key(|earlier| earlier.created_at)
+            .filter(|earlier| earlier.sender_type == ChatSenderType::Agent)
+            .and_then(|earlier| earlier.sender_id)
+            .and_then(|sender| {
+                live.iter()
+                    .find(|member| member.id == sender || member.agent_id == sender)
+                    .map(|member| member.id)
+            });
+        let picked = routing::pick_member(content, &candidates, replying_to);
+        if let Some(member) = picked.and_then(|id| live.iter().find(|member| member.id == id)) {
+            return Ok(Some(Self::resolved_session_member(member)));
+        }
+        match resolve_lead_agent(session, &session_agents, &agents) {
+            Ok((_lead_agent, lead_session_agent)) => {
+                Ok(Some(Self::resolved_session_member(lead_session_agent)))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Replace `@所有人` / `@all` from the user with every live member's name.
+    async fn expand_everyone(&self, session_id: Uuid, mentions: &[String]) -> Vec<String> {
+        if !mentions.iter().any(|mention| routing::is_everyone_handle(mention)) {
+            return mentions.to_vec();
+        }
+        let mut expanded: Vec<String> = mentions
+            .iter()
+            .filter(|mention| !routing::is_everyone_handle(mention))
+            .cloned()
+            .collect();
+        if let Ok(members) = ChatSessionAgent::find_all_for_session(&self.db.pool, session_id).await {
+            for member in members
+                .into_iter()
+                .filter(|member| member.state != ChatSessionAgentState::Dead)
+            {
+                if !expanded.iter().any(|name| name.eq_ignore_ascii_case(&member.member_name)) {
+                    expanded.push(member.member_name);
+                }
+            }
+        }
+        expanded
+    }
+
     async fn resolve_default_mention_for_unmentioned_user_message(
         &self,
         session: &ChatSession,
@@ -1545,51 +1649,9 @@ impl ChatRunner {
         let agents = ChatAgent::find_all(&self.db.pool).await?;
 
         if !is_workflow_mode {
-            // Chat mode: pick who answers from the message itself, no model call.
-            let live: Vec<&ChatSessionAgent> = session_agents
-                .iter()
-                .filter(|member| member.state != ChatSessionAgentState::Dead)
-                .collect();
-            let candidates: Vec<routing::RouteCandidate<'_>> = live
-                .iter()
-                .map(|member| routing::RouteCandidate {
-                    id: member.id,
-                    name: member.member_name.as_str(),
-                    role: agents
-                        .iter()
-                        .find(|agent| agent.id == member.agent_id)
-                        .map(|agent| agent.system_prompt.as_str())
-                        .unwrap_or(""),
-                    busy: matches!(
-                        member.state,
-                        ChatSessionAgentState::Running | ChatSessionAgentState::Stopping
-                    ),
-                })
-                .collect();
-            let recent = ChatMessage::find_by_session_id(&self.db.pool, session.id, Some(8))
-                .await
-                .unwrap_or_default();
-            let replying_to = recent
-                .iter()
-                .filter(|earlier| earlier.id != message.id && earlier.created_at <= message.created_at)
-                .max_by_key(|earlier| earlier.created_at)
-                .filter(|earlier| earlier.sender_type == ChatSenderType::Agent)
-                .and_then(|earlier| earlier.sender_id)
-                .and_then(|sender| {
-                    live.iter()
-                        .find(|member| member.id == sender || member.agent_id == sender)
-                        .map(|member| member.id)
-                });
-            let picked = routing::pick_member(&message.content, &candidates, replying_to);
-            if let Some(member) = picked.and_then(|id| live.iter().find(|member| member.id == id)) {
-                return Ok(Some(Self::resolved_session_member(member)));
-            }
-            return match resolve_lead_agent(session, &session_agents, &agents) {
-                Ok((_lead_agent, lead_session_agent)) => {
-                    Ok(Some(Self::resolved_session_member(lead_session_agent)))
-                }
-                Err(_) => Ok(None),
-            };
+            return self
+                .auto_route_chat_member(session, &message.content, Some((message.id, message.created_at)))
+                .await;
         }
 
         tracing::debug!(

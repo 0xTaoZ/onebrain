@@ -1012,6 +1012,38 @@ fn test_run_cleanup(workspace: &Path) -> (std::path::PathBuf, ExecutorRunCleanup
 }
 
 #[tokio::test]
+async fn the_send_path_routes_unmentioned_messages_and_expands_everyone() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let session = insert_test_chat_session(&db, session_id).await;
+    let first_agent = insert_test_chat_agent(&db, "first").await;
+    let second_agent = insert_test_chat_agent(&db, "second").await;
+    let first = insert_test_session_agent(&db, session_id, first_agent.id).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let second = insert_test_session_agent(&db, session_id, second_agent.id).await;
+
+    let (resolved, missing) = runner
+        .resolve_message_deliveries(&session, ChatSenderType::User, None, &[], &json!({}), "second, please handle this")
+        .await
+        .expect("resolve deliveries");
+    assert!(missing.is_empty());
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].member.session_agent_id, second.id);
+
+    let (resolved, missing) = runner
+        .resolve_message_deliveries(&session, ChatSenderType::User, None, &["所有人".to_string()], &json!({}), "@所有人 看看这个方案")
+        .await
+        .expect("resolve deliveries");
+    assert!(missing.is_empty(), "the everyone handle is not a missing member");
+    let mut ids: Vec<Uuid> = resolved.iter().map(|delivery| delivery.member.session_agent_id).collect();
+    ids.sort();
+    let mut expected = vec![first.id, second.id];
+    expected.sort();
+    assert_eq!(ids, expected);
+}
+
+#[tokio::test]
 async fn unmentioned_chat_messages_go_to_the_best_matching_member_or_the_lead() {
     let db = setup_chat_runner_db().await;
     let runner = ChatRunner::new(db.clone());

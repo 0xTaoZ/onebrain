@@ -9,6 +9,12 @@ use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
+/// `@所有人`, `@大家`, `@all` or `@everyone`: ask every member once.
+pub(super) fn is_everyone_handle(handle: &str) -> bool {
+    let lower = handle.trim_start_matches('@').to_lowercase();
+    matches!(lower.as_str(), "all" | "everyone" | "所有人" | "大家" | "全体")
+}
+
 pub(super) struct RouteCandidate<'a> {
     pub id: Uuid,
     pub name: &'a str,
@@ -128,6 +134,14 @@ mod tests {
         assert_eq!(pick_member("帮我更新一下文档", &members, None), Some(docs));
         assert_eq!(pick_member("fix the login bugs", &members, None), Some(dev));
         assert_eq!(pick_member("hello there", &members, None), None, "no signal: fall back to the lead");
+    }
+
+    #[test]
+    fn everyone_handles_are_recognised() {
+        for handle in ["all", "@everyone", "所有人", "大家", "ALL"] {
+            assert!(is_everyone_handle(handle), "{handle}");
+        }
+        assert!(!is_everyone_handle("allison"));
     }
 
     #[test]
