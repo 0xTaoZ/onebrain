@@ -152,6 +152,7 @@ import type {
   UpdateProjectMemberRequest,
   UpdateTeamPresetRequest,
   ChatRunFilesResponse,
+  UndoRunResult,
   ChatExecutorApprovalRequest,
   InboxItem,
   InboxItemResponse,
@@ -1516,12 +1517,17 @@ export const chatRunsApi = {
     return handleApiResponse<ChatRunFilesResponse>(r);
   },
   /** Put the project folder back to how it was right before this run. */
-  restoreCheckpoint: async (runId: string): Promise<void> => {
+  restoreCheckpoint: async (
+    runId: string,
+    opts?: { force?: boolean },
+  ): Promise<UndoRunResult> => {
     const r = await makeRequest(
-      `/api/chat/runs/${encodeURIComponent(runId)}/checkpoint/restore`,
+      `/api/chat/runs/${encodeURIComponent(runId)}/checkpoint/restore${qs({
+        force: opts?.force,
+      })}`,
       { method: "POST" },
     );
-    await handleApiResponse<null>(r);
+    return handleApiResponse<UndoRunResult>(r);
   },
 };
 

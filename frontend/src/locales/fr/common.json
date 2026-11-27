@@ -476,5 +476,7 @@
   "switchToPlanMode": "Switch to plan mode",
   "message.undoRun": "Annuler les modifications de cette exécution",
   "message.undoRunConfirm": "Cliquez à nouveau pour annuler",
-  "message.undoRunDone": "Les fichiers sont revenus à leur état d'avant cette exécution"
+  "message.undoRunDone": "{count} fichiers modifiés par cette exécution sont restaurés",
+  "message.undoRunConflict": "Ces fichiers ont été modifiés après l'exécution : {files}. Cliquez à nouveau pour les écraser.",
+  "message.undoRunForce": "Écraser et annuler"
 }

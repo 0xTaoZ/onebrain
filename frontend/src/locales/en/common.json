@@ -476,5 +476,7 @@
   "onboarding.upgrade.downloadProgress": "Download progress",
   "message.undoRun": "Undo this run's file changes",
   "message.undoRunConfirm": "Click again to undo",
-  "message.undoRunDone": "Files are back to how they were before this run"
+  "message.undoRunDone": "Files are back: {count} changed by this run",
+  "message.undoRunConflict": "These files were edited after the run: {files}. Click again to overwrite them.",
+  "message.undoRunForce": "Overwrite and undo"
 }

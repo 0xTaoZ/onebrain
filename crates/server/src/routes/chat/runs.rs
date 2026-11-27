@@ -711,13 +711,29 @@ pub async fn get_member_activity(
     Ok(ResponseJson(ApiResponse::success(days)))
 }
 
-/// Put the working tree back to how it was right before this run started.
-/// Refused while any member of the group is still working, so a restore never
-/// races with an agent writing files.
+#[derive(Debug, Deserialize)]
+pub struct UndoRunQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Result of undoing one run. When `conflicts` is not empty nothing was
+/// written: those files were edited after the run, and the caller may retry
+/// with `force=true`.
+#[derive(Debug, Serialize, TS)]
+pub struct UndoRunResult {
+    pub restored: Vec<String>,
+    pub conflicts: Vec<String>,
+}
+
+/// Undo the file changes of one run: files the run changed go back to how
+/// they were before it, everything else is left alone. Refused while any
+/// member of the group is still working, so it never races with an agent.
 pub async fn restore_run_checkpoint(
     State(deployment): State<DeploymentImpl>,
     Path(run_id): Path<Uuid>,
-) -> Result<ResponseJson<ApiResponse<()>>, ApiError> {
+    Query(query): Query<UndoRunQuery>,
+) -> Result<ResponseJson<ApiResponse<UndoRunResult>>, ApiError> {
     let pool = &deployment.db().pool;
     let checkpoint = ChatRunCheckpoint::find_by_run(pool, run_id)
         .await?
@@ -737,10 +753,29 @@ pub async fn restore_run_checkpoint(
         ));
     }
     let repo = PathBuf::from(&checkpoint.workspace_path);
-    let sha = checkpoint.checkpoint.clone();
-    tokio::task::spawn_blocking(move || git::restore_checkpoint(&repo, &sha))
-        .await
-        .map_err(|err| ApiError::BadRequest(err.to_string()))?
-        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
-    Ok(ResponseJson(ApiResponse::success(())))
+    let before = checkpoint.checkpoint.clone();
+    let after = checkpoint.after_checkpoint.clone();
+    let force = query.force;
+    let outcome = tokio::task::spawn_blocking(move || match after {
+        Some(after) => git::undo_run(&repo, &before, &after, force),
+        // Runs that ended without a closing snapshot: full restore, only on request.
+        None if force => git::restore_checkpoint(&repo, &before).map(|()| Vec::new()),
+        None => Err(git::CheckpointError::Conflict(vec![
+            "(the end of this run was not recorded; undo puts the whole folder back)".to_string(),
+        ])),
+    })
+    .await
+    .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+    let result = match outcome {
+        Ok(restored) => UndoRunResult {
+            restored,
+            conflicts: Vec::new(),
+        },
+        Err(git::CheckpointError::Conflict(conflicts)) => UndoRunResult {
+            restored: Vec::new(),
+            conflicts,
+        },
+        Err(err) => return Err(ApiError::BadRequest(err.to_string())),
+    };
+    Ok(ResponseJson(ApiResponse::success(result)))
 }

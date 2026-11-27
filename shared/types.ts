@@ -839,6 +839,8 @@ export type ChatRunRetentionListResponse = { runs: Array<ChatRunRetentionInfo>, 
 
 export type ChatRunActivityResponse = { run_id: string, lines: Array<ChatRunActivityLine>, next_cursor: string, has_more: boolean, log_state: ChatRunLogState, };
 
+export type UndoRunResult = { restored: Array<string>, conflicts: Array<string>, };
+
 export type ChatRunFilesQuery = {
 /**
  * When true, include the per-file unified diff text for each changed file.

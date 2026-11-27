@@ -1028,8 +1028,12 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
     [selectedSidebarMemberId],
   );
 
+  // Set when the last undo found files edited after the run; the next click forces it.
+  const [undoForceRunId, setUndoForceRunId] = useState<string | null>(null);
+
   const handleUndoRun = async (runId: string) => {
-    if (undoArmedRunId !== runId) {
+    const force = undoForceRunId === runId;
+    if (!force && undoArmedRunId !== runId) {
       setUndoArmedRunId(runId);
       window.setTimeout(
         () => setUndoArmedRunId((current) => (current === runId ? null : current)),
@@ -1038,9 +1042,17 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
       return;
     }
     setUndoArmedRunId(null);
+    setUndoForceRunId(null);
     try {
-      await chatRunsApi.restoreCheckpoint(runId);
-      showToast(t("message.undoRunDone"));
+      const result = await chatRunsApi.restoreCheckpoint(runId, { force });
+      if (result.conflicts.length > 0) {
+        setUndoForceRunId(runId);
+        showToast(
+          t("message.undoRunConflict", { files: result.conflicts.slice(0, 5).join(", ") }),
+        );
+        return;
+      }
+      showToast(t("message.undoRunDone", { count: result.restored.length }));
       if (activeSessionId && currentWorkspacePath) {
         void refreshWorkspaceChanges(activeSessionId, currentWorkspacePath, true);
       }
@@ -1820,15 +1832,19 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
                             void handleUndoRun(msg.runId!);
                           }}
                           className={`flex h-6 items-center justify-center gap-1 rounded-sm px-1 text-[var(--ink-tertiary)] transition hover:bg-[var(--surface-2)] hover:text-[var(--ink-subtle)] ${
-                            undoArmedRunId === msg.runId ? "text-rose-500" : "w-6"
+                            undoArmedRunId === msg.runId || undoForceRunId === msg.runId
+                              ? "text-rose-500"
+                              : "w-6"
                           }`}
                           title={t("message.undoRun")}
                           aria-label={t("message.undoRun")}
                         >
                           <Undo2 className="h-3 w-3" />
-                          {undoArmedRunId === msg.runId && (
+                          {undoForceRunId === msg.runId ? (
+                            <span className="text-[11px]">{t("message.undoRunForce")}</span>
+                          ) : undoArmedRunId === msg.runId ? (
                             <span className="text-[11px]">{t("message.undoRunConfirm")}</span>
-                          )}
+                          ) : null}
                         </button>
                       )}
                   </div>

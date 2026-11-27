@@ -1781,6 +1781,35 @@ impl ChatRunner {
                             RunCompletionStatus::Failed | RunCompletionStatus::Stopped
                         );
 
+                        // Snapshot again at the end so undo touches only this run's files.
+                        {
+                            let repo = workspace_path.clone();
+                            let label = format!("{run_id}-after");
+                            match tokio::task::spawn_blocking(move || {
+                                git::create_checkpoint(&repo, &label)
+                            })
+                            .await
+                            {
+                                Ok(Ok(Some(after))) => {
+                                    if let Err(err) =
+                                        db::models::chat_run_checkpoint::ChatRunCheckpoint::set_after(
+                                            &db.pool, run_id, &after,
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(run_id = %run_id, error = %err, "failed to store end-of-run checkpoint");
+                                    }
+                                }
+                                Ok(Ok(None)) => {}
+                                Ok(Err(err)) => {
+                                    tracing::warn!(run_id = %run_id, error = %err, "failed to snapshot working tree after run");
+                                }
+                                Err(err) => {
+                                    tracing::warn!(run_id = %run_id, error = %err, "end-of-run checkpoint task failed");
+                                }
+                            }
+                        }
+
                         if matches!(completion_status, RunCompletionStatus::Succeeded)
                             && let Err(err) = ChatMemberContextCursor::commit(
                                 &db.pool,

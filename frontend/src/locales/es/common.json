@@ -476,5 +476,7 @@
   "switchToPlanMode": "Switch to plan mode",
   "message.undoRun": "Deshacer los cambios de esta ejecución",
   "message.undoRunConfirm": "Haz clic otra vez para deshacer",
-  "message.undoRunDone": "Los archivos volvieron a como estaban antes de esta ejecución"
+  "message.undoRunDone": "Se restauraron {count} archivos cambiados por esta ejecución",
+  "message.undoRunConflict": "Estos archivos se editaron después de la ejecución: {files}. Haz clic otra vez para sobrescribirlos.",
+  "message.undoRunForce": "Sobrescribir y deshacer"
 }

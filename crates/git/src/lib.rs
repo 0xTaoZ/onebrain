@@ -14,7 +14,7 @@ mod checkpoint;
 mod cli;
 mod validation;
 
-pub use checkpoint::{CheckpointError, create_checkpoint, restore_checkpoint};
+pub use checkpoint::{CheckpointError, create_checkpoint, restore_checkpoint, undo_run};
 use cli::{ChangeType, StatusDiffEntry, StatusDiffOptions};
 pub use cli::{GitCli, GitCliError, StatusEntry, WorktreeStatus};
 pub use utils::path::ALWAYS_SKIP_DIRS;

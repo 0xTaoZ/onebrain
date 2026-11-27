@@ -476,5 +476,7 @@
   "switchToPlanMode": "Switch to plan mode",
   "message.undoRun": "この実行の変更を元に戻す",
   "message.undoRunConfirm": "もう一度クリックで元に戻す",
-  "message.undoRunDone": "この実行の前の状態にファイルを戻しました"
+  "message.undoRunDone": "この実行で変更された {count} 個のファイルを戻しました",
+  "message.undoRunConflict": "実行後に編集されたファイルがあります：{files}。もう一度クリックすると上書きします。",
+  "message.undoRunForce": "上書きして元に戻す"
 }

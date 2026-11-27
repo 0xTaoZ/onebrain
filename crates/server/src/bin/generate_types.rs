@@ -333,6 +333,7 @@ fn generate_types_content() -> String {
         server::routes::chat::runs::ChatRunRetentionListQuery::decl(),
         server::routes::chat::runs::ChatRunRetentionListResponse::decl(),
         server::routes::chat::runs::ChatRunActivityResponse::decl(),
+        server::routes::chat::runs::UndoRunResult::decl(),
         server::routes::chat::runs::ChatRunFilesQuery::decl(),
         server::routes::chat::runs::ChatRunFilesResponse::decl(),
         server::routes::chat::runtime::ChatActiveRunStatus::decl(),

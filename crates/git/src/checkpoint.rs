@@ -25,6 +25,8 @@ pub enum CheckpointError {
     InvalidLabel(String),
     #[error("refusing to remove a path outside the working tree: {0}")]
     UnsafePath(String),
+    #[error("files changed after the run: {}", .0.join(", "))]
+    Conflict(Vec<String>),
 }
 
 fn git(repo: &Path, index: Option<&Path>, args: &[&str]) -> Result<String, CheckpointError> {
@@ -40,6 +42,42 @@ fn git(repo: &Path, index: Option<&Path>, args: &[&str]) -> Result<String, Check
         .env("GIT_COMMITTER_NAME", "OneBrain")
         .env("GIT_COMMITTER_EMAIL", "checkpoint@onebrain.local");
     let output = command.output()?;
+    if !output.status.success() {
+        return Err(CheckpointError::Git {
+            args: args.join(" "),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string())
+}
+
+fn git_stdin(
+    repo: &Path,
+    index: Option<&Path>,
+    args: &[&str],
+    input: &[u8],
+) -> Result<String, CheckpointError> {
+    use std::{io::Write, process::Stdio};
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(index) = index {
+        command.env("GIT_INDEX_FILE", index);
+    }
+    let mut child = command.spawn()?;
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(input)?;
+    let output = child.wait_with_output()?;
     if !output.status.success() {
         return Err(CheckpointError::Git {
             args: args.join(" "),
@@ -153,6 +191,106 @@ pub fn restore_checkpoint(repo: &Path, checkpoint: &str) -> Result<(), Checkpoin
     result
 }
 
+/// Tree of the working tree as it is right now, without storing a ref.
+fn current_tree(repo: &Path) -> Result<String, CheckpointError> {
+    let index = scratch_index(repo, "onebrain-current.index")?;
+    let result = (|| {
+        git(repo, Some(&index), &["add", "-A", "--", "."])?;
+        git(repo, Some(&index), &["write-tree"])
+    })();
+    let _ = std::fs::remove_file(&index);
+    result
+}
+
+/// Paths whose content differs between two trees (renames count as a delete
+/// plus an add).
+fn changed_paths(repo: &Path, from: &str, to: &str) -> Result<HashSet<String>, CheckpointError> {
+    Ok(nul_list(&git(
+        repo,
+        None,
+        &[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--no-renames",
+            "--name-only",
+            from,
+            to,
+        ],
+    )?))
+}
+
+/// Undo one run: put back only the files the run changed between `before`
+/// and `after`. If the user (or another agent) edited one of those files
+/// after the run, nothing is written and the conflicting paths are returned,
+/// unless `force` is set. Files the run did not touch are never written.
+pub fn undo_run(
+    repo: &Path,
+    before: &str,
+    after: &str,
+    force: bool,
+) -> Result<Vec<String>, CheckpointError> {
+    let before_tree = format!("{before}^{{tree}}");
+    let after_tree = format!("{after}^{{tree}}");
+    let touched = changed_paths(repo, &before_tree, &after_tree)?;
+    if touched.is_empty() {
+        return Ok(Vec::new());
+    }
+    let now = current_tree(repo)?;
+    let mut conflicts: Vec<String> = changed_paths(repo, &after_tree, &now)?
+        .intersection(&touched)
+        .cloned()
+        .collect();
+    conflicts.sort();
+    if !conflicts.is_empty() && !force {
+        return Err(CheckpointError::Conflict(conflicts));
+    }
+
+    let in_before = nul_list(&git(
+        repo,
+        None,
+        &["ls-tree", "-r", "-z", "--name-only", &before_tree],
+    )?);
+    let root = std::fs::canonicalize(repo)?;
+    let mut rewrite = Vec::new();
+    for path in &touched {
+        if path.split('/').any(|part| part == ".." || part.is_empty()) {
+            return Err(CheckpointError::UnsafePath(path.clone()));
+        }
+        if in_before.contains(path) {
+            rewrite.push(path.as_str());
+        } else {
+            let target = root.join(path);
+            if target.is_file() || target.is_symlink() {
+                std::fs::remove_file(&target)?;
+            }
+        }
+    }
+    if !rewrite.is_empty() {
+        let index = scratch_index(repo, "onebrain-undo.index")?;
+        let result: Result<(), CheckpointError> = (|| {
+            git(repo, Some(&index), &["read-tree", &before_tree])?;
+            let mut input = Vec::new();
+            for path in &rewrite {
+                input.extend_from_slice(path.as_bytes());
+                input.push(0);
+            }
+            git_stdin(
+                repo,
+                Some(&index),
+                &["checkout-index", "-f", "-z", "--stdin"],
+                &input,
+            )?;
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(&index);
+        result?;
+    }
+    let mut restored: Vec<String> = touched.into_iter().collect();
+    restored.sort();
+    Ok(restored)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -245,5 +383,56 @@ mod tests {
         fs::write(path.join("first.txt"), "two\n").unwrap();
         restore_checkpoint(path, &checkpoint).unwrap();
         assert_eq!(fs::read_to_string(path.join("first.txt")).unwrap(), "one\n");
+    }
+
+    #[test]
+    fn undo_only_touches_files_the_run_changed() {
+        let dir = repo();
+        let path = dir.path();
+        fs::write(path.join("other.txt"), "user file\n").unwrap();
+        let before = create_checkpoint(path, "r1").unwrap().unwrap();
+        fs::write(path.join("a.txt"), "agent edit\n").unwrap();
+        fs::write(path.join("new.rs"), "fn x() {}\n").unwrap();
+        let after = create_checkpoint(path, "r1-after").unwrap().unwrap();
+        // The user keeps working on a file the run never touched.
+        fs::write(path.join("other.txt"), "user kept typing\n").unwrap();
+
+        let restored = undo_run(path, &before, &after, false).unwrap();
+
+        assert_eq!(restored, vec!["a.txt".to_string(), "new.rs".to_string()]);
+        assert_eq!(
+            fs::read_to_string(path.join("a.txt")).unwrap(),
+            "original\n"
+        );
+        assert!(!path.join("new.rs").exists());
+        assert_eq!(
+            fs::read_to_string(path.join("other.txt")).unwrap(),
+            "user kept typing\n"
+        );
+    }
+
+    #[test]
+    fn undo_reports_files_edited_after_the_run() {
+        let dir = repo();
+        let path = dir.path();
+        let before = create_checkpoint(path, "r2").unwrap().unwrap();
+        fs::write(path.join("a.txt"), "agent edit\n").unwrap();
+        let after = create_checkpoint(path, "r2-after").unwrap().unwrap();
+        fs::write(path.join("a.txt"), "user fixed it by hand\n").unwrap();
+
+        match undo_run(path, &before, &after, false) {
+            Err(CheckpointError::Conflict(paths)) => assert_eq!(paths, vec!["a.txt".to_string()]),
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read_to_string(path.join("a.txt")).unwrap(),
+            "user fixed it by hand\n"
+        );
+
+        undo_run(path, &before, &after, true).unwrap();
+        assert_eq!(
+            fs::read_to_string(path.join("a.txt")).unwrap(),
+            "original\n"
+        );
     }
 }
