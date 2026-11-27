@@ -106,7 +106,6 @@ import {
   extractMentionHandles,
   normalizeMentionHandle,
   displayChatSenderName,
-  PaperChatWelcome,
   SessionMemberAvatar,
   LinkedWorkItemRow,
   InlineQueueGroup,
@@ -1549,7 +1548,6 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
                 onRetry={() => void refreshMessages()}
               />
             )}
-            <PaperChatWelcome />
             {displayedMessages.length === 0 && activeSessionId && sessionsAsync.source === "api" && (
               <EmptyChatExamples
                 sessionId={activeSessionId}
