@@ -27,6 +27,7 @@ import {
   X,
   Image as ImageIcon,
   FileText,
+  Undo2,
 } from "lucide-react";
 import { ResourceStateNotice } from "@/components/ResourceState";
 import { ScrollArea } from "@/components/ScrollArea";
@@ -183,6 +184,8 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
   const [memberRailWidth, setMemberRailWidth] = useState(0);
   const [workspaceWidth, setWorkspaceWidth] = useState(0);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  // First click arms the undo, the second click within a few seconds restores.
+  const [undoArmedRunId, setUndoArmedRunId] = useState<string | null>(null);
   const [stoppingSessionAgentIds, setStoppingSessionAgentIds] = useState<
     Record<string, string | null>
   >({});
@@ -1025,6 +1028,27 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
     [selectedSidebarMemberId],
   );
 
+  const handleUndoRun = async (runId: string) => {
+    if (undoArmedRunId !== runId) {
+      setUndoArmedRunId(runId);
+      window.setTimeout(
+        () => setUndoArmedRunId((current) => (current === runId ? null : current)),
+        4000,
+      );
+      return;
+    }
+    setUndoArmedRunId(null);
+    try {
+      await chatRunsApi.restoreCheckpoint(runId);
+      showToast(t("message.undoRunDone"));
+      if (activeSessionId && currentWorkspacePath) {
+        void refreshWorkspaceChanges(activeSessionId, currentWorkspacePath, true);
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const handleCopyAgentMessage = async (messageId: string, text: string) => {
     try {
       if (!navigator.clipboard) {
@@ -1785,6 +1809,28 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
                     >
                       <Quote className="h-3 w-3" />
                     </button>
+                    {!msg.isAgentRunning &&
+                      msg.runId &&
+                      currentWorkspacePath &&
+                      sessionsAsync.source === "api" && (
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleUndoRun(msg.runId!);
+                          }}
+                          className={`flex h-6 items-center justify-center gap-1 rounded-sm px-1 text-[var(--ink-tertiary)] transition hover:bg-[var(--surface-2)] hover:text-[var(--ink-subtle)] ${
+                            undoArmedRunId === msg.runId ? "text-rose-500" : "w-6"
+                          }`}
+                          title={t("message.undoRun")}
+                          aria-label={t("message.undoRun")}
+                        >
+                          <Undo2 className="h-3 w-3" />
+                          {undoArmedRunId === msg.runId && (
+                            <span className="text-[11px]">{t("message.undoRunConfirm")}</span>
+                          )}
+                        </button>
+                      )}
                   </div>
                 )}
               </div>

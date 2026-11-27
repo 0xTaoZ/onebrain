@@ -473,5 +473,8 @@
   "onboarding.upgrade.viewFullChangelog": "查看完整更新说明",
   "onboarding.upgrade.installedTag": "已安装",
   "onboarding.upgrade.releaseTag": "最新发布",
-  "onboarding.upgrade.downloadProgress": "下载进度"
+  "onboarding.upgrade.downloadProgress": "下载进度",
+  "message.undoRun": "撤销这次改动",
+  "message.undoRunConfirm": "再点一次确认撤销",
+  "message.undoRunDone": "文件已恢复到这次运行之前"
 }

@@ -473,5 +473,8 @@
   "fixedMainAgentMention": "Plan mode routes to {agent}",
   "planMode": "Plan mode",
   "switchToChatMode": "Switch to chat mode",
-  "switchToPlanMode": "Switch to plan mode"
+  "switchToPlanMode": "Switch to plan mode",
+  "message.undoRun": "이번 실행의 변경 되돌리기",
+  "message.undoRunConfirm": "한 번 더 누르면 되돌립니다",
+  "message.undoRunDone": "파일을 이번 실행 이전 상태로 되돌렸습니다"
 }

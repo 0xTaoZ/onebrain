@@ -1515,6 +1515,14 @@ export const chatRunsApi = {
     );
     return handleApiResponse<ChatRunFilesResponse>(r);
   },
+  /** Put the project folder back to how it was right before this run. */
+  restoreCheckpoint: async (runId: string): Promise<void> => {
+    const r = await makeRequest(
+      `/api/chat/runs/${encodeURIComponent(runId)}/checkpoint/restore`,
+      { method: "POST" },
+    );
+    await handleApiResponse<null>(r);
+  },
 };
 
 // -----------------------------------------------------------------------------

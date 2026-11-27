@@ -11,7 +11,9 @@ use axum::{
 };
 use db::models::{
     chat_run::{ChatRun, ChatRunLogState, ChatRunRetentionInfo, DailyRunCount},
+    chat_run_checkpoint::ChatRunCheckpoint,
     chat_session::ChatSession,
+    chat_session_agent::{ChatSessionAgent, ChatSessionAgentState},
 };
 use deployment::Deployment;
 use serde::{Deserialize, Serialize};
@@ -707,4 +709,38 @@ pub async fn get_member_activity(
     )
     .await?;
     Ok(ResponseJson(ApiResponse::success(days)))
+}
+
+/// Put the working tree back to how it was right before this run started.
+/// Refused while any member of the group is still working, so a restore never
+/// races with an agent writing files.
+pub async fn restore_run_checkpoint(
+    State(deployment): State<DeploymentImpl>,
+    Path(run_id): Path<Uuid>,
+) -> Result<ResponseJson<ApiResponse<()>>, ApiError> {
+    let pool = &deployment.db().pool;
+    let checkpoint = ChatRunCheckpoint::find_by_run(pool, run_id)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("This run has no saved snapshot.".to_string()))?;
+    let busy = ChatSessionAgent::find_all_for_session(pool, checkpoint.session_id)
+        .await?
+        .into_iter()
+        .any(|member| {
+            matches!(
+                member.state,
+                ChatSessionAgentState::Running | ChatSessionAgentState::Stopping
+            )
+        });
+    if busy {
+        return Err(ApiError::Conflict(
+            "Wait until every agent has finished, then undo.".to_string(),
+        ));
+    }
+    let repo = PathBuf::from(&checkpoint.workspace_path);
+    let sha = checkpoint.checkpoint.clone();
+    tokio::task::spawn_blocking(move || git::restore_checkpoint(&repo, &sha))
+        .await
+        .map_err(|err| ApiError::BadRequest(err.to_string()))?
+        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+    Ok(ResponseJson(ApiResponse::success(())))
 }

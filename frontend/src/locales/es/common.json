@@ -473,5 +473,8 @@
   "fixedMainAgentMention": "Plan mode routes to {agent}",
   "planMode": "Plan mode",
   "switchToChatMode": "Switch to chat mode",
-  "switchToPlanMode": "Switch to plan mode"
+  "switchToPlanMode": "Switch to plan mode",
+  "message.undoRun": "Deshacer los cambios de esta ejecución",
+  "message.undoRunConfirm": "Haz clic otra vez para deshacer",
+  "message.undoRunDone": "Los archivos volvieron a como estaban antes de esta ejecución"
 }

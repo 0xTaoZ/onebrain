@@ -473,5 +473,8 @@
   "onboarding.upgrade.viewFullChangelog": "View full changelog",
   "onboarding.upgrade.installedTag": "installed",
   "onboarding.upgrade.releaseTag": "release",
-  "onboarding.upgrade.downloadProgress": "Download progress"
+  "onboarding.upgrade.downloadProgress": "Download progress",
+  "message.undoRun": "Undo this run's file changes",
+  "message.undoRunConfirm": "Click again to undo",
+  "message.undoRunDone": "Files are back to how they were before this run"
 }
