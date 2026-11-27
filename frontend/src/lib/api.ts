@@ -153,6 +153,7 @@ import type {
   UpdateTeamPresetRequest,
   ChatRunFilesResponse,
   UndoRunResult,
+  ChatAuditEvent,
   ChatExecutorApprovalRequest,
   InboxItem,
   InboxItemResponse,
@@ -1528,6 +1529,24 @@ export const chatRunsApi = {
       { method: "POST" },
     );
     return handleApiResponse<UndoRunResult>(r);
+  },
+};
+
+export const chatAuditApi = {
+  /** A group's activity log, newest first. Pass the last entry to page on. */
+  list: async (
+    sessionId: string,
+    opts?: { before?: ChatAuditEvent; dangerous?: boolean; limit?: number },
+  ): Promise<ChatAuditEvent[]> => {
+    const r = await makeRequest(
+      `/api/chat/sessions/${encodeURIComponent(sessionId)}/audit${qs({
+        before_at: opts?.before?.created_at,
+        before_id: opts?.before?.id,
+        dangerous: opts?.dangerous,
+        limit: opts?.limit,
+      })}`,
+    );
+    return handleApiResponse<ChatAuditEvent[]>(r);
   },
 };
 

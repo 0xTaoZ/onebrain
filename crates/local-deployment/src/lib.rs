@@ -142,6 +142,9 @@ impl Deployment for LocalDeployment {
                 &db.pool,
             )
             .await?;
+        if let Err(err) = db::models::chat_audit_event::ChatAuditEvent::prune(&db.pool).await {
+            tracing::warn!(error = %err, "failed to prune old activity log entries");
+        }
         if expired_executor_approvals > 0 {
             tracing::warn!(
                 expired_executor_approvals,

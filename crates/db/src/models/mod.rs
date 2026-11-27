@@ -3,6 +3,7 @@ pub mod application_data_migration;
 pub mod chat_agent;
 pub mod chat_agent_skill;
 pub mod chat_artifact;
+pub mod chat_audit_event;
 pub mod chat_executor_approval_request;
 pub mod chat_member_context_cursor;
 pub mod chat_message;
