@@ -6,8 +6,8 @@
 
 <p align="center">
   <b>Claude builds. Codex reviews. One chat.</b><br>
-  An open-source Mac app that puts your coding agents in one group chat.<br>
-  Each agent reads only what is new to it, and the whole team shares one memory every vendor can read.
+  A Mac group chat for people who run Claude Code, Codex and Gemini on the same work.<br>
+  They hand tasks to each other and review each other's code without re-reading the whole history, and they share one memory every vendor can read.
 </p>
 
 <p align="center">
@@ -18,6 +18,12 @@
 </p>
 
 <p align="center">English · <a href="README.zh-CN.md">简体中文</a> · <a href="README.de.md">Deutsch</a></p>
+
+<p align="center">
+  <a href="https://github.com/0xTaoZ/onebrain/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/0xTaoZ/onebrain?style=flat-square&color=1d1d1f"></a>
+  <img alt="macOS Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-1d1d1f?style=flat-square&logo=apple">
+  <a href="LICENSE"><img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-1d1d1f?style=flat-square"></a>
+</p>
 
 <p align="center">
   <a href="docs/assets/demo/onebrain-demo.mp4">
@@ -96,6 +102,21 @@ Vendor memories stay with their vendor: what Claude learns, Codex never sees. On
 - **You see what it costs.** The Brain page shows how many tokens every agent spends reading it, who changed what, and older versions you can restore in one click.
 
 ## How it works under the hood
+
+```text
+  Claude Code     Codex      Gemini CLI        your own CLIs and subscriptions
+       │            │            │
+       └────────────┼────────────┘
+                    ▼
+     ┌─────────────────────────────┐
+     │       OneBrain Rooms        │   one group chat on your Mac
+     │  read cursor per agent      │   each agent gets only new messages
+     │  git snapshot per run       │   every run can be undone
+     └──────────────┬──────────────┘
+                    ▼
+     ~/OneBrain/brain  (Markdown + git)   one memory every vendor reads,
+                                          each change signed by its agent
+```
 
 | Mechanism | What happens in the app |
 | --- | --- |

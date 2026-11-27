@@ -6,8 +6,8 @@
 
 <p align="center">
   <b>Claude schreibt. Codex prüft. Ein Gruppenchat.</b><br>
-  Eine Open-Source-App für den Mac, die deine Coding-Agents in einen Gruppenchat holt.<br>
-  Jeder Agent liest nur, was für ihn neu ist, und das ganze Team teilt ein Gedächtnis, das jeder Anbieter lesen kann.
+  Ein Gruppenchat für den Mac, für alle, die Claude Code, Codex und Gemini an derselben Arbeit einsetzen.<br>
+  Sie übergeben sich Aufgaben und prüfen gegenseitig ihren Code, ohne jedes Mal den ganzen Verlauf zu lesen, und teilen ein Gedächtnis, das jeder Anbieter lesen kann.
 </p>
 
 <p align="center">
@@ -18,6 +18,12 @@
 </p>
 
 <p align="center"><a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · Deutsch</p>
+
+<p align="center">
+  <a href="https://github.com/0xTaoZ/onebrain/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/0xTaoZ/onebrain?style=flat-square&color=1d1d1f"></a>
+  <img alt="macOS Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-1d1d1f?style=flat-square&logo=apple">
+  <a href="LICENSE"><img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-1d1d1f?style=flat-square"></a>
+</p>
 
 <p align="center">
   <a href="docs/assets/demo/onebrain-demo.mp4">
@@ -96,6 +102,21 @@ Was ein Anbieter sich merkt, bleibt bei diesem Anbieter: Was Claude lernt, sieht
 - **Du siehst, was es kostet.** Die Gehirn-Seite zeigt, wie viele Tokens jeder Agent zum Lesen braucht, wer was geändert hat, und ältere Stände lassen sich mit einem Klick zurückholen.
 
 ## Wie die Technik funktioniert
+
+```text
+  Claude Code     Codex      Gemini CLI        deine eigenen CLIs und Abos
+       │            │            │
+       └────────────┼────────────┘
+                    ▼
+     ┌─────────────────────────────┐
+     │       OneBrain Rooms        │   ein Gruppenchat auf deinem Mac
+     │  read cursor per agent      │   jeder Agent bekommt nur Neues
+     │  git snapshot per run       │   jeder Lauf ist umkehrbar
+     └──────────────┬──────────────┘
+                    ▼
+     ~/OneBrain/brain  (Markdown + git)   ein Gedächtnis für alle Anbieter,
+                                          jede Änderung vom Agent signiert
+```
 
 | Mechanismus | Umsetzung |
 | --- | --- |

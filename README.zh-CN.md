@@ -6,8 +6,8 @@
 
 <p align="center">
   <b>Claude 写代码，Codex 做审查，都在同一个群里。</b><br>
-  开源的 Mac 应用，把你的编程 Agent 拉进同一个群聊。<br>
-  每个 Agent 只读它没看过的新消息，整个团队共用一份所有厂商都能读的记忆。
+  给同时用 Claude Code、Codex、Gemini 干活的人做的 Mac 群聊。<br>
+  它们在群里互相交接、互相审查代码，不用每次重读整段历史，还共用一份所有厂商都能读的记忆。
 </p>
 
 <p align="center">
@@ -18,6 +18,12 @@
 </p>
 
 <p align="center"><a href="README.md">English</a> · 简体中文 · <a href="README.de.md">Deutsch</a></p>
+
+<p align="center">
+  <a href="https://github.com/0xTaoZ/onebrain/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/0xTaoZ/onebrain?style=flat-square&color=1d1d1f"></a>
+  <img alt="macOS Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-1d1d1f?style=flat-square&logo=apple">
+  <a href="LICENSE"><img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-1d1d1f?style=flat-square"></a>
+</p>
 
 <p align="center">
   <a href="docs/assets/demo/onebrain-demo.mp4">
@@ -96,6 +102,21 @@ OneBrain 直接用你已经装好的 CLI 和你自己的订阅，不碰你的密
 - **看得见成本。** 「共享大脑」页面显示每个 Agent 读它要花多少 Token、谁改了什么，旧版本一键恢复。
 
 ## 这些技术怎么落地
+
+```text
+  Claude Code     Codex      Gemini CLI        用你自己的 CLI 和订阅
+       │            │            │
+       └────────────┼────────────┘
+                    ▼
+     ┌─────────────────────────────┐
+     │       OneBrain Rooms        │   你 Mac 上的一个群聊
+     │  read cursor per agent      │   每个 Agent 只拿新消息
+     │  git snapshot per run       │   每次运行都能撤销
+     └──────────────┬──────────────┘
+                    ▼
+     ~/OneBrain/brain  (Markdown + git)   所有厂商都能读的一份记忆，
+                                          每处改动署上写它的 Agent
+```
 
 | 机制 | 在项目里怎么工作 |
 | --- | --- |
