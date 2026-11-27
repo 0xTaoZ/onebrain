@@ -186,3 +186,7 @@ body[data-mode="paper"] .paper-rail-person[data-status="i"] .agent-character-ima
 .ui-schedule-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .ui-sheet-list li[data-disabled] { opacity: 0.55; }
 .ui-sheet-done[data-danger] { color: #c4343a; }
+
+/* Shared brain */
+.ui-brain-title { font-size: 14px; color: var(--ink); }
+.ui-brain-body { font-size: 13px; color: var(--ink-subtle); white-space: pre-wrap; }

@@ -992,6 +992,34 @@ impl ChatRunner {
                         &entry,
                     )
                     .await?;
+                    // Records become shared-brain proposals; the user approves them.
+                    if let Some((kind, title, body)) =
+                        crate::services::brain::proposal_from_record(&message.content)
+                    {
+                        let scope = ChatSession::find_by_id(&self.db.pool, session_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .and_then(|session| session.default_workspace_path)
+                            .unwrap_or_default();
+                        if let Err(err) = db::models::brain_entry::BrainEntry::create(
+                            &self.db.pool,
+                            &db::models::brain_entry::NewBrainEntry {
+                                scope,
+                                kind,
+                                title,
+                                body,
+                                status: db::models::brain_entry::BrainEntryStatus::Proposed,
+                                source_session_id: Some(session_id),
+                                source_run_id: Some(run_id),
+                                source_agent: Some(agent_name.to_string()),
+                            },
+                        )
+                        .await
+                        {
+                            tracing::warn!(error = %err, "failed to store brain proposal");
+                        }
+                    }
                 }
                 AgentProtocolMessageType::Artifact | AgentProtocolMessageType::Conclusion => {
                     if matches!(&message.message_type, AgentProtocolMessageType::Conclusion)

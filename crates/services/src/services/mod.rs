@@ -5,6 +5,7 @@ pub mod analytics;
 pub mod analytics_events;
 pub mod approvals;
 pub mod auth;
+pub mod brain;
 pub mod build_stats;
 pub mod chat;
 pub mod chat_history_file;

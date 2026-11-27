@@ -154,6 +154,10 @@ import type {
   ChatRunFilesResponse,
   UndoRunResult,
   ChatAuditEvent,
+  BrainEntry,
+  BrainEntryStatus,
+  CreateBrainEntry,
+  UpdateBrainEntry,
   ChatSchedule,
   ChatScheduleInput,
   ChatSchedulePreview,
@@ -1568,6 +1572,32 @@ export const chatSchedulesApi = {
     handleApiResponse<ChatSchedulePreview>(
       await makeRequest(`/api/chat/schedules/preview`, { method: "POST", body: JSON.stringify(input) }),
     ),
+};
+
+export const brainApi = {
+  list: async (sessionId: string, status: BrainEntryStatus): Promise<BrainEntry[]> =>
+    handleApiResponse<BrainEntry[]>(
+      await makeRequest(`/api/chat/sessions/${encodeURIComponent(sessionId)}/brain${qs({ status })}`),
+    ),
+  create: async (sessionId: string, input: CreateBrainEntry): Promise<BrainEntry> =>
+    handleApiResponse<BrainEntry>(
+      await makeRequest(`/api/chat/sessions/${encodeURIComponent(sessionId)}/brain`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    ),
+  update: async (entryId: string, input: UpdateBrainEntry): Promise<BrainEntry> =>
+    handleApiResponse<BrainEntry>(
+      await makeRequest(`/api/chat/brain/${encodeURIComponent(entryId)}`, {
+        method: "PUT",
+        body: JSON.stringify(input),
+      }),
+    ),
+  remove: async (entryId: string): Promise<void> => {
+    await handleApiResponse<null>(
+      await makeRequest(`/api/chat/brain/${encodeURIComponent(entryId)}`, { method: "DELETE" }),
+    );
+  },
 };
 
 export const chatAuditApi = {

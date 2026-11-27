@@ -1,5 +1,6 @@
 pub mod analytics;
 pub mod application_data_migration;
+pub mod brain_entry;
 pub mod chat_agent;
 pub mod chat_agent_skill;
 pub mod chat_artifact;
