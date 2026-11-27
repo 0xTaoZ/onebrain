@@ -90,26 +90,20 @@
 
 ## 对比协作方式
 
-看看不同项目怎样让 Agent 交接、怎样控制文件改动，以及上下文怎样留到下一次。
+| 项目 | 运行方式 | Claude + Codex | 文件撤销 | Git 版控共享记忆 | 成员阅读进度 | 可复跑 Token 基准 |
+| --- | --- | :---: | :---: | :---: | :---: | :---: |
+| **OneBrain Rooms** | 本地 App | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [Pachat](https://pachat.ai/use-cases/agent-teams) | 托管群聊 | ✅ | — | — | — | — |
+| [Octo](https://www.mininglamp.com/octo/) | 可自托管 | [◐](https://github.com/Mininglamp-OSS/octo-runtime) | — | — | — | — |
+| [OpenAgents](https://openagents.org/faq) | 可自托管 | ✅ | — | — | — | — |
+| [AionUi](https://github.com/iOfficeAI/AionUi#team-mode--coordinated-multi-agent-collaboration) | 本地 App | ✅ | — | — | — | — |
+| [PiBot](https://pibot.space/en/guides/bots-and-roles/#external-agents) | 本地 App | ✅ | [✅ macOS](https://github.com/w01fb0ss/PiBot#what-it-does) | — | — | — |
+| [LobeHub](https://github.com/lobehub/lobehub) | 可自托管 | ✅ | — | — | — | — |
+| [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams) | 本地 CLI | ✗ | — | — | — | — |
 
-| 项目 | Agent 怎么协作 | 项目与变更控制 | 上下文与记忆 |
-| --- | --- | --- | --- |
-| **OneBrain Rooms** | 本地 Mac 群聊，用 @ 交接给 Claude Code、Codex 或 Gemini | Git worktree、diff、审批、带冲突提示的按次撤销 | 有版本记录的团队 Markdown、每成员阅读进度和可测量的交接 |
-| [Pachat](https://pachat.ai/use-cases/agent-teams) | 人和 Agent 加入托管群聊，可让 Claude 和 Codex 互相核查 | 群讨论和邀请链接 | 群聊回复与持久会话记录 |
-| [Octo](https://www.mininglamp.com/octo/) | 可自托管的团队频道，覆盖网页、桌面和移动端 | 团队任务和人工验收 | 团队上下文，跨会话沉淀记忆和技能 |
-| [OpenAgents](https://openagents.org/faq) | 编程 CLI 接入可自托管工作区，在共享线程里审查 | 共享文件、浏览器会话和 Agent 配对 | 共享工作区线程和交付物 |
-| [AionUi](https://github.com/iOfficeAI/AionUi#team-mode--coordinated-multi-agent-collaboration) | 主 Agent 经 ACP 分派任务给外部 CLI 成员 | 共享目录、逐成员审批和远程访问 | 异步收件箱和共享任务板 |
-| [PiBot](https://github.com/w01fb0ss/PiBot#what-it-does) | 本地 Bot 群由协调员拆解计划 | 审批、操作记录和 macOS 快照 | 按 Bot 配置记忆和技能 |
-| [LobeHub](https://lobehub.com/docs/usage/agent/agent-team) | 串行、并行、迭代和辩论模式 | 群组模板、技能和可配置编排 | 编排器可总结讨论、提取决定 |
-| [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams) | 多个 Claude Code 会话互发消息、领取任务 | 共享任务表、计划审批和质检钩子 | 成员各自保有上下文，读取项目指令 |
+**✅** 有公开文档 · **◐** 运行时有文档 · **✗** 超出公开文档中的产品范围 · **—** 在所链接资料里还没找到对应能力。
 
-### 哪些功能重叠，差别在哪
-
-- **跨厂商互审已有其他选择。** Pachat 官方展示了 Claude 和 Codex 在托管群聊里互相核查。OpenAgents 文档也有本地 CLI 在共享线程中审查，工作区可自托管。OneBrain Rooms 的侧重点是在 Mac 的项目群里同时查看 Git diff、处理审批和按次撤销。
-- **可恢复快照也有重叠。** PiBot 文档明确提供 macOS 快照。OneBrain Rooms 把撤销范围定在单次运行改过的文件，并在这些文件后来又被编辑时提示冲突。
-- **编排和记忆的做法各不相同。** Octo 有团队频道和跨会话记忆，AionUi 用 ACP 主 Agent、收件箱和任务板协作，LobeHub 可以设置群组编排，Claude Code Agent Teams 在 Claude 会话间共享任务表。OneBrain Rooms 把 **Git 版控的团队 Markdown、每位成员的阅读进度，以及可复现的交接 Token 基准**放在一起。
-
-对比以链接里的公开资料为依据。两条 Token 基线都使用本项目的同一段回放。
+「Claude + Codex」指两个工具能加入同一个产品工作区。「文件撤销」指恢复 Agent 改过的文件。[Token 基准](docs/benchmarks/context-tokens.md)使用本项目的固定对话回放。
 
 ## 这些技术怎么落地
 
@@ -120,9 +114,11 @@
 | [Git 快照和按次撤销](crates/git/src/checkpoint.rs) | 只回退该次运行碰过的文件。如果运行结束后又有人编辑了这些文件，写入前会检查冲突。 |
 | [定时任务](crates/services/src/services/scheduler/mod.rs) | 到期任务先被调度器领取，再走群消息的正常执行路径，沿用群里的审批机制。 |
 
-## 参考的工程方法
+## 我们想怎么用 AI
 
-Lauren Tan（@poteto）的 [pstack 指南](https://github.com/cursor/plugins/blob/main/pstack/docs/guide/README.md) 有两个做法值得借鉴：开工前说清怎样才算完成，交付前走一遍真实流程。她的 [brainmaxxing](https://github.com/poteto/brainmaxxing) 用文件保存可持续维护的记忆，[Noodle](https://github.com/poteto/noodle) 用技能组织可重复的任务。落到 OneBrain Rooms，就是能从聊天里追到交接、从 Git 看见改动，以及让下一个成员读到前面的决定。
+做这个项目时，我想学那些天天在做 AI 工具的人是怎么用 AI 的。Lauren Tan（@poteto）的 [pstack 指南](https://github.com/cursor/plugins/blob/main/pstack/docs/guide/README.md) 里有个做法我很喜欢：开工前先说清楚怎么才算做完。修一个 bug，就把复现步骤交给一位 Agent，让另一位看 diff、重跑原来失败的用例，最后把决定记下来。
+
+我希望这些事在群里就能做完。谁接了活、改了什么、为什么通过，下一位进来都能查到。[brainmaxxing](https://github.com/poteto/brainmaxxing) 给了我一个用可编辑文件保存记忆的例子，[Noodle](https://github.com/poteto/noodle) 则展示了怎么把常用做法写成技能。如果只是想复核一次改动，我就叫一位审查员，把 diff 和相关消息给它。我想看到它跑了哪条测试，结果是什么。
 
 ## 怎么省下来的
 

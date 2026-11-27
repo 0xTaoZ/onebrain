@@ -90,26 +90,20 @@ Ein Reviewer, der nach 100 Runden dazukommt, startet mit 1.775 Eingabe-Tokens. B
 
 ## Arbeitsabläufe im Vergleich
 
-Die Tabelle zeigt, wie Teams Änderungen übergeben, die Bearbeitung steuern und Kontext für spätere Läufe ablegen.
+| Projekt | Betrieb | Claude + Codex | Dateien zurücksetzen | Gemeinsames Markdown in Git | Leseposition pro Agent | Reproduzierbarer Token-Benchmark |
+| --- | --- | :---: | :---: | :---: | :---: | :---: |
+| **OneBrain Rooms** | Lokale App | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [Pachat](https://pachat.ai/use-cases/agent-teams) | Gehosteter Chat | ✅ | — | — | — | — |
+| [Octo](https://www.mininglamp.com/octo/) | Selbst hostbar | [◐](https://github.com/Mininglamp-OSS/octo-runtime) | — | — | — | — |
+| [OpenAgents](https://openagents.org/faq) | Selbst hostbar | ✅ | — | — | — | — |
+| [AionUi](https://github.com/iOfficeAI/AionUi#team-mode--coordinated-multi-agent-collaboration) | Lokale App | ✅ | — | — | — | — |
+| [PiBot](https://pibot.space/en/guides/bots-and-roles/#external-agents) | Lokale App | ✅ | [✅ macOS](https://github.com/w01fb0ss/PiBot#what-it-does) | — | — | — |
+| [LobeHub](https://github.com/lobehub/lobehub) | Selbst hostbar | ✅ | — | — | — | — |
+| [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams) | Lokale CLI | ✗ | — | — | — | — |
 
-| Projekt | Zusammenarbeit | Projekt und Änderungen | Kontext und Gedächtnis |
-| --- | --- | --- | --- |
-| **OneBrain Rooms** | Lokaler Mac-Gruppenchat mit @Erwähnungen für Claude Code, Codex und Gemini | Git-Worktrees, Diffs, Freigaben und Rückgängig-Funktion mit Konflikterkennung | Versioniertes Team-Markdown, Leseposition pro Agent und gemessene Übergabe |
-| [Pachat](https://pachat.ai/use-cases/agent-teams) | Menschen und Agents treten einem gehosteten Gruppenchat bei und prüfen sich gegenseitig | Gruppendiskussion und Einladungslinks | Antworten und Verlauf im dauerhaften Gruppenchat |
-| [Octo](https://www.mininglamp.com/octo/) | Selbst hostbare Teamkanäle mit Web-, Desktop- und Mobil-Apps | Teamaufgaben und menschliche Abnahme | Teamkontext sowie sitzungsübergreifende Memory- und Skill-Dateien |
-| [OpenAgents](https://openagents.org/faq) | Coding-CLIs prüfen in gemeinsamen Threads eines selbst hostbaren Arbeitsbereichs | Gemeinsame Dateien, Browser-Sitzungen und Agent-Kopplung | Gemeinsame Threads und Artefakte |
-| [AionUi](https://github.com/iOfficeAI/AionUi#team-mode--coordinated-multi-agent-collaboration) | Lead-Agent delegiert Aufgaben an externe CLI-Agents über ACP | Gemeinsamer Ordner, Freigaben pro Agent und Fernzugriff | Asynchrones Postfach und gemeinsame Aufgabenliste |
-| [PiBot](https://github.com/w01fb0ss/PiBot#what-it-does) | Lokale Bot-Gruppen mit koordinierten Plänen | Freigaben, Aktivitätsprotokoll und macOS-Snapshots | Gedächtnis und Skills pro Bot |
-| [LobeHub](https://lobehub.com/docs/usage/agent/agent-team) | Sequenzielle, parallele, iterative und Debatten-Modi | Gruppenvorlagen, Skills und konfigurierbare Orchestrierung | Der Orchestrator kann Diskussionen zusammenfassen und Entscheidungen erfassen |
-| [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams) | Claude-Code-Sitzungen tauschen Nachrichten aus und übernehmen Aufgaben | Gemeinsame Aufgabenliste, Planfreigabe und Qualitätsprüfungen per Hook | Eigener Kontext pro Mitglied und gemeinsame Projektanweisungen |
+**✅** dokumentiert · **◐** für die Laufzeit dokumentiert · **✗** außerhalb des dokumentierten Produktumfangs · **—** in den verlinkten Unterlagen kein entsprechendes Merkmal gefunden.
 
-### Wo sich die Funktionen überschneiden
-
-- **Reviews über Anbietergrenzen hinweg.** Pachat dokumentiert, wie Claude und Codex sich im gehosteten Chat gegenseitig prüfen. OpenAgents verbindet lokale CLIs mit gemeinsamen Review-Threads und lässt sich selbst hosten. OneBrain Rooms zeigt Review, Git-Diffs, Freigaben und Rückgängig-Funktion im selben Mac-Projektraum.
-- **Wiederherstellung.** PiBot dokumentiert wiederherstellbare Snapshots für macOS. OneBrain Rooms beschränkt das Rückgängigmachen auf die Dateien eines Laufs und meldet Konflikte bei späteren Bearbeitungen.
-- **Orchestrierung und Gedächtnis.** Octo dokumentiert Teamkanäle und sitzungsübergreifendes Gedächtnis. AionUi verbindet einen Lead-Agent über ACP mit Postfach und Aufgabentafel. LobeHub orchestriert Agent-Gruppen. Claude Code Agent Teams koordiniert Claude-Sitzungen über eine Aufgabenliste. Bei OneBrain Rooms kommen versioniertes Team-Markdown, eine Leseposition pro Agent und ein veröffentlichter Übergabe-Benchmark zusammen.
-
-Der Vergleich beruht auf der verlinkten Dokumentation. Der Benchmark verwendet dieselbe Aufzeichnung für beide Baselines.
+„Claude + Codex“ bedeutet, dass beide demselben Arbeitsbereich beitreten können. „Dateien zurücksetzen“ bezieht sich auf Änderungen durch einen Agent. Der [Token-Benchmark](docs/benchmarks/context-tokens.md) verwendet unser festes Gesprächs-Replay.
 
 ## Wie die Technik funktioniert
 
@@ -120,9 +114,11 @@ Der Vergleich beruht auf der verlinkten Dokumentation. Der Benchmark verwendet d
 | [Git-Snapshots](crates/git/src/checkpoint.rs) | Die Rückgängig-Funktion beschränkt sich auf die Dateien eines Laufs. Spätere Änderungen an diesen Dateien werden vor dem Schreiben auf Konflikte geprüft. |
 | [Zeitpläne](crates/services/src/services/scheduler/mod.rs) | Der Scheduler beansprucht fällige Aufgaben und sendet sie über den üblichen Chat-Pfad mit den normalen Freigaberegeln. |
 
-## Vorbilder für die Arbeitsweise
+## Wie wir KI einsetzen wollen
 
-Lauren Tans [pstack-Anleitung](https://github.com/cursor/plugins/blob/main/pstack/docs/guide/README.md) zeigt, wie man Abnahmekriterien vorab festlegt und fertige Änderungen in der laufenden App prüft. [brainmaxxing](https://github.com/poteto/brainmaxxing) hält Wissen in bearbeitbaren Dateien fest. [Noodle](https://github.com/poteto/noodle) organisiert wiederkehrende Abläufe über Skills. In OneBrain Rooms kann man die Übergabe im Chat verfolgen, Änderungen in Git prüfen und Entscheidungen später in Markdown nachlesen.
+Ich schaue mir an, wie Leute, die KI-Werkzeuge bauen, sie selbst einsetzen. Eine Idee aus Lauren Tans [pstack-Anleitung](https://github.com/cursor/plugins/blob/main/pstack/docs/guide/README.md) gefällt mir besonders. Vor dem Start klären wir, woran wir erkennen, dass die Aufgabe fertig ist. Ein Agent reproduziert und behebt den Fehler. Ein zweiter prüft den Diff und führt den zuvor fehlschlagenden Test erneut aus. Die Entscheidung halten wir fest.
+
+Im Gruppenchat möchte ich sehen, wer die Aufgabe übernommen hat, was sich geändert hat und warum der Review durchging. [brainmaxxing](https://github.com/poteto/brainmaxxing) zeigt, wie Wissen in bearbeitbaren Dateien erhalten bleibt. [Noodle](https://github.com/poteto/noodle) organisiert wiederkehrende Abläufe über Skills. Wenn ich nur eine zweite Meinung brauche, möchte ich einen Agent mit dem Diff und den relevanten Nachrichten beauftragen. Dann will ich sehen, welchen Test er ausgeführt hat und was dabei herauskam.
 
 ## Wie die Ersparnis entsteht
 

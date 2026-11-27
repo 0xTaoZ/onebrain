@@ -90,26 +90,20 @@ A reviewer joining at 100 turns starts with 1,775 input tokens versus 11,528 whe
 
 ## Compare workflows
 
-Choose based on how your team hands off a change, controls edits, and keeps context between runs.
+| Project | Where it runs | Claude + Codex | File undo | Git-backed team Markdown | Read cursor per agent | Reproducible token replay |
+| --- | --- | :---: | :---: | :---: | :---: | :---: |
+| **OneBrain Rooms** | Local app | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [Pachat](https://pachat.ai/use-cases/agent-teams) | Hosted chat | ✅ | — | — | — | — |
+| [Octo](https://www.mininglamp.com/octo/) | Self-host option | [◐](https://github.com/Mininglamp-OSS/octo-runtime) | — | — | — | — |
+| [OpenAgents](https://openagents.org/faq) | Self-host option | ✅ | — | — | — | — |
+| [AionUi](https://github.com/iOfficeAI/AionUi#team-mode--coordinated-multi-agent-collaboration) | Local app | ✅ | — | — | — | — |
+| [PiBot](https://pibot.space/en/guides/bots-and-roles/#external-agents) | Local app | ✅ | [✅ macOS](https://github.com/w01fb0ss/PiBot#what-it-does) | — | — | — |
+| [LobeHub](https://github.com/lobehub/lobehub) | Self-host option | ✅ | — | — | — | — |
+| [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams) | Local CLI | ✗ | — | — | — | — |
 
-| Project | How agents collaborate | Project controls | Context and memory |
-| --- | --- | --- | --- |
-| **OneBrain Rooms** | Local Mac group chat with @mentions for Claude Code, Codex and Gemini | Git worktrees, diffs, approvals and per-run undo with conflict detection | Versioned team Markdown, per-agent read cursor and a measured handoff |
-| [Pachat](https://pachat.ai/use-cases/agent-teams) | People and agents join a hosted group. Claude and Codex can cross-check. | Group discussion and invite links | Replies and history in a persistent room |
-| [Octo](https://www.mininglamp.com/octo/) | Self-hostable team channels across web, desktop and mobile | Team tasks and human review | Team context, with memory and skills carried across sessions |
-| [OpenAgents](https://openagents.org/faq) | Connect coding CLIs to shared review threads in a self-hostable workspace | Shared files, browsing sessions and agent pairing | Shared workspace threads and artifacts |
-| [AionUi](https://github.com/iOfficeAI/AionUi#team-mode--coordinated-multi-agent-collaboration) | A lead agent delegates to external CLI teammates over ACP | Shared working folder, per-agent approvals and remote access | Async mailbox and shared task board |
-| [PiBot](https://github.com/w01fb0ss/PiBot#what-it-does) | Local Bot groups with coordinator-led plans | Approvals, activity log and macOS checkpoints | Memory and skills configured per Bot |
-| [LobeHub](https://lobehub.com/docs/usage/agent/agent-team) | Sequential, parallel, iterative and debate modes | Group templates, skills and configurable orchestration | Orchestrator can summarize and extract decisions |
-| [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams) | Claude Code sessions communicate and claim tasks | Shared task list, plan approval and quality hooks | Per-teammate context and shared project instructions |
+**✅** documented · **◐** documented at the runtime level · **✗** outside the documented product scope · **—** no comparable feature found in the linked docs.
 
-### Where the differences matter
-
-- **Cross-vendor review is shared ground.** Pachat documents Claude and Codex checking each other in a hosted chat. OpenAgents connects local CLIs to shared review threads and offers a self-hosted workspace. OneBrain Rooms puts review next to Git diffs, approvals and run undo in its Mac project room.
-- **Checkpoints are shared ground too.** PiBot documents recoverable macOS snapshots. OneBrain Rooms ties undo to the files changed in a particular run and reports conflicts if you edited those files afterwards.
-- **Orchestration and memory take different forms.** Octo documents team channels and memory across sessions. AionUi documents an ACP lead, mailbox and task board. LobeHub documents group orchestration. Claude Code Agent Teams coordinates Claude sessions through a shared task list. Compare OneBrain Rooms on the combination of Git-backed team Markdown, a read cursor per agent and a published handoff benchmark.
-
-The comparisons use the linked public documentation. The benchmark tests our two baselines on the same replay.
+“Claude + Codex” means both can join the same product workspace. “File undo” covers restoring files changed by an agent. The [token benchmark](docs/benchmarks/context-tokens.md) is our fixed conversation replay.
 
 ## How it works under the hood
 
@@ -120,9 +114,11 @@ The comparisons use the linked public documentation. The benchmark tests our two
 | [Git checkpoints](crates/git/src/checkpoint.rs) | The app can roll back files touched by a run. Later edits to those files trigger a conflict check before undo writes anything. |
 | [Scheduled chat tasks](crates/services/src/services/scheduler/mod.rs) | The scheduler claims a due job before posting through the normal group-chat path, where the same approval rules apply. |
 
-## Engineering references
+## How we want to use AI
 
-Lauren Tan’s [pstack guide](https://github.com/cursor/plugins/blob/main/pstack/docs/guide/README.md) is a reference for giving agents a clear finish condition and checking the actual behavior before shipping. Her [brainmaxxing](https://github.com/poteto/brainmaxxing) and [Noodle](https://github.com/poteto/noodle) show two complementary ideas: keep durable knowledge in editable files and put repeatable workflows in skills. In OneBrain Rooms, the concrete application is a handoff you can follow in chat, a Git change you can inspect, and a decision the next agent can read.
+I'm building this by studying how people who make AI tools actually use them. One lesson I took from Lauren Tan’s [pstack guide](https://github.com/cursor/plugins/blob/main/pstack/docs/guide/README.md) is to say what would count as done before anyone starts. For a bug fix, give one agent the repro, ask another to check the diff and rerun the failing case, then write down what the team decided.
+
+I want that to feel as easy as a group chat. Give each agent a job, show the reviewer what changed, and leave a note the next agent can pick up. Lauren’s [brainmaxxing](https://github.com/poteto/brainmaxxing) gives me a useful example of memory in editable files. [Noodle](https://github.com/poteto/noodle) does the same for repeatable workflows. If I just need a second opinion, I want to call one reviewer, give it the diff and the relevant messages, and see which check it ran and what happened.
 
 ## How it saves tokens
 
