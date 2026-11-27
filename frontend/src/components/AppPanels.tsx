@@ -27,6 +27,16 @@ export function AppPanels() {
     return () => window.removeEventListener(EVENT, open);
   }, []);
 
+  // Esc closes the panel, as in any desktop app.
+  useEffect(() => {
+    if (!panel) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPanel(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [panel]);
+
   if (!panel || !activeSessionId) return null;
   const close = () => setPanel(null);
   return panel === 'schedules'
