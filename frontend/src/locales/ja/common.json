@@ -480,5 +480,6 @@
   "message.undoRunConflict": "実行後に編集されたファイルがあります：{files}。もう一度クリックすると上書きします。",
   "message.undoRunForce": "上書きして元に戻す",
   "composerChatMode": "チャット",
-  "composerWorkMode": "作業：先に計画"
+  "composerWorkMode": "作業：先に計画",
+  "message.handedTo": "引き継ぎ先"
 }

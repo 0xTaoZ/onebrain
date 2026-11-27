@@ -480,5 +480,6 @@
   "message.undoRunConflict": "실행 후 수정된 파일이 있습니다: {files}. 한 번 더 누르면 덮어씁니다.",
   "message.undoRunForce": "덮어쓰고 되돌리기",
   "composerChatMode": "채팅",
-  "composerWorkMode": "작업: 먼저 계획"
+  "composerWorkMode": "작업: 먼저 계획",
+  "message.handedTo": "넘김:"
 }

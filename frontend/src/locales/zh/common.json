@@ -480,5 +480,6 @@
   "message.undoRunConflict": "这些文件在运行后又被改过：{files}。再点一次会覆盖它们。",
   "message.undoRunForce": "覆盖并撤销",
   "composerChatMode": "聊天",
-  "composerWorkMode": "工作：先出计划"
+  "composerWorkMode": "工作：先出计划",
+  "message.handedTo": "交给了"
 }

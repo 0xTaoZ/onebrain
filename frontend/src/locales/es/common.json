@@ -480,5 +480,6 @@
   "message.undoRunConflict": "Estos archivos se editaron después de la ejecución: {files}. Haz clic otra vez para sobrescribirlos.",
   "message.undoRunForce": "Sobrescribir y deshacer",
   "composerChatMode": "Chat",
-  "composerWorkMode": "Trabajo: primero el plan"
+  "composerWorkMode": "Trabajo: primero el plan",
+  "message.handedTo": "pasado a"
 }

@@ -1757,6 +1757,17 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
                 </div>
 
                 {!msg.isUser &&
+                  (msg.mentions ?? []).some((name) => !["user", "you", "me"].includes(name.toLowerCase())) && (
+                    <div className="ui-handoff">
+                      → {t("message.handedTo")}{" "}
+                      {(msg.mentions ?? [])
+                        .filter((name) => !["user", "you", "me"].includes(name.toLowerCase()))
+                        .map((name) => `@${name}`)
+                        .join(" ")}
+                    </div>
+                  )}
+
+                {!msg.isUser &&
                   msg.isAgentRunning &&
                   msg.runId &&
                   msg.sessionAgentId &&

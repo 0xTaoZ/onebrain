@@ -480,5 +480,6 @@
   "message.undoRunConflict": "Ces fichiers ont été modifiés après l'exécution : {files}. Cliquez à nouveau pour les écraser.",
   "message.undoRunForce": "Écraser et annuler",
   "composerChatMode": "Discussion",
-  "composerWorkMode": "Travail : plan d'abord"
+  "composerWorkMode": "Travail : plan d'abord",
+  "message.handedTo": "transmis à"
 }

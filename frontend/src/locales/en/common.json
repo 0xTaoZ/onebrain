@@ -480,5 +480,6 @@
   "message.undoRunConflict": "These files were edited after the run: {files}. Click again to overwrite them.",
   "message.undoRunForce": "Overwrite and undo",
   "composerChatMode": "Chat",
-  "composerWorkMode": "Work: plan first"
+  "composerWorkMode": "Work: plan first",
+  "message.handedTo": "handed to"
 }
