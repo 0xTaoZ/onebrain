@@ -6,7 +6,8 @@
 
 <p align="center">
   <b>Claude builds. Codex reviews. One chat.</b><br>
-  Open-source group chats for you and your agents on macOS. Chat, work on projects together, and keep team decisions in versioned Markdown.
+  An open-source Mac app that puts your coding agents in one group chat.<br>
+  Each agent reads only what is new to it, and the whole team shares one memory every vendor can read.
 </p>
 
 <p align="center">
@@ -31,37 +32,41 @@
   · <a href="docs/assets/demo/team-brain.png">Shared brain screenshot</a>
 </p>
 
-## Why I built it
+## What you get
 
-I wanted a place where I could ask a few agents to think through a question, come back the next day, and carry the decisions into the next task. On code projects I kept copying the request, the diff and the last answer from one terminal to another just to ask for a second opinion. Once the reviewer found something, I had to copy it back again.
-
-In a chat room I can ask two agents for different perspectives. In a project room I can give them a working folder, hand a change to a reviewer, and check the diff before accepting it. When the team settles on a decision, it goes into Markdown that the next agent can read.
-
-**Our goal is to build the most useful multi-agent workspace we can and make it use as few tokens as possible.** We measure progress on repeatable conversations and keep the benchmark in the repo.
-
-## What makes OneBrain Rooms different
-
-- **Cross-vendor review.** Mention Claude Code, Codex, or Gemini to assign the next step. In a project group, inspect diffs and approvals alongside the chat. Run checkpoints can undo file changes and flag later edits.
-- **Context per agent.** A returning agent receives new messages. A new reviewer gets a short handoff assembled from stored data. **80.9% fewer input tokens** versus replaying the full history in a fixed 100-turn benchmark. [Reproduce the benchmark](docs/benchmarks/context-tokens.md).
-- **Shared Markdown.** Team decisions live in files the coding CLIs can open directly, with Git history for authorship and restore.
+- **Claude, Codex and Gemini in one chat.** `@codex` asks one agent, `@all` asks everyone, and a message with no mention goes to the best-suited member. Agents hand work to each other in the same thread.
+- **80.9% fewer input tokens on long threads.** Each agent keeps a read cursor and only gets new messages; a late reviewer gets a short handoff instead of the history. Measured on a fixed 100-turn conversation; [reproduce it](docs/benchmarks/context-tokens.md).
+- **One brain every vendor can read.** Team decisions and rules live in a plain Markdown folder that Claude Code, Codex and Gemini open directly. Git records which agent wrote each change, and any file can go back to an older version.
+- **Safe to leave running.** Every agent run can be undone, and undo warns before overwriting your later edits. Commands that write outside the project or rewrite history are flagged on the approval card and can never be allowed permanently. Scheduled runs keep the same approvals.
 
 ## Install
-
-The app appears as **OneBrain** in Applications.
 
 | | One-line install (recommended) | Download the `.dmg` |
 | --- | --- | --- |
 | **How** | Paste into Terminal:<br>`curl -fsSL https://raw.githubusercontent.com/0xTaoZ/onebrain/main/install.sh \| bash` | Download `OneBrain_x.y.z_aarch64.dmg` from [Releases](https://github.com/0xTaoZ/onebrain/releases/latest), open it, drag **OneBrain** into **Applications** |
-| **First launch** | Opens right away. The script installs the app and opens it. | If macOS blocks the downloaded build, open **System Settings → Privacy & Security** and click **Open Anyway**. If it says the app is damaged, run `xattr -dr com.apple.quarantine /Applications/OneBrain.app` |
-| **Needs** | A Mac with Apple Silicon (M1 or later) | Same |
+| **First launch** | Opens right away. | If macOS blocks it, open **System Settings → Privacy & Security** and click **Open Anyway**. If it says the app is damaged: `xattr -dr com.apple.quarantine /Applications/OneBrain.app` |
+| **Needs** | A Mac with Apple Silicon (M1 or later) and at least one coding CLI you are signed in to: Claude Code, Codex or Gemini CLI | Same |
 
-Then install and sign in to at least one coding agent you already use, such as Claude Code, Codex or Gemini CLI. Agent access and billing follow the CLI or provider you configure. Create a group, add your agents, and mention one with `@`.
+OneBrain runs the CLIs you already have, with your own subscriptions. It never sees your keys. The app shows up as **OneBrain** in Applications.
 
-## First chat
+**First chat:** the welcome screen lists the agents it found on your Mac. Create a group (a chat group, or a project group tied to a code folder), then click one of the sample messages or write your own.
 
-1. On the welcome screen, pick a detected Agent and click **Add**.
-2. Choose a chat group or a project group. A project group also needs a working folder.
-3. Click a sample to send your first message, or open the chat and write your own.
+## Compare workflows
+
+| Project | Where it runs | Claude + Codex | File undo | Git-backed team Markdown | Read cursor per agent | Reproducible token replay |
+| --- | --- | :---: | :---: | :---: | :---: | :---: |
+| **OneBrain Rooms** | Local app | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [Pachat](https://pachat.ai/use-cases/agent-teams) | Hosted chat | ✅ | — | — | — | — |
+| [Octo](https://www.mininglamp.com/octo/) | Self-host option | [◐](https://github.com/Mininglamp-OSS/octo-runtime) | — | — | — | — |
+| [OpenAgents](https://openagents.org/faq) | Self-host option | ✅ | — | — | — | — |
+| [AionUi](https://github.com/iOfficeAI/AionUi#team-mode--coordinated-multi-agent-collaboration) | Local app | ✅ | — | — | — | — |
+| [PiBot](https://pibot.space/en/guides/bots-and-roles/#external-agents) | Local app | ✅ | [✅ macOS](https://github.com/w01fb0ss/PiBot#what-it-does) | — | — | — |
+| [LobeHub](https://github.com/lobehub/lobehub) | Self-host option | ✅ | — | — | — | — |
+| [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams) | Local CLI | ✗ | — | — | — | — |
+
+**✅** documented · **◐** documented at the runtime level · **✗** outside the documented product scope · **—** no comparable feature found in the linked docs.
+
+“Claude + Codex” means both can join the same product workspace. “File undo” covers restoring files changed by an agent. The [token benchmark](docs/benchmarks/context-tokens.md) is our fixed conversation replay.
 
 ## The numbers
 
@@ -82,58 +87,26 @@ A reviewer joining at 100 turns starts with 1,775 input tokens versus 11,528 whe
 
 [Method](docs/benchmarks/context-tokens.md)
 
-## Project controls
+## The team brain
 
-- **Work mode.** Turn a discussion into a plan, assign steps to agents, and approve the result.
-- **Project worktrees.** Keep a group’s changes in a separate Git worktree and inspect the diff from the chat.
-- **Schedules and activity.** Schedule group messages and review the activity log alongside approvals and file changes.
+Vendor memories stay with their vendor: what Claude learns, Codex never sees. OneBrain keeps one memory for the whole team in `~/OneBrain/brain`, a folder that follows the `AGENTS.md` convention:
 
-## Compare workflows
-
-| Project | Where it runs | Claude + Codex | File undo | Git-backed team Markdown | Read cursor per agent | Reproducible token replay |
-| --- | --- | :---: | :---: | :---: | :---: | :---: |
-| **OneBrain Rooms** | Local app | ✅ | ✅ | ✅ | ✅ | ✅ |
-| [Pachat](https://pachat.ai/use-cases/agent-teams) | Hosted chat | ✅ | — | — | — | — |
-| [Octo](https://www.mininglamp.com/octo/) | Self-host option | [◐](https://github.com/Mininglamp-OSS/octo-runtime) | — | — | — | — |
-| [OpenAgents](https://openagents.org/faq) | Self-host option | ✅ | — | — | — | — |
-| [AionUi](https://github.com/iOfficeAI/AionUi#team-mode--coordinated-multi-agent-collaboration) | Local app | ✅ | — | — | — | — |
-| [PiBot](https://pibot.space/en/guides/bots-and-roles/#external-agents) | Local app | ✅ | [✅ macOS](https://github.com/w01fb0ss/PiBot#what-it-does) | — | — | — |
-| [LobeHub](https://github.com/lobehub/lobehub) | Self-host option | ✅ | — | — | — | — |
-| [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams) | Local CLI | ✗ | — | — | — | — |
-
-**✅** documented · **◐** documented at the runtime level · **✗** outside the documented product scope · **—** no comparable feature found in the linked docs.
-
-“Claude + Codex” means both can join the same product workspace. “File undo” covers restoring files changed by an agent. The [token benchmark](docs/benchmarks/context-tokens.md) is our fixed conversation replay.
+- **Kept by the agents.** They read the index, open only the files a task needs, and write down decisions, rules and handoffs as they work. Collecting memory costs no extra model call.
+- **Every change is signed.** The folder is a git repository. After each run the changes are committed with the agent as author, so each line traces back to an agent and a run.
+- **You see what it costs.** The Brain page shows how many tokens every agent spends reading it, who changed what, and older versions you can restore in one click.
 
 ## How it works under the hood
 
 | Mechanism | What happens in the app |
 | --- | --- |
 | [Incremental prompts](crates/services/src/services/chat_runner/prompting.rs) | The runner records a read cursor for each agent session. It checks the stable prefix and finds messages after the last entry the agent saw. A new member can start with a handoff assembled from stored data. |
-| [Team memory](crates/services/src/services/brain.rs) | The shared brain is a folder of Markdown files. Git records changes and their authors, and the app can open older versions. |
+| [Team brain](crates/services/src/services/brain.rs) | A git-tracked folder of Markdown. After each run the agent's changes are committed with the agent as author; the location reaches agents once per conversation, in the cached part of the prompt. |
 | [Git checkpoints](crates/git/src/checkpoint.rs) | The app can roll back files touched by a run. Later edits to those files trigger a conflict check before undo writes anything. |
 | [Scheduled chat tasks](crates/services/src/services/scheduler/mod.rs) | The scheduler claims a due job before posting through the normal group-chat path, where the same approval rules apply. |
 
-## How we want to use AI
+## Why I built it
 
-I'm building this by studying how people who make AI tools actually use them. One lesson I took from Lauren Tan’s [pstack guide](https://github.com/cursor/plugins/blob/main/pstack/docs/guide/README.md) is to say what would count as done before anyone starts. For a bug fix, give one agent the repro, ask another to check the diff and rerun the failing case, then write down what the team decided.
-
-I want that to feel as easy as a group chat. Give each agent a job, show the reviewer what changed, and leave a note the next agent can pick up. Lauren’s [brainmaxxing](https://github.com/poteto/brainmaxxing) gives me a useful example of memory in editable files. [Noodle](https://github.com/poteto/noodle) does the same for repeatable workflows. If I just need a second opinion, I want to call one reviewer, give it the diff and the relevant messages, and see which check it ran and what happened.
-
-## How it saves tokens
-
-OneBrain tracks what each agent has already seen, so it can send new messages and a short handoff when another agent joins.
-
-- **Choose who answers.** Use @ to name one agent, or @all to ask the group. A message without a mention goes to one selected agent.
-- **A read cursor per agent.** A resumed agent gets the messages since its last run. Its role and the team rules are not resent while they stay the same.
-- **Team handoffs.** A newcomer gets your latest requests, each other agent's latest conclusion and changed files, and the decisions recorded so far, built from stored data without an extra model call.
-- **Handoffs wait for you.** If you post while an agent is working, its handoffs do not wake the next agent, so nobody keeps working on instructions you just changed.
-
-## The shared brain
-
-Most agent tools keep what they learn inside each agent. OneBrain keeps one memory for the whole team: decisions, rules, lessons and handoffs as plain Markdown that any agent can open, you can read, and git can track. Each entry keeps its source, agents propose entries, and you approve them.
-
-The Brain page shows shared entries and handoffs.
+I use several coding agents on the same task. Most of what they cost went into reading the same history again and again, and getting a second opinion meant copying the request, the diff and the last answer from one terminal to another. OneBrain puts them in one chat, gives each one only what it has not seen, and keeps what the team decides in files the next agent can read.
 
 ## Build from source
 
@@ -142,12 +115,12 @@ Rust (Axum, SQLx, SQLite), React and TypeScript, Tauri.
 ```sh
 pnpm install
 pnpm run check
-cargo test -p db -p services
+cargo test --workspace
 ```
 
 ## Follow the project
 
-Star OneBrain Rooms to follow its development, or share what happened in your first group on [GitHub Issues](https://github.com/0xTaoZ/onebrain/issues).
+Star OneBrain Rooms to follow its development, or tell us what happened in your first group on [GitHub Issues](https://github.com/0xTaoZ/onebrain/issues).
 
 ---
 
