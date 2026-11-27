@@ -1012,24 +1012,34 @@ fn test_run_cleanup(workspace: &Path) -> (std::path::PathBuf, ExecutorRunCleanup
 }
 
 #[tokio::test]
-async fn default_route_ignores_unmentioned_free_mode_user_messages() {
+async fn unmentioned_chat_messages_go_to_the_best_matching_member_or_the_lead() {
     let db = setup_chat_runner_db().await;
     let runner = ChatRunner::new(db.clone());
     let session_id = Uuid::new_v4();
     let session = insert_test_chat_session(&db, session_id).await;
     let first_agent = insert_test_chat_agent(&db, "first").await;
     let second_agent = insert_test_chat_agent(&db, "second").await;
-    insert_test_session_agent(&db, session_id, first_agent.id).await;
+    let first = insert_test_session_agent(&db, session_id, first_agent.id).await;
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    insert_test_session_agent(&db, session_id, second_agent.id).await;
-    let message = test_message("please handle this", json!({}));
+    let second = insert_test_session_agent(&db, session_id, second_agent.id).await;
 
-    let default_mention = runner
-        .resolve_default_mention_for_unmentioned_user_message(&session, &message)
+    // The message names the second member's role: it goes there, with no model call.
+    let named = test_message("second, please handle this", json!({}));
+    let picked = runner
+        .resolve_default_mention_for_unmentioned_user_message(&session, &named)
         .await
-        .expect("resolve default mention");
+        .expect("resolve default mention")
+        .expect("a member is picked");
+    assert_eq!(picked.session_agent_id, second.id);
 
-    assert_eq!(default_mention, None);
+    // Nothing in the message points at anyone: the lead answers instead of nobody.
+    let vague = test_message("please handle this", json!({}));
+    let fallback = runner
+        .resolve_default_mention_for_unmentioned_user_message(&session, &vague)
+        .await
+        .expect("resolve default mention")
+        .expect("the lead answers");
+    assert!([first.id, second.id].contains(&fallback.session_agent_id));
 }
 
 #[tokio::test]

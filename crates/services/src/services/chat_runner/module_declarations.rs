@@ -1,5 +1,6 @@
 mod activity_log;
 mod handoff;
+mod routing;
 mod prompting;
 mod protocol;
 mod runtime;

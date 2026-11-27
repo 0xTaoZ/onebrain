@@ -1537,17 +1537,61 @@ impl ChatRunner {
             .and_then(|v| v.as_str())
             .map(|v| v == "workflow")
             .unwrap_or(false);
-        if !is_workflow_mode {
-            return Ok(None);
-        }
-
         let session_agents =
             ChatSessionAgent::find_all_for_session(&self.db.pool, session.id).await?;
         if session_agents.is_empty() {
             return Ok(None);
         }
-
         let agents = ChatAgent::find_all(&self.db.pool).await?;
+
+        if !is_workflow_mode {
+            // Chat mode: pick who answers from the message itself, no model call.
+            let live: Vec<&ChatSessionAgent> = session_agents
+                .iter()
+                .filter(|member| member.state != ChatSessionAgentState::Dead)
+                .collect();
+            let candidates: Vec<routing::RouteCandidate<'_>> = live
+                .iter()
+                .map(|member| routing::RouteCandidate {
+                    id: member.id,
+                    name: member.member_name.as_str(),
+                    role: agents
+                        .iter()
+                        .find(|agent| agent.id == member.agent_id)
+                        .map(|agent| agent.system_prompt.as_str())
+                        .unwrap_or(""),
+                    busy: matches!(
+                        member.state,
+                        ChatSessionAgentState::Running | ChatSessionAgentState::Stopping
+                    ),
+                })
+                .collect();
+            let recent = ChatMessage::find_by_session_id(&self.db.pool, session.id, Some(8))
+                .await
+                .unwrap_or_default();
+            let replying_to = recent
+                .iter()
+                .filter(|earlier| earlier.id != message.id && earlier.created_at <= message.created_at)
+                .max_by_key(|earlier| earlier.created_at)
+                .filter(|earlier| earlier.sender_type == ChatSenderType::Agent)
+                .and_then(|earlier| earlier.sender_id)
+                .and_then(|sender| {
+                    live.iter()
+                        .find(|member| member.id == sender || member.agent_id == sender)
+                        .map(|member| member.id)
+                });
+            let picked = routing::pick_member(&message.content, &candidates, replying_to);
+            if let Some(member) = picked.and_then(|id| live.iter().find(|member| member.id == id)) {
+                return Ok(Some(Self::resolved_session_member(member)));
+            }
+            return match resolve_lead_agent(session, &session_agents, &agents) {
+                Ok((_lead_agent, lead_session_agent)) => {
+                    Ok(Some(Self::resolved_session_member(lead_session_agent)))
+                }
+                Err(_) => Ok(None),
+            };
+        }
+
         tracing::debug!(
             session_id = %session.id,
             message_id = %message.id,
