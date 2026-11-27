@@ -172,3 +172,17 @@ body[data-mode="paper"] .paper-rail-person[data-status="i"] .agent-character-ima
 .ui-audit-meta { display: flex; gap: 8px; font-size: 12px; color: var(--ink-tertiary); }
 .ui-audit-kind { color: var(--ink-subtle); }
 .ui-audit-danger { color: #c4343a; font-weight: 600; }
+
+/* Schedules */
+.ui-schedule-form { display: grid; gap: 8px; margin-bottom: 12px; }
+.ui-input { width: 100%; border: 1px solid var(--hairline); border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 13px; background: var(--surface-1); color: var(--ink); }
+.ui-input:focus { outline: 2px solid var(--primary-focus); outline-offset: 0; }
+.ui-mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.ui-segment { display: flex; flex-wrap: wrap; gap: 4px; }
+.ui-segment button { border: 1px solid var(--hairline); border-radius: 999px; padding: 4px 12px; font-size: 13px; background: transparent; color: var(--ink-subtle); }
+.ui-segment button[aria-checked="true"] { background: var(--ink); color: var(--surface-1); border-color: var(--ink); }
+.ui-schedule-when { display: flex; gap: 8px; }
+.ui-schedule-when .ui-input { width: auto; flex: 1; }
+.ui-schedule-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.ui-sheet-list li[data-disabled] { opacity: 0.55; }
+.ui-sheet-done[data-danger] { color: #c4343a; }
