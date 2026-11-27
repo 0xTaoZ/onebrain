@@ -144,3 +144,19 @@ body[data-mode="paper"] .paper-rail-person[data-status="i"] .agent-character-ima
 .ui-agent-profile input, .ui-agent-profile textarea { width: 100%; border: 1px solid var(--hairline); border-radius: 8px; padding: 8px; background: var(--surface-2); color: var(--ink); font-weight: 400; }
 .ui-agent-role-options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .ui-agent-role-options button, button.ui-sheet-done { padding: 5px 10px; border: 1px solid var(--hairline); border-radius: 8px; color: var(--ink); }
+
+/* New chat sheet: type, members, folder. */
+.ui-sheet-label { margin: 18px 0 8px; font-size: 12px; font-weight: 600; color: var(--ink-tertiary); }
+.ui-kind-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+.ui-kind { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px; border: 1px solid var(--hairline); border-radius: 12px; text-align: left; color: var(--ink); }
+.ui-kind small { font-size: 11px; color: var(--ink-tertiary); }
+.ui-kind[aria-checked="true"] { border-color: var(--primary); background: var(--primary-tint); }
+.ui-pick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; }
+.ui-pick { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 4px; border: 1px solid transparent; border-radius: 12px; font-size: 12px; color: var(--ink); }
+.ui-pick .paper-person-avatar { width: 44px; height: 44px; }
+.ui-pick small { font-size: 10px; color: var(--ink-tertiary); }
+.ui-pick[aria-pressed="true"] { border-color: var(--primary); background: var(--primary-tint); }
+.ui-pick:disabled { opacity: .45; }
+.ui-folder { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 12px; border: 1px dashed var(--hairline-strong); border-radius: 12px; font-size: 13px; color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-sheet .ui-sheet-primary { margin-top: 20px; }
+.ui-sheet-primary:disabled { opacity: .4; }
