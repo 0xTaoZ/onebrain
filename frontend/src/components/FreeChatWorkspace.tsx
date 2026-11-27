@@ -106,7 +106,6 @@ import {
   extractMentionHandles,
   normalizeMentionHandle,
   displayChatSenderName,
-  PaperChatWelcome,
   SessionMemberAvatar,
   LinkedWorkItemRow,
   InlineQueueGroup,
@@ -1549,7 +1548,6 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
                 onRetry={() => void refreshMessages()}
               />
             )}
-            <PaperChatWelcome />
             {displayedMessages.length === 0 && activeSessionId && sessionsAsync.source === "api" && (
               <EmptyChatExamples
                 sessionId={activeSessionId}
@@ -1587,8 +1585,9 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
                     >
                       {msg.isUser ? (theme === "paper" ? (locale === "zh" ? "你" : "You") : "you") : displayChatSenderName(msg.sender)}
                     </span>
-                    {msg.model && (
-                      <span className="rounded-full bg-[var(--surface-3)] border border-[var(--hairline-strong)] px-2 py-0.5 text-[9px] font-mono text-[var(--ink-muted)] shrink-0 select-text">
+                    {/* Show a chosen model; a bare runtime id (CLAUDE_CODE) adds nothing next to the name. */}
+                    {msg.model && !/^[A-Z][A-Z0-9_]*$/.test(msg.model) && (
+                      <span className="rounded-md bg-[var(--surface-3)] px-1.5 py-0.5 text-[10px] text-[var(--ink-muted)] shrink-0 select-text">
                         {runtimeModelLabel(msg.model)}
                       </span>
                     )}

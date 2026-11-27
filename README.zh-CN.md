@@ -6,7 +6,8 @@
 
 <p align="center">
   <b>Claude 写代码，Codex 做审查，都在同一个群里。</b><br>
-  开源 macOS 群聊。把多个 Agent 拉进同一个群，一起聊天、做项目，共用一份记忆。
+  给同时用 Claude Code、Codex、Gemini 干活的人做的 Mac 群聊。<br>
+  它们在群里互相交接、互相审查代码，不用每次重读整段历史，还共用一份所有厂商都能读的记忆。
 </p>
 
 <p align="center">
@@ -19,49 +20,75 @@
 <p align="center"><a href="README.md">English</a> · 简体中文 · <a href="README.de.md">Deutsch</a></p>
 
 <p align="center">
-  <a href="docs/assets/demo/onebrain-demo.mp4">
-    <img src="docs/assets/demo/onebrain-demo-zh.gif" width="920" alt="OneBrain 群聊演示：Claude 实现自动保存，Codex 发现草稿丢失问题，Gemini 把修复决定写进 Markdown">
-  </a><br>
-  <sub>使用 OneBrain 界面录制，项目与对话为虚构样例。</sub>
+  <a href="https://github.com/0xTaoZ/onebrain/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/0xTaoZ/onebrain?style=flat-square&color=1d1d1f"></a>
+  <img alt="macOS Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-1d1d1f?style=flat-square&logo=apple">
+  <a href="LICENSE"><img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-1d1d1f?style=flat-square"></a>
 </p>
 
 <p align="center">
-  <a href="docs/assets/demo/onebrain-demo.mp4">观看英文 MP4</a>
-  · <a href="docs/assets/demo/group-chat-zh.png">查看群聊截图</a>
-  · <a href="docs/assets/demo/team-brain.png">查看共享大脑截图</a>
+  <a href="docs/assets/demo/onebrain-walkthrough-zh.mp4"><img src="docs/assets/demo/onebrain-walkthrough-zh.gif" width="920" alt="OneBrain Rooms 使用演示：建群、同时问五个 Agent、Claude 写代码、Codex 审查、Gemini 把决定写进共享大脑"></a><br>
+  <a href="docs/assets/demo/onebrain-walkthrough-zh.mp4">观看高清视频</a>
 </p>
 
-## 为什么做这个
+## 你能得到什么
 
-我想有个地方，能随时拉几个 Agent 一起聊一个问题。今天聊完，明天回来接着做，之前定过的事还能找得到。做项目时最烦的是：一个 Agent 写完，我得把需求、改动和结果复制到另一个终端请它审。发现问题，再复制回去改。
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/assets/demo/group-chat-zh.png" alt="Claude、Codex、Gemini 在同一个群里互相交接"><br>
+      <b>五家厂商，同一个群</b><br>
+      <sub><code>@</code> 一个人，<code>@所有人</code> 大家都说，不 @ 就交给最合适的成员。</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/assets/token-chart-zh.svg" alt="100 轮对话的输入 Token：重读历史 64.9 万，OneBrain 12.4 万"><br>
+      <b>长对话省 81% Token</b><br>
+      <sub>每个 Agent 只读它没看过的新消息。实测数据，可以自己复现。</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/assets/demo/team-brain-zh.png" alt="共享大脑页面，显示决定文件、作者和 Token 成本"><br>
+      <b>所有厂商共用一份记忆</b><br>
+      <sub>Markdown 加 git，每处改动都署上写它的 Agent。</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/assets/demo/welcome-zh.png" alt="欢迎页列出这台 Mac 上找到的编程 Agent"><br>
+      <b>一分钟上手</b><br>
+      <sub>自动找到你已经在用的编程 CLI，不用 API Key，用你自己的订阅。</sub>
+    </td>
+  </tr>
+</table>
 
-所以这里有聊天群，也有项目群。讨论资料时可以让两位成员给不同意见。做代码时可以指定工作目录，交给另一位做审查，自己在群里看 diff、决定要不要通过。聊出来的决定放进 Markdown，下一个成员还读得到。
-
-**我们的目标是把多 Agent 协作做得最好用，也最省 Token。** 先把聊天、交接、审查和记忆串通，再用可以重复运行的基准量输入 Token。
-
-## 为什么用 OneBrain Rooms
-
-- **跨厂商代码审查。** 用 @ 把下一步交给 Claude Code、Codex 或 Gemini。在项目群里直接看 diff、处理审批，用运行快照撤销文件改动，并在覆盖后续编辑前看到提示。
-- **每个 Agent 有自己的阅读进度。** 返回群聊的成员收到新增消息，新加入的审查员收到从已有数据生成的简短交接。固定的 100 轮基准中，输入 Token 比重读完整历史少 **80.9%**。[复现基准](docs/benchmarks/context-tokens.md)。
-- **共享 Markdown。** 团队决定存在各个 CLI 都能直接打开的文件里，Git 记录作者和历史，也可以恢复旧版本。
+- **放心让它跑。** 每次运行都能撤销，撤销前会提醒你之后手动改过的文件。写到项目外面、改写历史的命令会在审批卡片上标出来，并且永远不能设成"以后都允许"。定时任务照样要审批。
 
 ## 安装
 
-安装后，在「应用程序」里打开 **OneBrain**。
-
 | | 一行命令安装（推荐） | 下载 `.dmg` |
 | --- | --- | --- |
-| **怎么装** | 粘贴到终端运行：<br>`curl -fsSL https://raw.githubusercontent.com/0xTaoZ/onebrain/main/install.sh \| bash` | 在 [Releases](https://github.com/0xTaoZ/onebrain/releases/latest) 下载 `OneBrain_x.y.z_aarch64.dmg`，打开后把 **OneBrain** 拖进 **应用程序** |
-| **第一次打开** | 直接就能打开。脚本装好后会自动启动。 | 如果 macOS 拦截下载的应用，打开 **系统设置 → 隐私与安全性**，点 **仍要打开**。如果提示"已损坏"，在终端运行 `xattr -dr com.apple.quarantine /Applications/OneBrain.app` |
-| **系统要求** | Apple 芯片的 Mac（M1 及以后） | 同左 |
+| **怎么装** | 粘贴到终端运行：<br>`curl -fsSL https://raw.githubusercontent.com/0xTaoZ/onebrain/main/install.sh \| bash` | 在 [Releases](https://github.com/0xTaoZ/onebrain/releases/latest) 下载 `OneBrain_x.y.z_aarch64.dmg`，打开后把 **OneBrain** 拖进「应用程序」 |
+| **第一次打开** | 直接就能打开。 | 如果 macOS 拦截，打开 **系统设置 → 隐私与安全性**，点 **仍要打开**。如果提示"已损坏"：`xattr -dr com.apple.quarantine /Applications/OneBrain.app` |
+| **需要** | Apple 芯片的 Mac（M1 及以后），以及至少一个已登录的编程 CLI：Claude Code、Codex 或 Gemini CLI | 同左 |
 
-然后装好并登录至少一个你常用的编程 Agent，比如 Claude Code、Codex 或 Gemini CLI。Agent 的登录和计费由你配置的 CLI 或服务商管理。新建一个群，拉进成员，用 `@` 叫一位开始干活。
+OneBrain 直接用你已经装好的 CLI 和你自己的订阅，不碰你的密钥。装好后在「应用程序」里叫 **OneBrain**。
 
-## 第一次聊天
+**第一次聊天：** 欢迎页会列出在你电脑上找到的 Agent。建一个群（聊天群，或者绑定代码文件夹的项目群），点一个示例消息，或者自己写一句。
 
-1. 在欢迎页选一个检测到的 Agent，点「加入」。
-2. 选聊天群或项目群。项目群还需要选择工作文件夹。
-3. 点击示例发送第一条消息，或直接进群写自己的消息。
+## 对比协作方式
+
+| 项目 | 运行方式 | Claude + Codex | 文件撤销 | Git 版控共享记忆 | 成员阅读进度 | 可复跑 Token 基准 |
+| --- | --- | :---: | :---: | :---: | :---: | :---: |
+| **OneBrain Rooms** | 本地 App | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [Pachat](https://pachat.ai/use-cases/agent-teams) | 托管群聊 | ✅ | — | — | — | — |
+| [Octo](https://www.mininglamp.com/octo/) | 可自托管 | [◐](https://github.com/Mininglamp-OSS/octo-runtime) | — | — | — | — |
+| [OpenAgents](https://openagents.org/faq) | 可自托管 | ✅ | — | — | — | — |
+| [AionUi](https://github.com/iOfficeAI/AionUi#team-mode--coordinated-multi-agent-collaboration) | 本地 App | ✅ | — | — | — | — |
+| [PiBot](https://pibot.space/en/guides/bots-and-roles/#external-agents) | 本地 App | ✅ | [✅ macOS](https://github.com/w01fb0ss/PiBot#what-it-does) | — | — | — |
+| [LobeHub](https://github.com/lobehub/lobehub) | 可自托管 | ✅ | — | — | — | — |
+| [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams) | 本地 CLI | ✗ | — | — | — | — |
+
+**✅** 有公开文档 · **◐** 运行时有文档 · **✗** 超出公开文档中的产品范围 · **—** 在所链接资料里还没找到对应能力。
+
+「Claude + Codex」指两个工具能加入同一个产品工作区。「文件撤销」指恢复 Agent 改过的文件。[Token 基准](docs/benchmarks/context-tokens.md)使用本项目的固定对话回放。
 
 ## 数据
 
@@ -82,73 +109,58 @@
 
 [方法](docs/benchmarks/context-tokens.md)
 
-## 项目控制
+## 共享大脑
 
-- **工作模式。** 先把讨论变成计划，分派步骤，再验收结果。
-- **项目 worktree。** 给项目群单独的 Git worktree，在群里查看改动。
-- **定时任务和操作记录。** 按时间向群发任务，在界面里查阅操作记录、审批和文件改动。
+各家厂商的记忆都只留在自己那里：Claude 学到的，Codex 看不到。OneBrain 给整个团队一份记忆，放在 `~/OneBrain/brain`，按 `AGENTS.md` 的约定组织。它越用越好用：任何一个 Agent 记下的决定，下一个 Agent 都能用上，不管它是哪家厂商的。
 
-## 对比协作方式
-
-| 项目 | 运行方式 | Claude + Codex | 文件撤销 | Git 版控共享记忆 | 成员阅读进度 | 可复跑 Token 基准 |
-| --- | --- | :---: | :---: | :---: | :---: | :---: |
-| **OneBrain Rooms** | 本地 App | ✅ | ✅ | ✅ | ✅ | ✅ |
-| [Pachat](https://pachat.ai/use-cases/agent-teams) | 托管群聊 | ✅ | — | — | — | — |
-| [Octo](https://www.mininglamp.com/octo/) | 可自托管 | [◐](https://github.com/Mininglamp-OSS/octo-runtime) | — | — | — | — |
-| [OpenAgents](https://openagents.org/faq) | 可自托管 | ✅ | — | — | — | — |
-| [AionUi](https://github.com/iOfficeAI/AionUi#team-mode--coordinated-multi-agent-collaboration) | 本地 App | ✅ | — | — | — | — |
-| [PiBot](https://pibot.space/en/guides/bots-and-roles/#external-agents) | 本地 App | ✅ | [✅ macOS](https://github.com/w01fb0ss/PiBot#what-it-does) | — | — | — |
-| [LobeHub](https://github.com/lobehub/lobehub) | 可自托管 | ✅ | — | — | — | — |
-| [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams) | 本地 CLI | ✗ | — | — | — | — |
-
-**✅** 有公开文档 · **◐** 运行时有文档 · **✗** 超出公开文档中的产品范围 · **—** 在所链接资料里还没找到对应能力。
-
-「Claude + Codex」指两个工具能加入同一个产品工作区。「文件撤销」指恢复 Agent 改过的文件。[Token 基准](docs/benchmarks/context-tokens.md)使用本项目的固定对话回放。
+- **由 Agent 自己维护。** 先读索引，只打开任务需要的文件，边干活边记下决定、规则和交接。积累记忆不额外调用模型。
+- **每处改动都有署名。** 这个文件夹是一个 git 仓库。每次运行结束，改动以那个 Agent 的名字提交，每一行都能追到是哪个 Agent、哪次运行写的。
+- **看得见成本。** 「共享大脑」页面显示每个 Agent 读它要花多少 Token、谁改了什么，旧版本一键恢复。
 
 ## 这些技术怎么落地
+
+```text
+  Claude Code     Codex      Gemini CLI        用你自己的 CLI 和订阅
+       │            │            │
+       └────────────┼────────────┘
+                    ▼
+     ┌─────────────────────────────┐
+     │       OneBrain Rooms        │   你 Mac 上的一个群聊
+     │  read cursor per agent      │   每个 Agent 只拿新消息
+     │  git snapshot per run       │   每次运行都能撤销
+     └──────────────┬──────────────┘
+                    ▼
+     ~/OneBrain/brain  (Markdown + git)   所有厂商都能读的一份记忆，
+                                          每处改动署上写它的 Agent
+```
 
 | 机制 | 在项目里怎么工作 |
 | --- | --- |
 | [增量上下文](crates/services/src/services/chat_runner/prompting.rs) | 每个会话成员有自己的阅读进度。续跑时用前缀指纹检查原来的指令是否有变化，再找上次读过的位置之后的消息。新成员可以从已有记录整理出的交接开始。 |
-| [共享大脑](crates/services/src/services/brain.rs) | 决定存在 Markdown 目录里。Git 记录每次改动和作者，界面可以查看旧版本。 |
+| [共享大脑](crates/services/src/services/brain.rs) | 一个用 git 管理的 Markdown 文件夹。每次运行结束，Agent 的改动以它自己的名字提交；大脑的位置每段对话只告诉 Agent 一次，放在会被缓存的提示词前缀里。 |
 | [Git 快照和按次撤销](crates/git/src/checkpoint.rs) | 只回退该次运行碰过的文件。如果运行结束后又有人编辑了这些文件，写入前会检查冲突。 |
 | [定时任务](crates/services/src/services/scheduler/mod.rs) | 到期任务先被调度器领取，再走群消息的正常执行路径，沿用群里的审批机制。 |
 
-## 我们想怎么用 AI
+## 为什么做这个
 
-做这个项目时，我想学那些天天在做 AI 工具的人是怎么用 AI 的。Lauren Tan（@poteto）的 [pstack 指南](https://github.com/cursor/plugins/blob/main/pstack/docs/guide/README.md) 里有个做法我很喜欢：开工前先说清楚怎么才算做完。修一个 bug，就把复现步骤交给一位 Agent，让另一位看 diff、重跑原来失败的用例，最后把决定记下来。
+我会让好几个编程 Agent 做同一件事。大部分花费都用在一遍遍重读同样的历史上；想听第二个意见，就得把需求、diff 和上一个回答从一个终端复制到另一个终端。OneBrain 把它们放进一个群，每个只给它没看过的内容，团队定下的事写进下一个 Agent 能读的文件里。
 
-我希望这些事在群里就能做完。谁接了活、改了什么、为什么通过，下一位进来都能查到。[brainmaxxing](https://github.com/poteto/brainmaxxing) 给了我一个用可编辑文件保存记忆的例子，[Noodle](https://github.com/poteto/noodle) 则展示了怎么把常用做法写成技能。如果只是想复核一次改动，我就叫一位审查员，把 diff 和相关消息给它。我想看到它跑了哪条测试，结果是什么。
-
-## 怎么省下来的
-
-OneBrain 记录每个 Agent 已经读过的内容，续接时发送新增消息，新成员加入时附上一份简短交接。
-
-- **选择谁回答。** 用 @ 点名某个成员，或用 @所有人 问全群。没有点名时，系统会选一个成员回答。
-- **每个成员一个已读位置。** 续接的成员只收到上次之后的新消息；角色和团队规则没变就不重发。
-- **团队交接。** 新成员拿到你最近的请求、其他成员最近的结论和改动的文件，以及已记录的决定，全部来自已有数据，不额外调用模型。
-- **交接会等你。** Agent 干活时你发了新消息，它的交接不会叫醒下一位，没人会按你刚改掉的要求继续干。
-
-## 共享大脑
-
-大多数 Agent 工具把学到的东西留在每个 Agent 自己那里。OneBrain 给整个团队一份共同的记忆：决定、规则、经验和交接都是普通的 Markdown，任何 Agent 都能打开，你能直接读，git 能记录每次改动。每一条都记着来源，Agent 提议，由你批准。
-
-App 里的「大脑」页面可以查看共享记录和交接。
+"把团队记忆放在 Agent 能自己编辑的普通文件里"这个想法，受到 Lauren Tan 的 [brainmaxxing](https://github.com/poteto/brainmaxxing) 启发。
 
 ## 从源码构建
 
-Rust（Axum、SQLx、SQLite）、React 与 TypeScript、Tauri。
+Rust（Axum、SQLx、SQLite）、React 和 TypeScript、Tauri。
 
 ```sh
 pnpm install
 pnpm run check
-cargo test -p db -p services
+cargo test --workspace
 ```
 
 ## 关注项目
 
-如果想跟进 OneBrain Rooms，可以给仓库点个 Star。试过之后，也欢迎到 [GitHub Issues](https://github.com/0xTaoZ/onebrain/issues) 分享你在群里完成的第一个任务。
+点个 Star 关注后续进展，也欢迎在 [GitHub Issues](https://github.com/0xTaoZ/onebrain/issues) 说说你第一个群里发生了什么。
 
 ---
 
-<sub>Apache License 2.0。基于 OpenTeams（Apache-2.0）开发，详见 NOTICE。</sub>
+<sub>Apache License 2.0。基于 OpenTeams（Apache-2.0）开发，见 NOTICE。</sub>

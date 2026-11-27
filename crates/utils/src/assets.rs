@@ -4,7 +4,10 @@ use rust_embed::RustEmbed;
 const PROJECT_ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
 pub fn asset_dir() -> std::path::PathBuf {
-    let path = if cfg!(debug_assertions) {
+    // An explicit data directory (tests, demos) wins over the defaults below.
+    let path = if let Some(dir) = std::env::var_os("ONEBRAIN_ASSET_DIR").filter(|v| !v.is_empty()) {
+        std::path::PathBuf::from(dir)
+    } else if cfg!(debug_assertions) {
         std::path::PathBuf::from(PROJECT_ROOT).join("../../dev_assets")
     } else {
         ProjectDirs::from("ai", "openteams-lab", "openteams")
