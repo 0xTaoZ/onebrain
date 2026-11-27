@@ -36,6 +36,7 @@ const request = (
   resolved_at: null,
   created_at: new Date(createdAt),
   updated_at: new Date(updatedAt),
+  risk: null,
 });
 
 const first = request('first', '2026-07-27T03:00:00Z');

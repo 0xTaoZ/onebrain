@@ -186,6 +186,7 @@ mod tests {
                     },
                 ],
                 expires_at: Utc::now() + TimeDelta::minutes(5),
+                risk: None,
             },
             Uuid::new_v4(),
         )

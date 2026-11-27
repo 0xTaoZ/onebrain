@@ -693,7 +693,7 @@ export type ChatExecutorApprovalOption = { option_id: string, kind: string, labe
 
 export enum ChatExecutorApprovalStatus { pending = "pending", selected = "selected", cancelled = "cancelled", expired = "expired" }
 
-export type ChatExecutorApprovalRequest = { id: string, session_id: string, session_agent_id: string, run_id: string, workflow_execution_id: string | null, workflow_step_id: string | null, runner: string, tool_call_id: string, tool_name: string, display_input: JsonValue, options: Array<ChatExecutorApprovalOption>, status: ChatExecutorApprovalStatus, selected_option_id: string | null, processed_by: string | null, expires_at: Date, resolved_at: Date | null, created_at: Date, updated_at: Date, };
+export type ChatExecutorApprovalRequest = { id: string, session_id: string, session_agent_id: string, run_id: string, workflow_execution_id: string | null, workflow_step_id: string | null, runner: string, tool_call_id: string, tool_name: string, display_input: JsonValue, options: Array<ChatExecutorApprovalOption>, status: ChatExecutorApprovalStatus, selected_option_id: string | null, processed_by: string | null, expires_at: Date, resolved_at: Date | null, created_at: Date, updated_at: Date, risk: ApprovalRisk | null, };
 
 export enum AcpAccessMode { workspace_only = "workspace_only", full_access = "full_access" }
 
@@ -840,6 +840,12 @@ export type ChatRunRetentionListResponse = { runs: Array<ChatRunRetentionInfo>, 
 export type ChatRunActivityResponse = { run_id: string, lines: Array<ChatRunActivityLine>, next_cursor: string, has_more: boolean, log_state: ChatRunLogState, };
 
 export type UndoRunResult = { restored: Array<string>, conflicts: Array<string>, };
+
+export type ChatAuditEvent = { id: string, session_id: string, session_agent_id: string | null, run_id: string | null, kind: ChatAuditKind, dangerous: boolean, summary: string, detail: JsonValue, created_at: string, };
+
+export enum ChatAuditKind { approval_requested = "approval_requested", approval_resolved = "approval_resolved", run_undone = "run_undone" }
+
+export type ApprovalRisk = { dangerous: boolean, reasons: Array<string>, };
 
 export type ChatRunFilesQuery = {
 /**

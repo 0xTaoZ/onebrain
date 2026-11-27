@@ -2781,6 +2781,7 @@ impl ChatRunner {
                     runner: effective_execution.runner_type.to_string(),
                     workflow_execution_id: None,
                     workflow_step_id: None,
+                    workspace_root: Some(PathBuf::from(&workspace_path)),
                 },
             );
             executor.use_approvals(Arc::new(DeliveryAwareApprovalBridge {

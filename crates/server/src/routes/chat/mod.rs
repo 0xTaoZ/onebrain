@@ -39,6 +39,7 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
             "/executor-approvals/{request_id}/resolve",
             axum::routing::post(executor_approvals::resolve),
         )
+        .route("/audit", get(runs::get_session_audit_log))
         .route("/workspaces", get(sessions::get_session_workspaces))
         .route(
             "/workspaces/changes",

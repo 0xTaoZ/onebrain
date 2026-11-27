@@ -9,6 +9,7 @@ use dashmap::{DashMap, mapref::entry::Entry};
 use db::{
     DBService,
     models::{
+        chat_audit_event::{ChatAuditEvent, ChatAuditKind, NewChatAuditEvent},
         chat_executor_approval_request::{
             ChatExecutorApprovalOption, ChatExecutorApprovalRequest, ChatExecutorApprovalStatus,
             CreateChatExecutorApprovalRequest,
@@ -46,6 +47,8 @@ pub struct ExecutorApprovalScope {
     pub runner: String,
     pub workflow_execution_id: Option<Uuid>,
     pub workflow_step_id: Option<Uuid>,
+    /// Project folder the agent works in; used to judge whether a call is dangerous.
+    pub workspace_root: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +118,32 @@ impl ExecutorApprovalBridge {
         )
         .await?;
         if let Some(request) = &resolved {
+            let choice = request
+                .options
+                .0
+                .iter()
+                .find(|option| option.option_id == option_id)
+                .map(|option| option.label.clone())
+                .unwrap_or_else(|| option_id.to_string());
+            let _ = ChatAuditEvent::record(
+                pool,
+                NewChatAuditEvent {
+                    session_id: request.session_id,
+                    session_agent_id: Some(request.session_agent_id),
+                    run_id: Some(request.run_id),
+                    kind: ChatAuditKind::ApprovalResolved,
+                    dangerous: request.risk.as_ref().is_some_and(|risk| risk.dangerous),
+                    summary: format!(
+                        "{choice}: {}",
+                        audit_summary(&request.tool_name, &request.display_input.0)
+                    ),
+                    detail: serde_json::json!({
+                        "option_id": option_id,
+                        "processed_by": processed_by,
+                    }),
+                },
+            )
+            .await;
             if let Some((_, waiter)) = WAITERS.remove(&request.id) {
                 let _ = waiter.send(option_id.to_string());
             }
@@ -241,6 +270,27 @@ impl ExecutorApprovalBridge {
         let expires_at = Utc::now()
             + TimeDelta::from_std(APPROVAL_TIMEOUT)
                 .map_err(ExecutorApprovalError::request_failed)?;
+        let risk = super::risk::assess(
+            &request.tool_name,
+            &request.tool_input,
+            self.scope.workspace_root.as_deref(),
+        );
+        // A dangerous call is asked every time: drop "always allow" choices.
+        let options: Vec<_> = if risk.dangerous {
+            let kept: Vec<_> = request
+                .options
+                .iter()
+                .filter(|option| !option.kind.contains("always"))
+                .cloned()
+                .collect();
+            if kept.is_empty() {
+                request.options.clone()
+            } else {
+                kept
+            }
+        } else {
+            request.options.clone()
+        };
         let row = ChatExecutorApprovalRequest::create_or_find(
             &self.db.pool,
             &CreateChatExecutorApprovalRequest {
@@ -253,8 +303,7 @@ impl ExecutorApprovalBridge {
                 tool_call_id: request.tool_call_id,
                 tool_name: request.tool_name,
                 display_input: sanitize_display_input(request.tool_input),
-                options: request
-                    .options
+                options: options
                     .into_iter()
                     .map(|option| ChatExecutorApprovalOption {
                         option_id: option.option_id,
@@ -263,6 +312,7 @@ impl ExecutorApprovalBridge {
                     })
                     .collect(),
                 expires_at,
+                risk: risk.dangerous.then_some(risk),
             },
             Uuid::new_v4(),
         )
@@ -280,6 +330,25 @@ impl ExecutorApprovalBridge {
             }
             ChatExecutorApprovalStatus::Pending => {}
         }
+
+        let _ = ChatAuditEvent::record(
+            &self.db.pool,
+            NewChatAuditEvent {
+                session_id: row.session_id,
+                session_agent_id: Some(row.session_agent_id),
+                run_id: Some(row.run_id),
+                kind: ChatAuditKind::ApprovalRequested,
+                dangerous: row.risk.as_ref().is_some_and(|risk| risk.dangerous),
+                summary: audit_summary(&row.tool_name, &row.display_input.0),
+                detail: serde_json::json!({
+                    "runner": row.runner,
+                    "tool_name": row.tool_name,
+                    "input": row.display_input.0,
+                    "reasons": row.risk.as_ref().map(|risk| risk.reasons.clone()).unwrap_or_default(),
+                }),
+            },
+        )
+        .await;
 
         InboxService::new()
             .notify_executor_approval_requested(
@@ -552,6 +621,29 @@ fn normalize_display_input(mut value: Value) -> Value {
     value
 }
 
+/// Short, human-readable line for the activity log.
+fn audit_summary(tool_name: &str, input: &Value) -> String {
+    let detail = input
+        .get("command")
+        .map(|command| match command {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        })
+        .or_else(|| {
+            ["file_path", "path", "notebook_path", "url"]
+                .iter()
+                .find_map(|key| input.get(*key).and_then(Value::as_str).map(str::to_string))
+        });
+    let mut line = match detail {
+        Some(detail) => format!("{tool_name}: {detail}"),
+        None => tool_name.to_string(),
+    };
+    if line.chars().count() > 200 {
+        line = line.chars().take(199).collect::<String>() + "…";
+    }
+    line
+}
+
 fn sanitize_display_input(value: Value) -> Value {
     fn redact(value: Value) -> Value {
         match value {
@@ -681,6 +773,7 @@ mod approval_flow_tests {
                 runner: "QWEN_CODE".to_string(),
                 workflow_execution_id: None,
                 workflow_step_id: None,
+                workspace_root: None,
             },
         )
     }

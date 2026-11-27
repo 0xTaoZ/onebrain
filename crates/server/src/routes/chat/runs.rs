@@ -767,10 +767,25 @@ pub async fn restore_run_checkpoint(
     .await
     .map_err(|err| ApiError::BadRequest(err.to_string()))?;
     let result = match outcome {
-        Ok(restored) => UndoRunResult {
-            restored,
-            conflicts: Vec::new(),
-        },
+        Ok(restored) => {
+            let _ = db::models::chat_audit_event::ChatAuditEvent::record(
+                pool,
+                db::models::chat_audit_event::NewChatAuditEvent {
+                    session_id: checkpoint.session_id,
+                    session_agent_id: None,
+                    run_id: Some(run_id),
+                    kind: db::models::chat_audit_event::ChatAuditKind::RunUndone,
+                    dangerous: false,
+                    summary: format!("Undid {} file change(s) of a run", restored.len()),
+                    detail: serde_json::json!({ "files": restored, "forced": force }),
+                },
+            )
+            .await;
+            UndoRunResult {
+                restored,
+                conflicts: Vec::new(),
+            }
+        }
         Err(git::CheckpointError::Conflict(conflicts)) => UndoRunResult {
             restored: Vec::new(),
             conflicts,
@@ -778,4 +793,35 @@ pub async fn restore_run_checkpoint(
         Err(err) => return Err(ApiError::BadRequest(err.to_string())),
     };
     Ok(ResponseJson(ApiResponse::success(result)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuditLogQuery {
+    pub before_at: Option<String>,
+    pub before_id: Option<Uuid>,
+    #[serde(default)]
+    pub dangerous: bool,
+    pub limit: Option<i64>,
+}
+
+/// A group's activity log: approvals asked and answered, and undone runs.
+pub async fn get_session_audit_log(
+    State(deployment): State<DeploymentImpl>,
+    Path(session_id): Path<Uuid>,
+    Query(query): Query<AuditLogQuery>,
+) -> Result<ResponseJson<ApiResponse<Vec<db::models::chat_audit_event::ChatAuditEvent>>>, ApiError>
+{
+    let before = match (query.before_at.as_deref(), query.before_id) {
+        (Some(at), Some(id)) => Some((at, id)),
+        _ => None,
+    };
+    let events = db::models::chat_audit_event::ChatAuditEvent::list(
+        &deployment.db().pool,
+        session_id,
+        before,
+        query.dangerous,
+        query.limit.unwrap_or(50),
+    )
+    .await?;
+    Ok(ResponseJson(ApiResponse::success(events)))
 }

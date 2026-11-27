@@ -8,8 +8,16 @@ const COLUMNS: &str = r#"
     id, session_id, session_agent_id, run_id, workflow_execution_id,
     workflow_step_id, runner, tool_call_id, tool_name, display_input,
     options, status, selected_option_id, processed_by, expires_at,
-    resolved_at, created_at, updated_at
+    resolved_at, created_at, updated_at, risk
 "#;
+
+/// Why a tool call was judged dangerous. Dangerous calls are always asked and
+/// cannot be allowed permanently.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ApprovalRisk {
+    pub dangerous: bool,
+    pub reasons: Vec<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct ChatExecutorApprovalOption {
@@ -55,6 +63,8 @@ pub struct ChatExecutorApprovalRequest {
     pub created_at: DateTime<Utc>,
     #[ts(type = "Date")]
     pub updated_at: DateTime<Utc>,
+    #[ts(type = "ApprovalRisk | null")]
+    pub risk: Option<Json<ApprovalRisk>>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +80,7 @@ pub struct CreateChatExecutorApprovalRequest {
     pub display_input: serde_json::Value,
     pub options: Vec<ChatExecutorApprovalOption>,
     pub expires_at: DateTime<Utc>,
+    pub risk: Option<ApprovalRisk>,
 }
 
 impl ChatExecutorApprovalRequest {
@@ -83,8 +94,8 @@ impl ChatExecutorApprovalRequest {
             INSERT OR IGNORE INTO chat_executor_approval_requests (
                 id, session_id, session_agent_id, run_id, workflow_execution_id,
                 workflow_step_id, runner, tool_call_id, tool_name, display_input,
-                options, expires_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                options, expires_at, risk
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             "#,
         )
         .bind(id)
@@ -99,6 +110,7 @@ impl ChatExecutorApprovalRequest {
         .bind(Json(input.display_input.clone()))
         .bind(Json(input.options.clone()))
         .bind(input.expires_at)
+        .bind(input.risk.clone().map(Json))
         .execute(pool)
         .await?;
 
@@ -239,6 +251,7 @@ mod tests {
                 resolved_at TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                risk TEXT,
                 UNIQUE(run_id, tool_call_id)
             )
             "#,
@@ -271,6 +284,7 @@ mod tests {
                     label: "Allow once".to_string(),
                 }],
                 expires_at: Utc::now() + TimeDelta::minutes(5),
+                risk: None,
             },
             Uuid::new_v4(),
         )

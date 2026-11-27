@@ -47,6 +47,7 @@ const ApprovalRequestRow: React.FC<{
   );
   const command = approvalCommand(request);
   const displayedAction = command ?? request.tool_name;
+  const risk = request.risk?.dangerous ? request.risk : null;
 
   useEffect(() => {
     if (!allowMenuOpen) return;
@@ -117,7 +118,9 @@ const ApprovalRequestRow: React.FC<{
   );
 
   return (
-    <article className="px-3.5 py-2.5">
+    <article
+      className={`px-3.5 py-2.5 ${risk ? 'border-l-2 border-rose-500 bg-rose-500/5' : ''}`}
+    >
       <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2">
         <div className="flex min-w-0 items-baseline gap-2 overflow-hidden">
           <span className="shrink-0 text-xs text-[var(--ink-subtle)]">
@@ -206,6 +209,18 @@ const ApprovalRequestRow: React.FC<{
           )}
         </div>
       </div>
+      {risk && (
+        <div className="mt-1.5 text-xs text-rose-600" role="note">
+          <strong className="font-semibold">
+            {translate('approvals.dangerous', 'Dangerous: asked every time')}
+          </strong>
+          <ul className="mt-0.5 list-disc pl-4">
+            {risk.reasons.map(reason => (
+              <li key={reason}>{reason}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       {error && (
         <p className="mt-2 text-xs text-red-400" role="alert">
           {error}
