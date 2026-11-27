@@ -26,23 +26,39 @@
 </p>
 
 <p align="center">
-  <a href="docs/assets/demo/onebrain-demo.mp4">
-    <img src="docs/assets/demo/onebrain-demo.gif" width="920" alt="OneBrain demo: Claude builds autosave, Codex catches a draft-loss bug, and Gemini records the fix in Markdown">
-  </a><br>
-  <sub>Example project rendered in OneBrain with sample data.</sub>
-</p>
-
-<p align="center">
-  <a href="docs/assets/demo/onebrain-demo.mp4">Watch the MP4</a>
-  · <a href="docs/assets/demo/group-chat.png">Group chat screenshot</a>
-  · <a href="docs/assets/demo/team-brain.png">Shared brain screenshot</a>
+  <a href="docs/assets/demo/onebrain-walkthrough.mp4"><img src="docs/assets/demo/onebrain-walkthrough.gif" width="920" alt="OneBrain Rooms walkthrough: create a group, ask five agents at once, Claude builds, Codex reviews, Gemini records the decision in the team brain"></a><br>
+  <a href="docs/assets/demo/onebrain-walkthrough.mp4">Watch in HD</a>
 </p>
 
 ## What you get
 
-- **Claude, Codex and Gemini in one chat.** `@codex` asks one agent, `@all` asks everyone, and a message with no mention goes to the best-suited member. Agents hand work to each other in the same thread.
-- **80.9% fewer input tokens on long threads.** Each agent keeps a read cursor and only gets new messages; a late reviewer gets a short handoff instead of the history. Measured on a fixed 100-turn conversation; [reproduce it](docs/benchmarks/context-tokens.md).
-- **One brain every vendor can read.** Team decisions and rules live in a plain Markdown folder that Claude Code, Codex and Gemini open directly. Git records which agent wrote each change, and any file can go back to an older version.
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/assets/demo/group-chat.png" alt="Claude, Codex and Gemini handing work to each other in one group chat"><br>
+      <b>Five vendors, one thread</b><br>
+      <sub><code>@</code> one agent, <code>@all</code> for everyone, or no mention and the best fit answers.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/assets/token-chart-en.svg" alt="Input tokens over 100 turns: 649k when rereading history, 124k with OneBrain"><br>
+      <b>81% fewer tokens on long threads</b><br>
+      <sub>Each agent reads only what is new to it. Measured, and you can rerun the test.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/assets/demo/team-brain.png" alt="Team brain page showing a decision file, who wrote it and its token cost"><br>
+      <b>One memory every vendor can read</b><br>
+      <sub>Markdown in git. Every change is signed by the agent that made it.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/assets/demo/welcome.png" alt="Welcome screen listing the coding agents found on this Mac"><br>
+      <b>Ready in a minute</b><br>
+      <sub>It finds the coding CLIs you already use. No API keys, your own subscriptions.</sub>
+    </td>
+  </tr>
+</table>
+
 - **Safe to leave running.** Every agent run can be undone, and undo warns before overwriting your later edits. Commands that write outside the project or rewrite history are flagged on the approval card and can never be allowed permanently. Scheduled runs keep the same approvals.
 
 ## Install
@@ -129,7 +145,7 @@ Vendor memories stay with their vendor: what Claude learns, Codex never sees. On
 
 I use several coding agents on the same task. Most of what they cost went into reading the same history again and again, and getting a second opinion meant copying the request, the diff and the last answer from one terminal to another. OneBrain puts them in one chat, gives each one only what it has not seen, and keeps what the team decides in files the next agent can read.
 
-Before writing it I read how LobeHub, AionUi and PiBot handle memory, undo and scheduling, and rebuilt the ideas I liked in Rust with fewer tokens in mind. Keeping memory in plain files that agents edit comes from poteto's [brainmaxxing](https://github.com/poteto/brainmaxxing).
+Keeping the team's memory in plain files that agents edit themselves was inspired by Lauren Tan's [brainmaxxing](https://github.com/poteto/brainmaxxing).
 
 ## Build from source
 

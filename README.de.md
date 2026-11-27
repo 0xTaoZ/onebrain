@@ -26,23 +26,39 @@
 </p>
 
 <p align="center">
-  <a href="docs/assets/demo/onebrain-demo.mp4">
-    <img src="docs/assets/demo/onebrain-demo.gif" width="920" alt="OneBrain-Demo: Claude baut die automatische Speicherung, Codex entdeckt den Fehler und Gemini hält die Korrektur in Markdown fest">
-  </a><br>
-  <sub>Aufzeichnung der OneBrain-Oberfläche mit Beispieldaten.</sub>
-</p>
-
-<p align="center">
-  <a href="docs/assets/demo/onebrain-demo.mp4">Demo als MP4 (Englisch)</a>
-  · <a href="docs/assets/demo/group-chat.png">Gruppenchat als Bild</a>
-  · <a href="docs/assets/demo/team-brain.png">Teamgedächtnis als Bild</a>
+  <a href="docs/assets/demo/onebrain-walkthrough.mp4"><img src="docs/assets/demo/onebrain-walkthrough.gif" width="920" alt="OneBrain Rooms im Überblick: Gruppe anlegen, fünf Agents gleichzeitig fragen, Claude baut, Codex prüft, Gemini hält die Entscheidung im Team-Gehirn fest"></a><br>
+  <a href="docs/assets/demo/onebrain-walkthrough.mp4">In HD ansehen</a>
 </p>
 
 ## Was du bekommst
 
-- **Claude, Codex und Gemini in einem Chat.** `@codex` fragt einen Agent, `@all` fragt alle, und eine Nachricht ohne Erwähnung geht an das passendste Mitglied. Übergaben passieren im selben Verlauf.
-- **80,9 % weniger Input-Tokens in langen Gesprächen.** Jeder Agent hat ein Lesezeichen und bekommt nur neue Nachrichten; wer später dazukommt, erhält eine kurze Übergabe statt des Verlaufs. Gemessen an einem festen Gespräch mit 100 Runden; [selbst nachprüfen](docs/benchmarks/context-tokens.md).
-- **Ein Gehirn, das jeder Anbieter lesen kann.** Entscheidungen und Regeln liegen in einem normalen Markdown-Ordner, den Claude Code, Codex und Gemini direkt öffnen. Git hält fest, welcher Agent was geschrieben hat, und jede Datei lässt sich auf einen älteren Stand zurücksetzen.
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/assets/demo/group-chat.png" alt="Claude, Codex und Gemini übergeben sich Arbeit in einem Gruppenchat"><br>
+      <b>Fünf Anbieter, ein Verlauf</b><br>
+      <sub><code>@</code> einen Agent, <code>@all</code> für alle, oder ohne Erwähnung antwortet der Passendste.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/assets/token-chart-de.svg" alt="Input-Tokens über 100 Runden: 649k beim erneuten Lesen, 124k mit OneBrain"><br>
+      <b>81 % weniger Tokens in langen Gesprächen</b><br>
+      <sub>Jeder Agent liest nur, was für ihn neu ist. Gemessen und nachprüfbar.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/assets/demo/team-brain.png" alt="Team-Gehirn mit Entscheidungsdatei, Autor und Token-Kosten"><br>
+      <b>Ein Gedächtnis für alle Anbieter</b><br>
+      <sub>Markdown in Git. Jede Änderung ist vom Agent signiert.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/assets/demo/welcome.png" alt="Startbildschirm mit den gefundenen Coding-Agents"><br>
+      <b>In einer Minute startklar</b><br>
+      <sub>Findet die Coding-CLIs, die du schon nutzt. Keine API-Keys, deine eigenen Abos.</sub>
+    </td>
+  </tr>
+</table>
+
 - **Sicher im Hintergrund.** Jeder Lauf lässt sich rückgängig machen, und vorher wirst du gewarnt, wenn du die Dateien inzwischen geändert hast. Befehle, die außerhalb des Projekts schreiben oder Historie umschreiben, werden in der Freigabe markiert und lassen sich nie dauerhaft erlauben. Geplante Läufe brauchen dieselben Freigaben.
 
 ## Installation
@@ -129,7 +145,7 @@ Was ein Anbieter sich merkt, bleibt bei diesem Anbieter: Was Claude lernt, sieht
 
 Ich lasse mehrere Coding-Agents an derselben Aufgabe arbeiten. Der größte Teil der Kosten ging dafür drauf, denselben Verlauf immer wieder zu lesen, und für eine zweite Meinung musste ich Anfrage, Diff und letzte Antwort zwischen Terminals kopieren. OneBrain holt sie in einen Chat, gibt jedem nur, was er noch nicht gesehen hat, und hält fest, was das Team entscheidet, in Dateien, die der nächste Agent lesen kann.
 
-Vorher habe ich mir angesehen, wie LobeHub, AionUi und PiBot Gedächtnis, Rückgängig-Machen und Zeitpläne lösen, und die Ideen, die mir gefielen, in Rust neu gebaut, mit möglichst wenigen Tokens. Die Idee, das Gedächtnis in normalen Dateien zu halten, die Agents selbst bearbeiten, stammt aus potetos [brainmaxxing](https://github.com/poteto/brainmaxxing).
+Die Idee, das Team-Gedächtnis in normalen Dateien zu halten, die Agents selbst bearbeiten, ist von Lauren Tans [brainmaxxing](https://github.com/poteto/brainmaxxing) inspiriert.
 
 ## Aus dem Quellcode bauen
 

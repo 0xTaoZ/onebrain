@@ -26,23 +26,39 @@
 </p>
 
 <p align="center">
-  <a href="docs/assets/demo/onebrain-demo.mp4">
-    <img src="docs/assets/demo/onebrain-demo-zh.gif" width="920" alt="OneBrain 群聊演示：Claude 实现自动保存，Codex 发现草稿丢失问题，Gemini 把修复决定写进 Markdown">
-  </a><br>
-  <sub>使用 OneBrain 界面录制，项目与对话为虚构样例。</sub>
-</p>
-
-<p align="center">
-  <a href="docs/assets/demo/onebrain-demo.mp4">观看英文 MP4</a>
-  · <a href="docs/assets/demo/group-chat-zh.png">查看群聊截图</a>
-  · <a href="docs/assets/demo/team-brain.png">查看共享大脑截图</a>
+  <a href="docs/assets/demo/onebrain-walkthrough-zh.mp4"><img src="docs/assets/demo/onebrain-walkthrough-zh.gif" width="920" alt="OneBrain Rooms 使用演示：建群、同时问五个 Agent、Claude 写代码、Codex 审查、Gemini 把决定写进共享大脑"></a><br>
+  <a href="docs/assets/demo/onebrain-walkthrough-zh.mp4">观看高清视频</a>
 </p>
 
 ## 你能得到什么
 
-- **Claude、Codex、Gemini 在同一个群。** `@codex` 叫一个人，`@所有人` 每人说一句，不 @ 任何人就自动交给最合适的成员。交接都在同一个对话里完成。
-- **长对话少用 80.9% 的输入 Token。** 每个 Agent 记着自己读到哪，只拿新消息；中途加入的审查员拿到一份简短交接，不用重读历史。固定的 100 轮对话实测，[可以自己复现](docs/benchmarks/context-tokens.md)。
-- **一个所有厂商都能读的大脑。** 团队的决定和规则放在一个普通的 Markdown 文件夹里，Claude Code、Codex、Gemini 都能直接打开。Git 记录每处改动是哪个 Agent 写的，任何文件都能退回旧版本。
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/assets/demo/group-chat-zh.png" alt="Claude、Codex、Gemini 在同一个群里互相交接"><br>
+      <b>五家厂商，同一个群</b><br>
+      <sub><code>@</code> 一个人，<code>@所有人</code> 大家都说，不 @ 就交给最合适的成员。</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/assets/token-chart-zh.svg" alt="100 轮对话的输入 Token：重读历史 64.9 万，OneBrain 12.4 万"><br>
+      <b>长对话省 81% Token</b><br>
+      <sub>每个 Agent 只读它没看过的新消息。实测数据，可以自己复现。</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/assets/demo/team-brain-zh.png" alt="共享大脑页面，显示决定文件、作者和 Token 成本"><br>
+      <b>所有厂商共用一份记忆</b><br>
+      <sub>Markdown 加 git，每处改动都署上写它的 Agent。</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/assets/demo/welcome-zh.png" alt="欢迎页列出这台 Mac 上找到的编程 Agent"><br>
+      <b>一分钟上手</b><br>
+      <sub>自动找到你已经在用的编程 CLI，不用 API Key，用你自己的订阅。</sub>
+    </td>
+  </tr>
+</table>
+
 - **放心让它跑。** 每次运行都能撤销，撤销前会提醒你之后手动改过的文件。写到项目外面、改写历史的命令会在审批卡片上标出来，并且永远不能设成"以后都允许"。定时任务照样要审批。
 
 ## 安装
@@ -129,7 +145,7 @@ OneBrain 直接用你已经装好的 CLI 和你自己的订阅，不碰你的密
 
 我会让好几个编程 Agent 做同一件事。大部分花费都用在一遍遍重读同样的历史上；想听第二个意见，就得把需求、diff 和上一个回答从一个终端复制到另一个终端。OneBrain 把它们放进一个群，每个只给它没看过的内容，团队定下的事写进下一个 Agent 能读的文件里。
 
-动手之前，我读了 LobeHub、AionUi 和 PiBot 怎么做记忆、撤销和定时任务，把喜欢的思路用 Rust 重新实现，并且尽量少用 Token。"把记忆放在 Agent 能直接编辑的普通文件里"这个想法来自 poteto 的 [brainmaxxing](https://github.com/poteto/brainmaxxing)。
+"把团队记忆放在 Agent 能自己编辑的普通文件里"这个想法，受到 Lauren Tan 的 [brainmaxxing](https://github.com/poteto/brainmaxxing) 启发。
 
 ## 从源码构建
 
