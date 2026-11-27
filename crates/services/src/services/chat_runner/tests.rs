@@ -6107,7 +6107,6 @@ fn resumed_prompt_skips_unchanged_role_and_lists_new_messages() {
         omitted_messages: 0,
         latest_message_id: Some(message.id),
         handoff: None,
-        memory: None,
     };
     let prompt = ChatRunner::build_exact_markdown_prompt(
         &agent,
@@ -6377,7 +6376,6 @@ Ask the user before any destructive action, dependency change or network access.
                     omitted_messages,
                     latest_message_id: Some(request.id),
                     handoff: None,
-                    memory: None,
                 }
             }
             // First run of this member: full prompt plus the team handoffs instead of the history read.

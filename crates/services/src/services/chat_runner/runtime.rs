@@ -1781,6 +1781,24 @@ impl ChatRunner {
                             RunCompletionStatus::Failed | RunCompletionStatus::Stopped
                         );
 
+                        // Commit what this run wrote to the team brain, with the agent as author.
+                        {
+                            let author = format!("@{}", agent_name.trim_start_matches('@'));
+                            let message = format!("{author}: run {run_id}");
+                            match tokio::task::spawn_blocking(move || {
+                                crate::services::brain::commit(
+                                    &crate::services::brain::brain_dir(),
+                                    Some(&author),
+                                    &message,
+                                )
+                            })
+                            .await
+                            {
+                                Ok(Err(err)) => tracing::warn!(run_id = %run_id, error = %err, "failed to commit team brain changes"),
+                                Err(err) => tracing::warn!(run_id = %run_id, error = %err, "team brain commit task failed"),
+                                Ok(Ok(_)) => {}
+                            }
+                        }
                         // Snapshot again at the end so undo touches only this run's files.
                         {
                             let repo = workspace_path.clone();

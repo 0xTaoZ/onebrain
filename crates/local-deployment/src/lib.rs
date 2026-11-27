@@ -176,6 +176,11 @@ impl Deployment for LocalDeployment {
             ChatRunner::with_analytics(db.clone(), analytics.clone(), analytics_enabled.clone());
         chat_runner.start_runtime_outbox_publisher();
         services::services::scheduler::Scheduler::start(db.pool.clone(), chat_runner.clone());
+        if let Err(err) =
+            services::services::brain::ensure_brain(&services::services::brain::brain_dir())
+        {
+            tracing::warn!(error = %err, "could not create the team brain folder");
+        }
         let recovered_orphaned_agents = chat_runner
             .recover_orphaned_session_agents()
             .await

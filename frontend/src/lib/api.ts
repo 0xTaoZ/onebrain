@@ -154,10 +154,9 @@ import type {
   ChatRunFilesResponse,
   UndoRunResult,
   ChatAuditEvent,
-  BrainEntry,
-  BrainEntryStatus,
-  CreateBrainEntry,
-  UpdateBrainEntry,
+  BrainOverview,
+  BrainFileContent,
+  BrainSearchHit,
   ChatSchedule,
   ChatScheduleInput,
   ChatSchedulePreview,
@@ -1575,27 +1574,20 @@ export const chatSchedulesApi = {
 };
 
 export const brainApi = {
-  list: async (sessionId: string, status: BrainEntryStatus): Promise<BrainEntry[]> =>
-    handleApiResponse<BrainEntry[]>(
-      await makeRequest(`/api/chat/sessions/${encodeURIComponent(sessionId)}/brain${qs({ status })}`),
+  overview: async (): Promise<BrainOverview> =>
+    handleApiResponse<BrainOverview>(await makeRequest(`/api/chat/brain`)),
+  file: async (path: string, commit?: string): Promise<BrainFileContent> =>
+    handleApiResponse<BrainFileContent>(
+      await makeRequest(`/api/chat/brain/file${qs({ path, commit })}`),
     ),
-  create: async (sessionId: string, input: CreateBrainEntry): Promise<BrainEntry> =>
-    handleApiResponse<BrainEntry>(
-      await makeRequest(`/api/chat/sessions/${encodeURIComponent(sessionId)}/brain`, {
-        method: "POST",
-        body: JSON.stringify(input),
-      }),
-    ),
-  update: async (entryId: string, input: UpdateBrainEntry): Promise<BrainEntry> =>
-    handleApiResponse<BrainEntry>(
-      await makeRequest(`/api/chat/brain/${encodeURIComponent(entryId)}`, {
-        method: "PUT",
-        body: JSON.stringify(input),
-      }),
-    ),
-  remove: async (entryId: string): Promise<void> => {
+  search: async (q: string): Promise<BrainSearchHit[]> =>
+    handleApiResponse<BrainSearchHit[]>(await makeRequest(`/api/chat/brain/search${qs({ q })}`)),
+  restore: async (path: string, commit: string): Promise<void> => {
     await handleApiResponse<null>(
-      await makeRequest(`/api/chat/brain/${encodeURIComponent(entryId)}`, { method: "DELETE" }),
+      await makeRequest(`/api/chat/brain/restore`, {
+        method: "POST",
+        body: JSON.stringify({ path, commit }),
+      }),
     );
   },
 };

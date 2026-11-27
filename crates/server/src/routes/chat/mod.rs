@@ -43,10 +43,6 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         )
         .route("/audit", get(runs::get_session_audit_log))
         .route(
-            "/brain",
-            get(brain::list_brain_entries).post(brain::create_brain_entry),
-        )
-        .route(
             "/schedules",
             get(schedules::list_schedules).post(schedules::create_schedule),
         )
@@ -305,9 +301,12 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
                 .route("/runs/{run_id}/activity", get(runs::get_run_activity))
                 .route("/runs/{run_id}/diff", get(runs::get_run_diff))
                 .route("/runs/{run_id}/files", get(runs::get_run_files))
+                .route("/brain", get(brain::get_brain))
+                .route("/brain/file", get(brain::get_brain_file))
+                .route("/brain/search", get(brain::search_brain))
                 .route(
-                    "/brain/{entry_id}",
-                    axum::routing::put(brain::update_brain_entry).delete(brain::delete_brain_entry),
+                    "/brain/restore",
+                    axum::routing::post(brain::restore_brain_file),
                 )
                 .route(
                     "/schedules/preview",

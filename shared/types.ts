@@ -847,23 +847,25 @@ export type ChatSchedulePreview = {
  */
 times: Array<string>, };
 
-export type CreateBrainEntry = { kind: BrainEntryKind, title: string, body: string,
+export type BrainRestoreRequest = { path: string, commit: string, };
+
+export type BrainFileContent = { path: string, text: string, history: Array<BrainChange>, };
+
+export type BrainFile = { path: string, bytes: number, tokens: number,
 /**
- * Share with every group instead of only this project folder.
+ * Read by every agent at the start of a conversation.
  */
-everywhere: boolean, };
+always_read: boolean, last_author: string | null, last_changed: string | null, };
 
-export type UpdateBrainEntry = { kind: BrainEntryKind | null, title: string | null, body: string | null, status: BrainEntryStatus | null,
+export type BrainChange = { commit: string, author: string, at: string, message: string, files: Array<string>, };
+
+export type BrainOverview = { dir: string, tracked: boolean, files: Array<BrainFile>,
 /**
- * Approve this proposal as the replacement of an existing entry.
+ * Tokens every agent spends reading the always-read files once per conversation.
  */
-supersedes_id: string | null, };
+always_read_tokens: number, total_tokens: number, recent: Array<BrainChange>, };
 
-export type BrainEntry = { id: string, scope: string, kind: BrainEntryKind, title: string, body: string, status: BrainEntryStatus, locked: boolean, source_session_id: string | null, source_agent: string | null, supersedes_id: string | null, use_count: number, last_used_at: string | null, created_at: string, };
-
-export enum BrainEntryKind { decision = "decision", rule = "rule", preference = "preference", fact = "fact" }
-
-export enum BrainEntryStatus { proposed = "proposed", active = "active", rejected = "rejected", superseded = "superseded" }
+export type BrainSearchHit = { path: string, line: number, text: string, };
 
 export type ChatSchedule = { id: string, session_id: string, title: string, prompt: string, kind: ChatScheduleKind, cron_expr: string | null, every_seconds: number | null, run_at: string | null, misfire: ChatScheduleMisfire, enabled: boolean, next_run_at: string | null, last_run_at: string | null, last_status: ChatScheduleRunStatus | null, last_message_id: string | null, created_at: string, };
 

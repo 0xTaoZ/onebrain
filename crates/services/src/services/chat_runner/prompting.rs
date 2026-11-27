@@ -1009,6 +1009,8 @@ impl ChatRunner {
             markdown.push_str("- name: ");
             markdown.push_str(&agent.name);
             markdown.push('\n');
+            // Where the team brain lives: sent once per conversation, so it stays cached.
+            markdown.push_str(&crate::services::brain::prompt_note(&crate::services::brain::brain_dir()));
             let normalized_system_prompt =
                 Self::strip_embedded_team_protocol_from_system_prompt(&agent.system_prompt);
             if !normalized_system_prompt.is_empty() {
@@ -1051,12 +1053,6 @@ impl ChatRunner {
             markdown.push('\n');
         }
 
-        if let Some(memory) = continuation.memory.as_deref() {
-            markdown.push_str("## Team Memory\n");
-            markdown.push_str("Approved by the user; follow these unless the task says otherwise.\n");
-            markdown.push_str(memory);
-            markdown.push('\n');
-        }
         if let Some(handoff) = continuation.handoff.as_deref() {
             markdown.push_str("## Team Handoffs\n");
             markdown.push_str(handoff);
@@ -2436,26 +2432,6 @@ impl ChatRunner {
             context.handoff = self
                 .build_handoff_brief(&messages, source_message, members, session_agent.id)
                 .await;
-        }
-        let scope = ChatSession::find_by_id(&self.db.pool, source_message.session_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|session| session.default_workspace_path)
-            .unwrap_or_default();
-        // A resumed CLI session keeps what it was given before; a fresh one starts over.
-        let delivered_to = if resumed { session_agent.agent_session_id.as_deref() } else { None };
-        match crate::services::brain::recall(
-            &self.db.pool,
-            &scope,
-            &source_message.content,
-            session_agent.id,
-            delivered_to,
-        )
-        .await
-        {
-            Ok(recall) => context.memory = recall.map(|recall| recall.text),
-            Err(err) => tracing::warn!(error = %err, "continuation context: brain recall failed"),
         }
         context
     }

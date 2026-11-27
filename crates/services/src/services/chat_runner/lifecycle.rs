@@ -2681,6 +2681,20 @@ impl ChatRunner {
                     "failed to stage member context cursor"
                 );
             }
+            // Changes made to the team brain outside a run belong to the user, not the next agent.
+            if let Err(err) = tokio::task::spawn_blocking(|| {
+                crate::services::brain::commit(
+                    &crate::services::brain::brain_dir(),
+                    Some("you"),
+                    "Changes made outside OneBrain",
+                )
+            })
+            .await
+            .map_err(|err| err.to_string())
+            .and_then(|result| result.map_err(|err| err.to_string()))
+            {
+                tracing::warn!(run_id = %run_id, error = %err, "failed to commit outside brain changes");
+            }
             // Snapshot the working tree first, so the user can undo this run's changes.
             {
                 let repo = PathBuf::from(&workspace_path);
