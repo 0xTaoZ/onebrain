@@ -847,6 +847,24 @@ export type ChatSchedulePreview = {
  */
 times: Array<string>, };
 
+export type CreateBrainEntry = { kind: BrainEntryKind, title: string, body: string,
+/**
+ * Share with every group instead of only this project folder.
+ */
+everywhere: boolean, };
+
+export type UpdateBrainEntry = { kind: BrainEntryKind | null, title: string | null, body: string | null, status: BrainEntryStatus | null,
+/**
+ * Approve this proposal as the replacement of an existing entry.
+ */
+supersedes_id: string | null, };
+
+export type BrainEntry = { id: string, scope: string, kind: BrainEntryKind, title: string, body: string, status: BrainEntryStatus, locked: boolean, source_session_id: string | null, source_agent: string | null, supersedes_id: string | null, use_count: number, last_used_at: string | null, created_at: string, };
+
+export enum BrainEntryKind { decision = "decision", rule = "rule", preference = "preference", fact = "fact" }
+
+export enum BrainEntryStatus { proposed = "proposed", active = "active", rejected = "rejected", superseded = "superseded" }
+
 export type ChatSchedule = { id: string, session_id: string, title: string, prompt: string, kind: ChatScheduleKind, cron_expr: string | null, every_seconds: number | null, run_at: string | null, misfire: ChatScheduleMisfire, enabled: boolean, next_run_at: string | null, last_run_at: string | null, last_status: ChatScheduleRunStatus | null, last_message_id: string | null, created_at: string, };
 
 export type ChatScheduleInput = { title: string, prompt: string, kind: ChatScheduleKind, cron_expr: string | null, every_seconds: number | null, run_at: string | null, misfire: ChatScheduleMisfire | null, enabled: boolean | null, };

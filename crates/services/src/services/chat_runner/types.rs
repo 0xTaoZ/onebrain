@@ -337,6 +337,8 @@ struct ContinuationContext {
     latest_message_id: Option<Uuid>,
     /// Team handoffs for a member new to this session, in place of the history read.
     handoff: Option<String>,
+    /// Approved shared-brain entries relevant to this task, not yet sent to this CLI session.
+    memory: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
