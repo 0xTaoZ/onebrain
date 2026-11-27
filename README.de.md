@@ -1,48 +1,53 @@
 <p align="center">
-  <img src="docs/assets/cover.webp" width="200" alt="OneBrain: Pixel-Agents rund um ein gemeinsames Gehirn">
+  <img src="frontend/public/logos/onebrain-logo.png" width="88" alt="OneBrain-App-Symbol">
 </p>
 
-<h1 align="center">OneBrain</h1>
+<h1 align="center">OneBrain Rooms</h1>
 
 <p align="center">
-  <b>Deine Coding-Agents in einem Gruppenchat, gebaut für Entwickler.</b><br>
-  Claude Code, Codex und Gemini reden auf deinem Mac miteinander, planen gemeinsam und prüfen gegenseitig ihren Code.<br>
-  Im Benchmark mit 100 Runden sinken die Eingabe-Tokens gegenüber erneutem Lesen des Verlaufs um 80,9 %.
-</p>
-
-<p align="center">
-  <b>80,9 % weniger Eingabe-Tokens</b> gegenüber erneutem Lesen des Verlaufs im Benchmark mit 100 Runden
+  <b>Claude schreibt. Codex prüft. Ein Gruppenchat.</b><br>
+  Open-Source-Gruppenchats für dich und deine Agents auf macOS. Tauscht euch aus, arbeitet gemeinsam an Projekten und haltet Entscheidungen in versioniertem Markdown fest.
 </p>
 
 <p align="center">
-  <a href="#installation"><b>⬇ Für macOS installieren</b></a>
-  &nbsp;·&nbsp; <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · Deutsch
+  <a href="https://github.com/0xTaoZ/onebrain/releases/latest"><b>Download für Apple Silicon</b></a>
+  · <a href="#installation">Installation</a>
+  · <a href="#arbeitsabläufe-im-vergleich">Vergleich</a>
+  · <a href="#die-zahlen">Token-Benchmark</a>
+</p>
+
+<p align="center"><a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · Deutsch</p>
+
+<p align="center">
+  <a href="docs/assets/demo/onebrain-demo.mp4">
+    <img src="docs/assets/demo/onebrain-demo.gif" width="840" alt="OneBrain-Demo: Claude baut die automatische Speicherung, Codex entdeckt den Fehler und Gemini hält die Korrektur in Markdown fest">
+  </a><br>
+  <sub>Aufzeichnung der OneBrain-Oberfläche mit Beispieldaten.</sub>
 </p>
 
 <p align="center">
-  <img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-7c5cff?style=flat-square">
-  <img alt="macOS Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-1d1d1f?style=flat-square&logo=apple">
-  <img alt="Lokal, ohne Konto" src="https://img.shields.io/badge/l%C3%A4uft-lokal%2C%20ohne%20Konto-2b7d4a?style=flat-square">
-  <img alt="Release" src="https://img.shields.io/github/v/release/0xTaoZ/onebrain?style=flat-square&color=7c5cff">
+  <a href="docs/assets/demo/onebrain-demo.mp4">Demo als MP4 (Englisch)</a>
+  · <a href="docs/assets/demo/group-chat.png">Gruppenchat als Bild</a>
+  · <a href="docs/assets/demo/team-brain.png">Teamgedächtnis als Bild</a>
 </p>
 
-## Drei Arten, es zu nutzen
+## Was OneBrain Rooms auszeichnet
 
-**Chat-Modus.** Ein Gruppenchat wie jeder andere. Erwähnst du einen Agent mit `@`, antwortet nur dieser. Claude Code baut, Codex prüft, Gemini schreibt die Doku, alles im selben Verlauf.
-
-**Arbeitsmodus.** Aus einer Diskussion wird ein Plan. Der leitende Agent schreibt die Schritte, jeder Schritt läuft mit dem Agent, den du zugeteilt hast, und erst wenn du das Ergebnis abnimmst, ist er erledigt.
-
-**Für Entwickler gebaut.** Jedes Gespräch kann einen eigenen Git-Worktree bekommen, damit Agents nie in deine Arbeitskopie schreiben. Diffs, geänderte Dateien, Freigaben und Versionskontrolle liegen direkt neben dem Chat, und jede Antwort zeigt ihren Token-Verbrauch und die Cache-Trefferquote.
+- **Code-Review über Anbietergrenzen hinweg.** Gib den nächsten Schritt per @ an Claude Code, Codex oder Gemini. In Projektgruppen siehst du Diffs und Freigaben neben dem Chat. Snapshots machen Dateiänderungen rückgängig und zeigen spätere Bearbeitungen vor dem Überschreiben an.
+- **Kontext pro Agent.** Wer zurückkehrt, erhält neue Nachrichten. Neue Reviewer bekommen eine kurze Übergabe aus vorhandenen Daten. Im festen Replay mit 100 Runden wurden **80,9 % weniger Eingabe-Tokens** als beim erneuten Lesen des gesamten Verlaufs gezählt. [Benchmark wiederholen](docs/benchmarks/context-tokens.md).
+- **Gemeinsames Markdown.** Die Coding-CLIs können die Dateien mit Teamentscheidungen direkt lesen. Git speichert Autor und Verlauf und ermöglicht das Wiederherstellen alter Versionen.
 
 ## Installation
+
+Die App erscheint unter **OneBrain** im Ordner „Programme“.
 
 | | Installation per Einzeiler (empfohlen) | `.dmg` herunterladen |
 | --- | --- | --- |
 | **So geht's** | Im Terminal einfügen:<br>`curl -fsSL https://raw.githubusercontent.com/0xTaoZ/onebrain/main/install.sh \| bash` | `OneBrain_x.y.z_aarch64.dmg` unter [Releases](https://github.com/0xTaoZ/onebrain/releases/latest) laden, öffnen und **OneBrain** in **Programme** ziehen |
-| **Erster Start** | Öffnet sofort. Das Skript installiert die App und startet sie. | macOS blockiert Apps ohne bezahltes Apple-Entwicklerkonto. Unter **Systemeinstellungen → Datenschutz & Sicherheit** auf **Trotzdem öffnen** klicken. Meldet macOS, die App sei beschädigt: `xattr -dr com.apple.quarantine /Applications/OneBrain.app` |
+| **Erster Start** | Öffnet sofort. Das Skript installiert die App und startet sie. | Falls macOS die heruntergeladene App blockiert, unter **Systemeinstellungen → Datenschutz & Sicherheit** auf **Trotzdem öffnen** klicken. Meldet macOS, die App sei beschädigt: `xattr -dr com.apple.quarantine /Applications/OneBrain.app` |
 | **Voraussetzung** | Mac mit Apple Silicon (M1 oder neuer) | Ebenso |
 
-Installiere danach mindestens einen Coding-Agent, den du schon nutzt, etwa Claude Code, Codex oder Gemini CLI, und melde dich dort an. OneBrain nutzt deine eigenen Abos und sieht deine Schlüssel nie. Lege eine Gruppe an, füge deine Agents hinzu und erwähne einen mit `@`.
+Installiere danach mindestens einen Coding-Agent, den du schon nutzt, etwa Claude Code, Codex oder Gemini CLI, und melde dich dort an. Anmeldung und Abrechnung laufen über die konfigurierte CLI oder den Anbieter. Lege eine Gruppe an, füge deine Agents hinzu und erwähne einen mit `@`.
 
 ## Erster Chat
 
@@ -50,21 +55,11 @@ Installiere danach mindestens einen Coding-Agent, den du schon nutzt, etwa Claud
 2. Wähle eine Chatgruppe oder eine Projektgruppe. Eine Projektgruppe braucht auch einen Arbeitsordner.
 3. Sende eine Beispielnachricht oder öffne den Chat und schreibe deine eigene Nachricht.
 
-## Im Vergleich
-
-|  | OneBrain | Session-Manager<br><sub>Claude Squad, Conductor</sub> | Gruppenchats in der Cloud<br><sub>xMatrix, Pachat</sub> | Teams eines Anbieters<br><sub>Claude Code Agent Teams, Antigravity /swarm</sub> |
-| --- | :---: | :---: | :---: | :---: |
-| Agents verschiedener Anbieter reden in einem Chat | ✅ | – | ✅ | – |
-| Läuft auf deinem Mac, ohne zusätzliches Konto | ✅ | ✅ | – | ✅ |
-| Wer später dazukommt, bekommt eine kurze Übergabe statt des Verlaufs | ✅ | – | – | teilweise |
-| Gemeinsames Teamgedächtnis, das Menschen lesen können | ✅ | – | ✅ | – |
-| Veröffentlichte, nachprüfbare Token-Messungen | ✅ | – | – | – |
-
-## Warum es OneBrain gibt
-
-Ich arbeite mit mehreren Coding-Agents gleichzeitig. Der größte Teil der Kosten ging dafür drauf, dass sie denselben Chatverlauf immer wieder lasen, und damit sie sich Arbeit übergeben konnten, musste ich Text zwischen Terminals hin und her kopieren. OneBrain bringt sie in einen Chat und gibt jedem nur das, was er braucht.
-
 ## Die Zahlen
+
+<p align="center">
+  <img src="docs/assets/token-chart-de.svg" width="840" alt="Kumulierte Eingabe-Tokens nach 10, 30, 60 und 100 Runden. Nach 100 Runden 649.322 mit vollständigem Verlauf und 123.829 mit OneBrain. 80,9 % weniger gegenüber dem Verlauf und 22,8 % weniger gegenüber nur Prompt.">
+</p>
 
 Festes Gespräch mit drei Agents und einer Erwähnung pro Runde. Die Eingabe-Tokens werden mit cl100k aus den vom Programm erstellten Prompts gezählt.
 
@@ -79,9 +74,36 @@ Ein Reviewer, der nach 100 Runden dazukommt, startet mit 1.775 Eingabe-Tokens. B
 
 [Methode](docs/benchmarks/context-tokens.md)
 
+## Projektsteuerung
+
+- **Arbeitsmodus.** Erstelle aus der Diskussion einen Plan, verteile Aufgaben und prüfe das Ergebnis.
+- **Projekt-Worktrees.** Nutze für die Änderungen einer Gruppe einen separaten Git-Worktree und sieh dir den Diff im Chat an.
+- **Zeitpläne und Aktivitäten.** Plane Gruppennachrichten und prüfe Aktivitätsprotokoll, Freigaben und Dateiänderungen.
+
+## Arbeitsabläufe im Vergleich
+
+Die Tabelle zeigt, wie Teams Änderungen übergeben, die Bearbeitung steuern und Kontext für spätere Läufe ablegen.
+
+| Projekt | Zusammenarbeit | Projekt und Änderungen | Kontext und Gedächtnis |
+| --- | --- | --- | --- |
+| **OneBrain Rooms** | Lokaler Mac-Gruppenchat mit @Erwähnungen für Claude Code, Codex und Gemini | Git-Worktrees, Diffs, Freigaben und Rückgängig-Funktion mit Konflikterkennung | Versioniertes Team-Markdown, Leseposition pro Agent und gemessene Übergabe |
+| [Pachat](https://pachat.ai/use-cases/agent-teams) | Menschen und Agents treten einem gehosteten Gruppenchat bei und prüfen sich gegenseitig | Gruppendiskussion und Einladungslinks | Antworten und Verlauf im dauerhaften Gruppenchat |
+| [Octo](https://www.mininglamp.com/octo/) | Selbst hostbare Teamkanäle mit Web-, Desktop- und Mobil-Apps | Teamaufgaben und menschliche Abnahme | Teamkontext sowie sitzungsübergreifende Memory- und Skill-Dateien |
+| [OpenAgents](https://openagents.org/faq) | Coding-CLIs prüfen in gemeinsamen Threads eines selbst hostbaren Arbeitsbereichs | Gemeinsame Dateien, Browser-Sitzungen und Agent-Kopplung | Gemeinsame Threads und Artefakte |
+| [AionUi](https://github.com/iOfficeAI/AionUi#team-mode--coordinated-multi-agent-collaboration) | Lead-Agent delegiert Aufgaben an externe CLI-Agents über ACP | Gemeinsamer Ordner, Freigaben pro Agent und Fernzugriff | Asynchrones Postfach und gemeinsame Aufgabenliste |
+| [PiBot](https://github.com/w01fb0ss/PiBot#what-it-does) | Lokale Bot-Gruppen mit koordinierten Plänen | Freigaben, Aktivitätsprotokoll und macOS-Snapshots | Gedächtnis und Skills pro Bot |
+| [LobeHub](https://lobehub.com/docs/usage/agent/agent-team) | Sequenzielle, parallele, iterative und Debatten-Modi | Gruppenvorlagen, Skills und konfigurierbare Orchestrierung | Der Orchestrator kann Diskussionen zusammenfassen und Entscheidungen erfassen |
+| [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams) | Claude-Code-Sitzungen tauschen Nachrichten aus und übernehmen Aufgaben | Gemeinsame Aufgabenliste, Planfreigabe und Qualitätsprüfungen per Hook | Eigener Kontext pro Mitglied und gemeinsame Projektanweisungen |
+
+Die Projektlinks führen zur jeweiligen Dokumentation. Der Token-Benchmark vergleicht OneBrain mit zwei Baselines.
+
+## Warum es OneBrain gibt
+
+Ich arbeite mit mehreren Coding-Agents gleichzeitig. Der größte Teil der Kosten ging dafür drauf, dass sie denselben Chatverlauf immer wieder lasen, und damit sie sich Arbeit übergeben konnten, musste ich Text zwischen Terminals hin und her kopieren. OneBrain bringt sie in einen Chat und gibt jedem nur das, was er braucht.
+
 ## Wie die Ersparnis entsteht
 
-Agents verschiedener Anbieter können keinen gemeinsamen Provider-Cache nutzen. Deshalb reicht OneBrain keine Transkripte herum. Jeder Agent behält sein eigenes Gespräch, und zwischen den Agents wandern nur kleine, stabile Bausteine.
+OneBrain merkt sich, was jeder Agent bereits gesehen hat. So bekommen Mitglieder neue Nachrichten und neu hinzukommende Agents eine kurze Übergabe.
 
 - **Antwortende wählen.** Nenne einen Agent mit @ oder frage die Gruppe mit @all. Ohne Erwähnung antwortet ein ausgewählter Agent.
 - **Ein Lesezeichen pro Agent.** Wer sein Gespräch fortsetzt, bekommt nur die Nachrichten seit seinem letzten Lauf. Rolle und Teamregeln werden nicht erneut geschickt, solange sie gleich bleiben.
@@ -103,6 +125,10 @@ pnpm install
 pnpm run check
 cargo test -p db -p services
 ```
+
+## Dem Projekt folgen
+
+Gib OneBrain Rooms einen Stern, wenn du die Entwicklung verfolgen möchtest. Berichte gern in den [GitHub Issues](https://github.com/0xTaoZ/onebrain/issues) von deinem ersten Einsatz.
 
 ---
 

@@ -1,48 +1,53 @@
 <p align="center">
-  <img src="docs/assets/cover.webp" width="200" alt="OneBrain: pixel-art agents around a shared brain">
+  <img src="frontend/public/logos/onebrain-logo.png" width="88" alt="OneBrain app icon">
 </p>
 
-<h1 align="center">OneBrain</h1>
+<h1 align="center">OneBrain Rooms</h1>
 
 <p align="center">
-  <b>Your coding agents, in one group chat, built for developers.</b><br>
-  Claude Code, Codex and Gemini talk to each other on your Mac, plan work together and review each other's code.<br>
-  Each agent reads new context. In a 100-turn replay, input tokens fell 80.9% versus rereading the full history.
-</p>
-
-<p align="center">
-  <b>80.9% fewer input tokens</b> vs. rereading history in a 100-turn benchmark
+  <b>Claude builds. Codex reviews. One chat.</b><br>
+  Open-source group chats for you and your agents on macOS. Chat, work on projects together, and keep team decisions in versioned Markdown.
 </p>
 
 <p align="center">
-  <a href="#install"><b>⬇ Install for macOS</b></a>
-  &nbsp;·&nbsp; English · <a href="README.zh-CN.md">简体中文</a> · <a href="README.de.md">Deutsch</a>
+  <a href="https://github.com/0xTaoZ/onebrain/releases/latest"><b>Download for Apple Silicon</b></a>
+  · <a href="#install">Install</a>
+  · <a href="#compare-workflows">Compare</a>
+  · <a href="#the-numbers">Token benchmark</a>
+</p>
+
+<p align="center">English · <a href="README.zh-CN.md">简体中文</a> · <a href="README.de.md">Deutsch</a></p>
+
+<p align="center">
+  <a href="docs/assets/demo/onebrain-demo.mp4">
+    <img src="docs/assets/demo/onebrain-demo.gif" width="840" alt="OneBrain demo: Claude builds autosave, Codex catches a draft-loss bug, and Gemini records the fix in Markdown">
+  </a><br>
+  <sub>Example project rendered in OneBrain with sample data.</sub>
 </p>
 
 <p align="center">
-  <img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-7c5cff?style=flat-square">
-  <img alt="macOS Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-1d1d1f?style=flat-square&logo=apple">
-  <img alt="Local, no account" src="https://img.shields.io/badge/runs-locally%2C%20no%20account-2b7d4a?style=flat-square">
-  <img alt="Release" src="https://img.shields.io/github/v/release/0xTaoZ/onebrain?style=flat-square&color=7c5cff">
+  <a href="docs/assets/demo/onebrain-demo.mp4">Watch the MP4</a>
+  · <a href="docs/assets/demo/group-chat.png">Group chat screenshot</a>
+  · <a href="docs/assets/demo/team-brain.png">Shared brain screenshot</a>
 </p>
 
-## Three ways to use it
+## What makes OneBrain Rooms different
 
-**Chat mode.** A group chat like any other. Mention an agent with `@` and only that agent answers. Ask Claude Code to build, Codex to review, Gemini to write the docs, all in one thread.
-
-**Work mode.** Turn a discussion into a plan. The lead agent writes the steps, each step runs with the agent you assigned, and you approve the result before it counts as done.
-
-**Built for developers.** Each conversation can get its own Git worktree, so agents never write over your working copy. Diffs, file changes, approvals and source control live next to the chat, and every reply shows its token use and cache hit rate.
+- **Cross-vendor review.** Mention Claude Code, Codex, or Gemini to assign the next step. In a project group, inspect diffs and approvals alongside the chat. Run checkpoints can undo file changes and flag later edits.
+- **Context per agent.** A returning agent receives new messages. A new reviewer gets a short handoff assembled from stored data. **80.9% fewer input tokens** versus replaying the full history in a fixed 100-turn benchmark. [Reproduce the benchmark](docs/benchmarks/context-tokens.md).
+- **Shared Markdown.** Team decisions live in files the coding CLIs can open directly, with Git history for authorship and restore.
 
 ## Install
+
+The app appears as **OneBrain** in Applications.
 
 | | One-line install (recommended) | Download the `.dmg` |
 | --- | --- | --- |
 | **How** | Paste into Terminal:<br>`curl -fsSL https://raw.githubusercontent.com/0xTaoZ/onebrain/main/install.sh \| bash` | Download `OneBrain_x.y.z_aarch64.dmg` from [Releases](https://github.com/0xTaoZ/onebrain/releases/latest), open it, drag **OneBrain** into **Applications** |
-| **First launch** | Opens right away. The script installs the app and opens it. | macOS blocks apps from developers without a paid Apple account. Open **System Settings → Privacy & Security** and click **Open Anyway**. If it says the app is damaged, run `xattr -dr com.apple.quarantine /Applications/OneBrain.app` |
+| **First launch** | Opens right away. The script installs the app and opens it. | If macOS blocks the downloaded build, open **System Settings → Privacy & Security** and click **Open Anyway**. If it says the app is damaged, run `xattr -dr com.apple.quarantine /Applications/OneBrain.app` |
 | **Needs** | A Mac with Apple Silicon (M1 or later) | Same |
 
-Then install and sign in to at least one coding agent you already use, such as Claude Code, Codex or Gemini CLI. OneBrain uses your own subscriptions and never sees your keys. Create a group, add your agents, and mention one with `@`.
+Then install and sign in to at least one coding agent you already use, such as Claude Code, Codex or Gemini CLI. Agent access and billing follow the CLI or provider you configure. Create a group, add your agents, and mention one with `@`.
 
 ## First chat
 
@@ -50,21 +55,11 @@ Then install and sign in to at least one coding agent you already use, such as C
 2. Choose a chat group or a project group. A project group also needs a working folder.
 3. Click a sample to send your first message, or open the chat and write your own.
 
-## How it compares
-
-|  | OneBrain | Session managers<br><sub>Claude Squad, Conductor</sub> | Cloud group chats<br><sub>xMatrix, Pachat</sub> | Single-vendor teams<br><sub>Claude Code agent teams, Antigravity /swarm</sub> |
-| --- | :---: | :---: | :---: | :---: |
-| Agents from different vendors talk in one chat | ✅ | – | ✅ | – |
-| Runs on your Mac, no extra account | ✅ | ✅ | – | ✅ |
-| A late joiner gets a short handoff, not the whole history | ✅ | – | – | partly |
-| Shared team memory that people can read | ✅ | – | ✅ | – |
-| Published, reproducible token measurements | ✅ | – | – | – |
-
-## Why I built it
-
-I use several coding agents at once. Most of what they cost went into reading the same chat history again and again, and getting them to hand work to each other meant copying text between terminals. OneBrain puts them in one chat and gives each one only what it needs.
-
 ## The numbers
+
+<p align="center">
+  <img src="docs/assets/token-chart-en.svg" width="840" alt="Cumulative input tokens at 10, 30, 60 and 100 turns. At 100 turns: 649,322 with full-history reread and 123,829 with OneBrain, a reduction of 80.9%; 22.8% versus the prompt-only baseline.">
+</p>
 
 Fixed three-agent conversation with one mention per turn. Counts are input tokens from the application’s prompt builder, measured with cl100k.
 
@@ -79,9 +74,36 @@ A reviewer joining at 100 turns starts with 1,775 input tokens versus 11,528 whe
 
 [Method](docs/benchmarks/context-tokens.md)
 
+## Project controls
+
+- **Work mode.** Turn a discussion into a plan, assign steps to agents, and approve the result.
+- **Project worktrees.** Keep a group’s changes in a separate Git worktree and inspect the diff from the chat.
+- **Schedules and activity.** Schedule group messages and review the activity log alongside approvals and file changes.
+
+## Compare workflows
+
+Choose based on how your team hands off a change, controls edits, and keeps context between runs.
+
+| Project | How agents collaborate | Project controls | Context and memory |
+| --- | --- | --- | --- |
+| **OneBrain Rooms** | Local Mac group chat with @mentions for Claude Code, Codex and Gemini | Git worktrees, diffs, approvals and per-run undo with conflict detection | Versioned team Markdown, per-agent read cursor and a measured handoff |
+| [Pachat](https://pachat.ai/use-cases/agent-teams) | People and agents join a hosted group. Claude and Codex can cross-check. | Group discussion and invite links | Replies and history in a persistent room |
+| [Octo](https://www.mininglamp.com/octo/) | Self-hostable team channels across web, desktop and mobile | Team tasks and human review | Team context, with memory and skills carried across sessions |
+| [OpenAgents](https://openagents.org/faq) | Connect coding CLIs to shared review threads in a self-hostable workspace | Shared files, browsing sessions and agent pairing | Shared workspace threads and artifacts |
+| [AionUi](https://github.com/iOfficeAI/AionUi#team-mode--coordinated-multi-agent-collaboration) | A lead agent delegates to external CLI teammates over ACP | Shared working folder, per-agent approvals and remote access | Async mailbox and shared task board |
+| [PiBot](https://github.com/w01fb0ss/PiBot#what-it-does) | Local Bot groups with coordinator-led plans | Approvals, activity log and macOS checkpoints | Memory and skills configured per Bot |
+| [LobeHub](https://lobehub.com/docs/usage/agent/agent-team) | Sequential, parallel, iterative and debate modes | Group templates, skills and configurable orchestration | Orchestrator can summarize and extract decisions |
+| [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams) | Claude Code sessions communicate and claim tasks | Shared task list, plan approval and quality hooks | Per-teammate context and shared project instructions |
+
+Capabilities are described from linked project documentation. The table compares workflows. The token benchmark compares OneBrain with full-history and prompt-only baselines.
+
+## Why I built it
+
+I built OneBrain Rooms after repeatedly copying context from a coding terminal into a separate reviewer’s session. I wanted the reviewer to see the changes and the decisions that led to them, then send feedback back to the developer in the same thread.
+
 ## How it saves tokens
 
-Agents from different vendors cannot share a provider cache, so OneBrain does not pass transcripts around. Each agent keeps its own conversation, and only small, stable pieces move between agents.
+OneBrain tracks what each agent has already seen, so it can send new messages and a short handoff when another agent joins.
 
 - **Choose who answers.** Use @ to name one agent, or @all to ask the group. A message without a mention goes to one selected agent.
 - **A read cursor per agent.** A resumed agent gets the messages since its last run. Its role and the team rules are not resent while they stay the same.
@@ -103,6 +125,10 @@ pnpm install
 pnpm run check
 cargo test -p db -p services
 ```
+
+## Follow the project
+
+Star OneBrain Rooms to follow its development, or share what happened in your first group on [GitHub Issues](https://github.com/0xTaoZ/onebrain/issues).
 
 ---
 
