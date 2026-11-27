@@ -329,7 +329,7 @@ mod tests {
     fn empty_session_has_no_brief() {
         let current = message(ChatSenderType::User, "@coder start");
         let brief = HandoffBrief::from_session(
-            &[current.clone()],
+            std::slice::from_ref(&current),
             current.id,
             &[],
             &[],

@@ -112,7 +112,7 @@ impl LanController {
     }
 
     async fn enable(&self, address: Ipv4Addr, allow_loopback: bool) -> Result<LanPairing, String> {
-        if !address.is_private() && !(allow_loopback && address.is_loopback()) {
+        if !(address.is_private() || allow_loopback && address.is_loopback()) {
             return Err(
                 "Choose this Mac's private IPv4 address (10.x, 172.16–31.x, or 192.168.x).".into(),
             );

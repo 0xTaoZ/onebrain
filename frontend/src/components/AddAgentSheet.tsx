@@ -16,6 +16,7 @@ const NAMES: Record<string, string> = {
   CURSOR_AGENT: 'Cursor',
   COPILOT: 'Copilot',
   OPENTEAMS_CLI: 'OneBrain CLI',
+  OPEN_TEAMS_CLI: 'OneBrain CLI',
   PI: 'Pi',
 };
 

@@ -3,6 +3,7 @@ import { PaperChatSidebar } from "@/components/PaperChatSidebar";
 import { AppTitleBar } from "@/components/AppTitleBar";
 import { AppPanels } from "@/components/AppPanels";
 import { BrainPage } from "@/components/BrainPage";
+import { WelcomeGuide } from "@/components/WelcomeGuide";
 import React, {
   useCallback,
   useEffect,
@@ -1085,6 +1086,9 @@ function WorkspaceLayout() {
         return <BrainPage />;
       case "workspace":
       default:
+        if (!sessionsAsync.loading && !sessionsAsync.error && sessions.length === 0) {
+          return <WelcomeGuide onCreateGroup={openNewChat} />;
+        }
         return (
           <div className="h-full w-full flex flex-col min-h-0">
             <WorkflowWorkspace
@@ -1438,8 +1442,8 @@ function WorkspaceLayout() {
       setActiveSessionId(sessionId);
       return;
     }
-    if (sessionsAsync.loading || sessionsAsync.error) return;
-    await handleCreateDefaultSession({ focusComposer: false });
+    // No group yet: show the welcome guide instead of creating one silently.
+    setActiveTabId("");
   };
 
   // The chat header asks for the shared brain page through the panel event.

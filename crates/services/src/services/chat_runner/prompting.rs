@@ -2436,6 +2436,7 @@ impl ChatRunner {
         context
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn build_prompt(
         &self,
         agent: &ChatAgent,

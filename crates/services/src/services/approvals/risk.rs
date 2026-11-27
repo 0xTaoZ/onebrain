@@ -323,10 +323,10 @@ fn assess_shell(
                 }
             }
             "cp" | "ln" | "install" | "rsync" | "scp" => {
-                if let Some(dest) = args.iter().filter(|a| !a.starts_with('-')).last() {
-                    if !dest.contains(':') || program != "scp" && program != "rsync" {
-                        check_write(dest, base, root, risk);
-                    }
+                if let Some(dest) = args.iter().rfind(|a| !a.starts_with('-'))
+                    && (!dest.contains(':') || program != "scp" && program != "rsync")
+                {
+                    check_write(dest, base, root, risk);
                 }
             }
             "tee" | "touch" | "mkdir" | "truncate" => {

@@ -1580,7 +1580,7 @@ mod tests {
             content: "中文🙂é context ".repeat(100),
             timestamp: "2026-11-24T00:00:00Z".to_string(),
         };
-        let limited = super::truncate_messages_to_token_limit(&[original.clone()], 100);
+        let limited = super::truncate_messages_to_token_limit(std::slice::from_ref(&original), 100);
         assert_eq!(limited.len(), 1);
         assert!(super::estimate_token_count(&limited) <= 100);
         assert_eq!(limited[0].message_id, original.message_id);

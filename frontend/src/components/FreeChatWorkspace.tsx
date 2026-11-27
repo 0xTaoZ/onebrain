@@ -43,6 +43,8 @@ import {
   sessionAgentsApi,
   projectWorkItemsApi,
 } from "@/lib/api";
+import { EmptyChatExamples } from "@/components/WelcomeGuide";
+import { notifyChatInputPrefill } from "@/lib/chatInputPrefill";
 import {
   flattenRunFileChanges,
   type AgentFileRow,
@@ -1548,6 +1550,14 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
               />
             )}
             <PaperChatWelcome />
+            {displayedMessages.length === 0 && activeSessionId && sessionsAsync.source === "api" && (
+              <EmptyChatExamples
+                sessionId={activeSessionId}
+                memberNames={members.map((member) => member.name.replace(/^@/, ""))}
+                zh={locale === "zh"}
+                onPick={notifyChatInputPrefill}
+              />
+            )}
             {displayedMessages.map((msg) => (
               <div
                 key={msg.id}

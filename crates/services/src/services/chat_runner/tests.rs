@@ -6252,6 +6252,7 @@ async fn member_activity_counts_runs_per_day_across_sessions_of_the_same_agent()
 ///   agent must read to catch up (reported both without and with that read);
 /// - after: a resumed member gets an unchanged-prefix note plus only the
 ///   messages it has not seen.
+///
 /// Run with: BENCH_TURNS=30 cargo test -p services --lib context_token_benchmark -- --ignored --nocapture
 #[test]
 #[ignore]
