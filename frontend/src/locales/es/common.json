@@ -478,5 +478,7 @@
   "message.undoRunConfirm": "Haz clic otra vez para deshacer",
   "message.undoRunDone": "Se restauraron {count} archivos cambiados por esta ejecución",
   "message.undoRunConflict": "Estos archivos se editaron después de la ejecución: {files}. Haz clic otra vez para sobrescribirlos.",
-  "message.undoRunForce": "Sobrescribir y deshacer"
+  "message.undoRunForce": "Sobrescribir y deshacer",
+  "composerChatMode": "Chat",
+  "composerWorkMode": "Trabajo: primero el plan"
 }

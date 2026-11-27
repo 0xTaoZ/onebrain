@@ -478,5 +478,7 @@
   "message.undoRunConfirm": "Cliquez à nouveau pour annuler",
   "message.undoRunDone": "{count} fichiers modifiés par cette exécution sont restaurés",
   "message.undoRunConflict": "Ces fichiers ont été modifiés après l'exécution : {files}. Cliquez à nouveau pour les écraser.",
-  "message.undoRunForce": "Écraser et annuler"
+  "message.undoRunForce": "Écraser et annuler",
+  "composerChatMode": "Discussion",
+  "composerWorkMode": "Travail : plan d'abord"
 }

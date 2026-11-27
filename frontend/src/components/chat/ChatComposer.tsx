@@ -11,6 +11,7 @@ import {
   ChevronDown,
   FileText,
   GitBranch,
+  MessageCircle,
   Image as ImageIcon,
   Lock,
   Mic,
@@ -532,25 +533,41 @@ const ChatComposerComponent: React.FC<ChatComposerProps> = ({
             </button>
 
             <CommandTooltip commandId="session.plan-mode.toggle">
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  toggleInputMode();
-                }}
-                className={`plan-mode-toggle flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-medium transition cursor-pointer ${
-                  isPlanMode
-                    ? 'plan-mode-toggle-active border-[var(--primary)] bg-[var(--primary-tint)] text-[var(--primary)]'
-                    : 'border-[var(--hairline)] bg-[var(--surface-2)] text-[var(--ink-muted)] hover:bg-[var(--surface-3)]'
-                }`}
-                aria-pressed={isPlanMode}
-                aria-label={
-                  isPlanMode ? t('switchToChatMode') : t('switchToPlanMode')
-                }
+              <div
+                className="flex items-center rounded-full border border-[var(--hairline)] bg-[var(--surface-2)] p-0.5 text-[12px] font-medium"
+                role="radiogroup"
+                aria-label={t('planMode')}
+                onClick={(event) => event.stopPropagation()}
               >
-                <GitBranch className="h-3 w-3" />
-                <span>{t('planMode')}</span>
-              </button>
+                {([
+                  ['free', t('composerChatMode'), MessageCircle],
+                  ['workflow', t('composerWorkMode'), GitBranch],
+                ] as const).map(([mode, label, Icon]) => {
+                  const active = mode === 'workflow' ? isPlanMode : !isPlanMode;
+                  return (
+                    <button
+                      key={mode}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      onClick={() => {
+                        if (!active) toggleInputMode();
+                      }}
+                      title={mode === 'workflow' ? t('switchToPlanMode') : t('switchToChatMode')}
+                      className={`plan-mode-toggle flex h-7 items-center gap-1 rounded-full px-2.5 transition cursor-pointer ${
+                        active
+                          ? mode === 'workflow'
+                            ? 'plan-mode-toggle-active bg-[var(--primary)] text-[var(--on-primary)]'
+                            : 'bg-[var(--surface-1)] text-[var(--ink)] shadow-sm'
+                          : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                      }`}
+                    >
+                      <Icon className="h-3.5 w-3.5" />
+                      <span>{label}</span>
+                    </button>
+                  );
+                })}
+              </div>
             </CommandTooltip>
           </div>
 

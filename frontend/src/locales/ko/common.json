@@ -478,5 +478,7 @@
   "message.undoRunConfirm": "한 번 더 누르면 되돌립니다",
   "message.undoRunDone": "이번 실행이 바꾼 파일 {count}개를 되돌렸습니다",
   "message.undoRunConflict": "실행 후 수정된 파일이 있습니다: {files}. 한 번 더 누르면 덮어씁니다.",
-  "message.undoRunForce": "덮어쓰고 되돌리기"
+  "message.undoRunForce": "덮어쓰고 되돌리기",
+  "composerChatMode": "채팅",
+  "composerWorkMode": "작업: 먼저 계획"
 }
