@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="docs/assets/demo/onebrain-demo.mp4">
-    <img src="docs/assets/demo/onebrain-demo.gif" width="840" alt="OneBrain demo: Claude builds autosave, Codex catches a draft-loss bug, and Gemini records the fix in Markdown">
+    <img src="docs/assets/demo/onebrain-demo.gif" width="920" alt="OneBrain demo: Claude builds autosave, Codex catches a draft-loss bug, and Gemini records the fix in Markdown">
   </a><br>
   <sub>Example project rendered in OneBrain with sample data.</sub>
 </p>
@@ -30,6 +30,14 @@
   · <a href="docs/assets/demo/group-chat.png">Group chat screenshot</a>
   · <a href="docs/assets/demo/team-brain.png">Shared brain screenshot</a>
 </p>
+
+## Why I built it
+
+I wanted a place where I could ask a few agents to think through a question, come back the next day, and carry the decisions into the next task. On code projects I kept copying the request, the diff and the last answer from one terminal to another just to ask for a second opinion. Once the reviewer found something, I had to copy it back again.
+
+In a chat room I can ask two agents for different perspectives. In a project room I can give them a working folder, hand a change to a reviewer, and check the diff before accepting it. When the team settles on a decision, it goes into Markdown that the next agent can read.
+
+**Our goal is to build the most useful multi-agent workspace we can and make it use as few tokens as possible.** We measure progress on repeatable conversations and keep the benchmark in the repo.
 
 ## What makes OneBrain Rooms different
 
@@ -95,11 +103,26 @@ Choose based on how your team hands off a change, controls edits, and keeps cont
 | [LobeHub](https://lobehub.com/docs/usage/agent/agent-team) | Sequential, parallel, iterative and debate modes | Group templates, skills and configurable orchestration | Orchestrator can summarize and extract decisions |
 | [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams) | Claude Code sessions communicate and claim tasks | Shared task list, plan approval and quality hooks | Per-teammate context and shared project instructions |
 
-Capabilities are described from linked project documentation. The table compares workflows. The token benchmark compares OneBrain with full-history and prompt-only baselines.
+### Where the differences matter
 
-## Why I built it
+- **Cross-vendor review is shared ground.** Pachat documents Claude and Codex checking each other in a hosted chat. OpenAgents connects local CLIs to shared review threads and offers a self-hosted workspace. OneBrain Rooms puts review next to Git diffs, approvals and run undo in its Mac project room.
+- **Checkpoints are shared ground too.** PiBot documents recoverable macOS snapshots. OneBrain Rooms ties undo to the files changed in a particular run and reports conflicts if you edited those files afterwards.
+- **Orchestration and memory take different forms.** Octo documents team channels and memory across sessions. AionUi documents an ACP lead, mailbox and task board. LobeHub documents group orchestration. Claude Code Agent Teams coordinates Claude sessions through a shared task list. Compare OneBrain Rooms on the combination of Git-backed team Markdown, a read cursor per agent and a published handoff benchmark.
 
-I built OneBrain Rooms after repeatedly copying context from a coding terminal into a separate reviewer’s session. I wanted the reviewer to see the changes and the decisions that led to them, then send feedback back to the developer in the same thread.
+The comparisons use the linked public documentation. The benchmark tests our two baselines on the same replay.
+
+## How it works under the hood
+
+| Mechanism | What happens in the app |
+| --- | --- |
+| [Incremental prompts](crates/services/src/services/chat_runner/prompting.rs) | The runner records a read cursor for each agent session. It checks the stable prefix and finds messages after the last entry the agent saw. A new member can start with a handoff assembled from stored data. |
+| [Team memory](crates/services/src/services/brain.rs) | The shared brain is a folder of Markdown files. Git records changes and their authors, and the app can open older versions. |
+| [Git checkpoints](crates/git/src/checkpoint.rs) | The app can roll back files touched by a run. Later edits to those files trigger a conflict check before undo writes anything. |
+| [Scheduled chat tasks](crates/services/src/services/scheduler/mod.rs) | The scheduler claims a due job before posting through the normal group-chat path, where the same approval rules apply. |
+
+## Engineering references
+
+Lauren Tan’s [pstack guide](https://github.com/cursor/plugins/blob/main/pstack/docs/guide/README.md) is a reference for giving agents a clear finish condition and checking the actual behavior before shipping. Her [brainmaxxing](https://github.com/poteto/brainmaxxing) and [Noodle](https://github.com/poteto/noodle) show two complementary ideas: keep durable knowledge in editable files and put repeatable workflows in skills. In OneBrain Rooms, the concrete application is a handoff you can follow in chat, a Git change you can inspect, and a decision the next agent can read.
 
 ## How it saves tokens
 

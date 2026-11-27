@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="docs/assets/demo/onebrain-demo.mp4">
-    <img src="docs/assets/demo/onebrain-demo-zh.gif" width="840" alt="OneBrain 群聊演示：Claude 实现自动保存，Codex 发现草稿丢失问题，Gemini 把修复决定写进 Markdown">
+    <img src="docs/assets/demo/onebrain-demo-zh.gif" width="920" alt="OneBrain 群聊演示：Claude 实现自动保存，Codex 发现草稿丢失问题，Gemini 把修复决定写进 Markdown">
   </a><br>
   <sub>使用 OneBrain 界面录制，项目与对话为虚构样例。</sub>
 </p>
@@ -30,6 +30,14 @@
   · <a href="docs/assets/demo/group-chat-zh.png">查看群聊截图</a>
   · <a href="docs/assets/demo/team-brain.png">查看共享大脑截图</a>
 </p>
+
+## 为什么做这个
+
+我想有个地方，能随时拉几个 Agent 一起聊一个问题。今天聊完，明天回来接着做，之前定过的事还能找得到。做项目时最烦的是：一个 Agent 写完，我得把需求、改动和结果复制到另一个终端请它审。发现问题，再复制回去改。
+
+所以这里有聊天群，也有项目群。讨论资料时可以让两位成员给不同意见。做代码时可以指定工作目录，交给另一位做审查，自己在群里看 diff、决定要不要通过。聊出来的决定放进 Markdown，下一个成员还读得到。
+
+**我们的目标是把多 Agent 协作做得最好用，也最省 Token。** 先把聊天、交接、审查和记忆串通，再用可以重复运行的基准量输入 Token。
 
 ## 为什么用 OneBrain Rooms
 
@@ -95,11 +103,26 @@
 | [LobeHub](https://lobehub.com/docs/usage/agent/agent-team) | 串行、并行、迭代和辩论模式 | 群组模板、技能和可配置编排 | 编排器可总结讨论、提取决定 |
 | [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams) | 多个 Claude Code 会话互发消息、领取任务 | 共享任务表、计划审批和质检钩子 | 成员各自保有上下文，读取项目指令 |
 
-各项能力依据表内链接的公开资料。表格比较协作方式，Token 曲线比较 OneBrain 与两种基线。
+### 哪些功能重叠，差别在哪
 
-## 为什么做这个
+- **跨厂商互审已有其他选择。** Pachat 官方展示了 Claude 和 Codex 在托管群聊里互相核查。OpenAgents 文档也有本地 CLI 在共享线程中审查，工作区可自托管。OneBrain Rooms 的侧重点是在 Mac 的项目群里同时查看 Git diff、处理审批和按次撤销。
+- **可恢复快照也有重叠。** PiBot 文档明确提供 macOS 快照。OneBrain Rooms 把撤销范围定在单次运行改过的文件，并在这些文件后来又被编辑时提示冲突。
+- **编排和记忆的做法各不相同。** Octo 有团队频道和跨会话记忆，AionUi 用 ACP 主 Agent、收件箱和任务板协作，LobeHub 可以设置群组编排，Claude Code Agent Teams 在 Claude 会话间共享任务表。OneBrain Rooms 把 **Git 版控的团队 Markdown、每位成员的阅读进度，以及可复现的交接 Token 基准**放在一起。
 
-我平时同时用好几个编程 Agent。花掉的 token 大部分都用在它们一遍遍重读聊天记录上；想让它们互相交接，只能在几个终端之间来回复制。OneBrain 把它们放进同一个群，并且只给每个成员它真正需要的内容。
+对比以链接里的公开资料为依据。两条 Token 基线都使用本项目的同一段回放。
+
+## 这些技术怎么落地
+
+| 机制 | 在项目里怎么工作 |
+| --- | --- |
+| [增量上下文](crates/services/src/services/chat_runner/prompting.rs) | 每个会话成员有自己的阅读进度。续跑时用前缀指纹检查原来的指令是否有变化，再找上次读过的位置之后的消息。新成员可以从已有记录整理出的交接开始。 |
+| [共享大脑](crates/services/src/services/brain.rs) | 决定存在 Markdown 目录里。Git 记录每次改动和作者，界面可以查看旧版本。 |
+| [Git 快照和按次撤销](crates/git/src/checkpoint.rs) | 只回退该次运行碰过的文件。如果运行结束后又有人编辑了这些文件，写入前会检查冲突。 |
+| [定时任务](crates/services/src/services/scheduler/mod.rs) | 到期任务先被调度器领取，再走群消息的正常执行路径，沿用群里的审批机制。 |
+
+## 参考的工程方法
+
+Lauren Tan（@poteto）的 [pstack 指南](https://github.com/cursor/plugins/blob/main/pstack/docs/guide/README.md) 有两个做法值得借鉴：开工前说清怎样才算完成，交付前走一遍真实流程。她的 [brainmaxxing](https://github.com/poteto/brainmaxxing) 用文件保存可持续维护的记忆，[Noodle](https://github.com/poteto/noodle) 用技能组织可重复的任务。落到 OneBrain Rooms，就是能从聊天里追到交接、从 Git 看见改动，以及让下一个成员读到前面的决定。
 
 ## 怎么省下来的
 

@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="docs/assets/demo/onebrain-demo.mp4">
-    <img src="docs/assets/demo/onebrain-demo.gif" width="840" alt="OneBrain-Demo: Claude baut die automatische Speicherung, Codex entdeckt den Fehler und Gemini hält die Korrektur in Markdown fest">
+    <img src="docs/assets/demo/onebrain-demo.gif" width="920" alt="OneBrain-Demo: Claude baut die automatische Speicherung, Codex entdeckt den Fehler und Gemini hält die Korrektur in Markdown fest">
   </a><br>
   <sub>Aufzeichnung der OneBrain-Oberfläche mit Beispieldaten.</sub>
 </p>
@@ -30,6 +30,14 @@
   · <a href="docs/assets/demo/group-chat.png">Gruppenchat als Bild</a>
   · <a href="docs/assets/demo/team-brain.png">Teamgedächtnis als Bild</a>
 </p>
+
+## Warum es OneBrain gibt
+
+Ich wollte mehrere Agents zu einer Frage hinzuholen und am nächsten Tag dort weiterarbeiten, wo wir aufgehört hatten. Bei Code-Reviews kopierte ich ständig Anforderungen, Diffs und Antworten zwischen Terminals. Wenn der Review etwas fand, musste ich das Ergebnis wieder zurückkopieren.
+
+In einem Chat kann ich mehrere Sichtweisen einholen. In einem Projektraum gebe ich den Agents einen Arbeitsordner, lasse eine Änderung durch ein anderes Modell prüfen und entscheide anhand des Diffs. Was wir dabei entscheiden, bleibt als Markdown für den nächsten Agent erhalten.
+
+**Unser Ziel ist ein möglichst brauchbarer und sparsamer Arbeitsbereich für mehrere Agents.** Den Token-Verbrauch messen wir mit Gesprächen, die sich reproduzieren lassen.
 
 ## Was OneBrain Rooms auszeichnet
 
@@ -95,11 +103,26 @@ Die Tabelle zeigt, wie Teams Änderungen übergeben, die Bearbeitung steuern und
 | [LobeHub](https://lobehub.com/docs/usage/agent/agent-team) | Sequenzielle, parallele, iterative und Debatten-Modi | Gruppenvorlagen, Skills und konfigurierbare Orchestrierung | Der Orchestrator kann Diskussionen zusammenfassen und Entscheidungen erfassen |
 | [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams) | Claude-Code-Sitzungen tauschen Nachrichten aus und übernehmen Aufgaben | Gemeinsame Aufgabenliste, Planfreigabe und Qualitätsprüfungen per Hook | Eigener Kontext pro Mitglied und gemeinsame Projektanweisungen |
 
-Die Projektlinks führen zur jeweiligen Dokumentation. Der Token-Benchmark vergleicht OneBrain mit zwei Baselines.
+### Wo sich die Funktionen überschneiden
 
-## Warum es OneBrain gibt
+- **Reviews über Anbietergrenzen hinweg.** Pachat dokumentiert, wie Claude und Codex sich im gehosteten Chat gegenseitig prüfen. OpenAgents verbindet lokale CLIs mit gemeinsamen Review-Threads und lässt sich selbst hosten. OneBrain Rooms zeigt Review, Git-Diffs, Freigaben und Rückgängig-Funktion im selben Mac-Projektraum.
+- **Wiederherstellung.** PiBot dokumentiert wiederherstellbare Snapshots für macOS. OneBrain Rooms beschränkt das Rückgängigmachen auf die Dateien eines Laufs und meldet Konflikte bei späteren Bearbeitungen.
+- **Orchestrierung und Gedächtnis.** Octo dokumentiert Teamkanäle und sitzungsübergreifendes Gedächtnis. AionUi verbindet einen Lead-Agent über ACP mit Postfach und Aufgabentafel. LobeHub orchestriert Agent-Gruppen. Claude Code Agent Teams koordiniert Claude-Sitzungen über eine Aufgabenliste. Bei OneBrain Rooms kommen versioniertes Team-Markdown, eine Leseposition pro Agent und ein veröffentlichter Übergabe-Benchmark zusammen.
 
-Ich arbeite mit mehreren Coding-Agents gleichzeitig. Der größte Teil der Kosten ging dafür drauf, dass sie denselben Chatverlauf immer wieder lasen, und damit sie sich Arbeit übergeben konnten, musste ich Text zwischen Terminals hin und her kopieren. OneBrain bringt sie in einen Chat und gibt jedem nur das, was er braucht.
+Der Vergleich beruht auf der verlinkten Dokumentation. Der Benchmark verwendet dieselbe Aufzeichnung für beide Baselines.
+
+## Wie die Technik funktioniert
+
+| Mechanismus | Umsetzung |
+| --- | --- |
+| [Inkrementelle Prompts](crates/services/src/services/chat_runner/prompting.rs) | Jeder Agent hat eine eigene Leseposition. Bei der Fortsetzung prüft der Runner den stabilen Präfix und ermittelt neue Nachrichten. Neue Mitglieder können mit einer Übergabe aus vorhandenen Daten beginnen. |
+| [Teamgedächtnis](crates/services/src/services/brain.rs) | Entscheidungen liegen in Markdown. Git speichert Änderungen und Autoren. Ältere Stände lassen sich in der App öffnen. |
+| [Git-Snapshots](crates/git/src/checkpoint.rs) | Die Rückgängig-Funktion beschränkt sich auf die Dateien eines Laufs. Spätere Änderungen an diesen Dateien werden vor dem Schreiben auf Konflikte geprüft. |
+| [Zeitpläne](crates/services/src/services/scheduler/mod.rs) | Der Scheduler beansprucht fällige Aufgaben und sendet sie über den üblichen Chat-Pfad mit den normalen Freigaberegeln. |
+
+## Vorbilder für die Arbeitsweise
+
+Lauren Tans [pstack-Anleitung](https://github.com/cursor/plugins/blob/main/pstack/docs/guide/README.md) zeigt, wie man Abnahmekriterien vorab festlegt und fertige Änderungen in der laufenden App prüft. [brainmaxxing](https://github.com/poteto/brainmaxxing) hält Wissen in bearbeitbaren Dateien fest. [Noodle](https://github.com/poteto/noodle) organisiert wiederkehrende Abläufe über Skills. In OneBrain Rooms kann man die Übergabe im Chat verfolgen, Änderungen in Git prüfen und Entscheidungen später in Markdown nachlesen.
 
 ## Wie die Ersparnis entsteht
 
