@@ -1,5 +1,8 @@
 import { RemoteAccessBanner } from "@/components/RemoteAccessBanner";
 import { PaperChatSidebar } from "@/components/PaperChatSidebar";
+import { AppTitleBar } from "@/components/AppTitleBar";
+import { AppPanels } from "@/components/AppPanels";
+import { BrainPage } from "@/components/BrainPage";
 import React, {
   useCallback,
   useEffect,
@@ -50,6 +53,7 @@ import {
   Users,
   X,
   type LucideIcon,
+  Brain,
 } from "lucide-react";
 import {
   agentRuntimeApi,
@@ -186,6 +190,7 @@ const pageTabConfig: Record<
   providers: { label: "Settings", icon: Settings2 },
   agents: { label: "Agent runtime", icon: Bot },
   "build-stats": { label: "Build Statistics", icon: Activity },
+  brain: { label: "Shared brain", icon: Brain },
 };
 
 const createSessionTabId = (sessionId: string) => `session:${sessionId}`;
@@ -1076,6 +1081,8 @@ function WorkspaceLayout() {
         return <BuildStatsPage />;
       case "agents":
         return <AgentsPage />;
+      case "brain":
+        return <BrainPage />;
       case "workspace":
       default:
         return (
@@ -1434,6 +1441,17 @@ function WorkspaceLayout() {
     if (sessionsAsync.loading || sessionsAsync.error) return;
     await handleCreateDefaultSession({ focusComposer: false });
   };
+
+  // The chat header asks for the shared brain page through the panel event.
+  useEffect(() => {
+    const openBrain = (event: Event) => {
+      if ((event as CustomEvent<string>).detail === "brain") {
+        openPageTab("brain", getPageTabLabel("brain"));
+      }
+    };
+    window.addEventListener("onebrain:open-panel", openBrain);
+    return () => window.removeEventListener("onebrain:open-panel", openBrain);
+  });
 
   const handleCloseTab = (closingTab: WorkspaceTab) => {
     if (openTabs.length <= 1) {
@@ -2252,6 +2270,7 @@ function WorkspaceLayout() {
         />
       )}
 
+      <AppPanels />
       {isNewGroupOpen && (
         <NewGroupSheet onClose={() => setIsNewGroupOpen(false)} onCreated={openCreatedGroup} />
       )}
@@ -2359,69 +2378,13 @@ function WorkspaceLayout() {
       <div className="paper-main-frame flex-1 h-full min-w-0 overflow-hidden bg-[var(--canvas)] p-2 md:p-3">
         <section className="flex h-full min-h-0 flex-col overflow-hidden gap-1">
           <RemoteAccessBanner />
-          <header className="paper-workspace-tabs h-8 bg-[var(--canvas)] flex items-center justify-between shrink-0 select-none z-10">
-            <div className="flex items-center gap-3 flex-1 min-w-0 h-full">              <button
-                type="button"
-                onClick={() => setIsMobileSidebarOpen(true)}
-                className="p-1.5 rounded-md border border-[var(--hairline)] bg-[var(--surface-1)] md:hidden hover:bg-[var(--surface-2)] text-[var(--ink-subtle)] hover:text-[var(--ink)] cursor-pointer shrink-0"
-                aria-label={t("aria.toggleNavigationDrawer")}
-              >
-                <Menu className="h-4 w-4" />
-              </button>
-
-              <nav className="flex h-full min-w-0 flex-1 items-center overflow-hidden">
-                <div className="flex h-8 w-full max-w-full min-w-0 items-center gap-1 overflow-hidden rounded-md bg-[var(--canvas)]">
-                  {renderedTabs.map(({ tab, label, Icon }) => {
-                    const active = tab.id === activeTabId;
-                    return (
-                      <div
-                        key={tab.id}
-                        style={{ flex: "1 1 clamp(7rem, 22%, 15rem)" }}
-                        className={`group flex h-8 min-w-0 max-w-60 items-center gap-2 rounded-md border px-2.5 text-left text-[11px] transition cursor-pointer relative ${
-                          active
-                            ? "border-transparent bg-[var(--surface-3)] text-[var(--ink)] font-semibold shadow-sm"
-                            : "border-transparent bg-transparent text-[var(--ink-subtle)] hover:bg-[var(--surface-3)] hover:text-[var(--ink)] opacity-75 hover:opacity-100"
-                        }`}
-                        onClick={() => {
-                          setActiveTabId(tab.id);
-                          if (
-                            tab.kind === "session" ||
-                            tab.kind === "worktree-conflicts"
-                          ) {
-                            setActiveSessionId(tab.sessionId);
-                          }
-                          setIsMobileSidebarOpen(false);
-                        }}
-                      >
-                        <Icon
-                          className={`h-3.5 w-3.5 shrink-0 transition-colors ${active ? "text-[var(--primary)]" : "text-[var(--ink-tertiary)] group-hover:text-[var(--ink-subtle)]"}`}
-                        />
-                        <span className="truncate flex-1 pr-4">{label}</span>
-                        <button
-                          type="button"
-                          className={`absolute right-2 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded-sm hover:bg-[var(--surface-2)] hover:text-[var(--ink)] ${active ? "text-[var(--ink-subtle)] opacity-100" : "text-[var(--ink-tertiary)]"}`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleCloseTab(tab);
-                          }}
-                          aria-label={t("aria.closeTab")}
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </div>
-                    );
-                  })}
-                  <button
-                    type="button"
-                    onClick={handleAddSessionTab}
-                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-transparent text-[var(--ink-subtle)] transition hover:bg-[var(--surface-3)] hover:text-[var(--ink)]"
-                    aria-label={t("aria.openSessionTab")}
-                  >
-                    <Plus className="h-4 w-4" />
-                  </button>
-                </div>
-              </nav>
-            </div>
+          <AppTitleBar
+            title={renderedTabs.find((item) => item.tab.id === activeTabId)?.label ?? "OneBrain"}
+            isSession={!activeTab || activeTab.kind === "session"}
+            onBack={() => (activeTab ? handleCloseTab(activeTab) : void goHome())}
+            onOpenBrain={() => openPageTab("brain", getPageTabLabel("brain"))}
+            onOpenNavigation={() => setIsMobileSidebarOpen(true)}
+            trailing={<>
             {showWindowsWindowControls && tauriAppWindow && (
               <>
                 <div
@@ -2462,7 +2425,8 @@ function WorkspaceLayout() {
                 </div>
               </>
             )}
-          </header>
+            </>}
+          />
 
           <main
             ref={mainContentRef}

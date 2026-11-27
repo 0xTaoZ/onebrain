@@ -243,7 +243,8 @@ export type SidebarNavigationTarget =
   | 'github'
   | 'providers'
   | 'agents'
-  | 'build-stats';
+  | 'build-stats'
+  | 'brain';
 
 export interface SidebarProjectDisplay {
   id: string;

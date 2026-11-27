@@ -534,7 +534,7 @@ const ChatComposerComponent: React.FC<ChatComposerProps> = ({
 
             <CommandTooltip commandId="session.plan-mode.toggle">
               <div
-                className="flex items-center rounded-full border border-[var(--hairline)] bg-[var(--surface-2)] p-0.5 text-[12px] font-medium"
+                className="flex items-center rounded-lg bg-[var(--surface-3)] p-0.5 text-[12px] font-medium"
                 role="radiogroup"
                 aria-label={t('planMode')}
                 onClick={(event) => event.stopPropagation()}
@@ -554,7 +554,7 @@ const ChatComposerComponent: React.FC<ChatComposerProps> = ({
                         if (!active) toggleInputMode();
                       }}
                       title={mode === 'workflow' ? t('switchToPlanMode') : t('switchToChatMode')}
-                      className={`plan-mode-toggle flex h-7 items-center gap-1 rounded-full px-2.5 transition cursor-pointer ${
+                      className={`plan-mode-toggle flex h-7 items-center gap-1 rounded-md px-2.5 transition cursor-pointer ${
                         active
                           ? mode === 'workflow'
                             ? 'plan-mode-toggle-active bg-[var(--primary)] text-[var(--on-primary)]'

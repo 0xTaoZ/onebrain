@@ -78,3 +78,61 @@ body[data-mode="paper"] .ui-select { display: flex; flex: 1; flex-direction: col
 .agent-character-image { display: none; }
 body[data-mode="paper"] .agent-character-fallback { display: none; }
 body[data-mode="paper"] .agent-character-image { display: block; width: 100%; height: 100%; object-fit: contain; border-radius: 50%; }
+
+/* ---- Shared primitives (one design language for app chrome and new pages) ----
+   Controls: 32px high, 8px corners. Panels and cards: 12px corners.
+   Spacing on the 8pt grid. One accent (--primary). No gradients, no pills. */
+.ui-titlebar { display: flex; align-items: center; gap: 12px; height: 48px; padding: 0 8px 0 4px; flex-shrink: 0; user-select: none; }
+.ui-titlebar-text { display: flex; flex-direction: column; min-width: 0; flex: 1; line-height: 1.25; }
+.ui-titlebar-text strong { font-size: 15px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ui-titlebar-text small { font-size: 12px; color: var(--ink-subtle); }
+.ui-titlebar-people { display: flex; align-items: center; }
+.ui-titlebar-avatar { position: relative; display: grid; place-items: center; width: 28px; height: 28px; margin-left: -6px; border-radius: 50%; overflow: hidden; background: var(--surface-3); border: 2px solid var(--canvas); font-size: 12px; font-weight: 600; color: var(--ink); }
+.ui-titlebar-avatar:first-child { margin-left: 0; }
+.ui-titlebar-avatar img { width: 100%; height: 100%; object-fit: cover; image-rendering: pixelated; }
+.ui-titlebar-avatar[data-working] { border-color: var(--success); }
+.ui-titlebar-actions { display: flex; align-items: center; gap: 4px; }
+.ui-icon-btn { display: inline-grid; place-items: center; width: 32px; height: 32px; border: 0; border-radius: 8px; background: transparent; color: var(--ink-subtle); cursor: pointer; transition: background-color var(--ui-dur-enter) var(--ui-ease-out), color var(--ui-dur-enter) var(--ui-ease-out); }
+.ui-icon-btn:hover { background: var(--surface-3); color: var(--ink); }
+.ui-back-btn { display: inline-flex; align-items: center; gap: 4px; height: 32px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: var(--primary); font-size: 13px; font-weight: 500; cursor: pointer; }
+.ui-back-btn:hover { background: var(--primary-tint); }
+.ui-icon-btn:focus-visible, .ui-back-btn:focus-visible, .ui-btn:focus-visible, .ui-segment button:focus-visible { outline: 2px solid var(--primary-focus); outline-offset: 1px; }
+
+.ui-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border: 1px solid var(--hairline); border-radius: 8px; background: var(--surface-1); color: var(--ink); font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; transition: background-color var(--ui-dur-enter) var(--ui-ease-out); }
+.ui-btn:hover:not(:disabled) { background: var(--surface-3); }
+.ui-btn:disabled { opacity: 0.5; cursor: default; }
+.ui-btn-primary { border-color: var(--primary); background: var(--primary); color: var(--on-primary); }
+.ui-btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
+
+.ui-input { width: 100%; min-height: 32px; border: 1px solid var(--hairline); border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 13px; background: var(--surface-1); color: var(--ink); }
+.ui-input:focus { outline: 2px solid var(--primary-focus); outline-offset: 0; border-color: transparent; }
+.ui-select { width: auto; }
+.ui-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-subtle); }
+.ui-search { display: flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px; border: 1px solid var(--hairline); border-radius: 8px; background: var(--surface-1); color: var(--ink-subtle); flex: 1; min-width: 160px; max-width: 320px; }
+.ui-search input { border: 0; outline: 0; background: transparent; font: inherit; font-size: 13px; color: var(--ink); width: 100%; }
+
+.ui-segment { display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 2px; border-radius: 8px; background: var(--surface-3); }
+.ui-segment button { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--ink-subtle); font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; }
+.ui-segment button[aria-checked="true"], .ui-segment button[aria-selected="true"] { background: var(--surface-1); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+.ui-count { font-size: 11px; color: var(--ink-tertiary); font-variant-numeric: tabular-nums; }
+
+.ui-page { max-width: 880px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+.ui-page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+.ui-page-head h1 { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 22px; font-weight: 600; color: var(--ink); }
+.ui-page-head p { margin: 0; max-width: 620px; font-size: 13px; line-height: 1.6; color: var(--ink-subtle); }
+.ui-page-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ui-page-empty { padding: 48px 0; text-align: center; font-size: 13px; color: var(--ink-subtle); }
+.ui-panel { border: 1px solid var(--hairline); border-radius: 12px; background: var(--surface-1); }
+.ui-editor { display: grid; gap: 8px; padding: 16px; }
+.ui-row-end { display: flex; justify-content: flex-end; gap: 8px; }
+.ui-entry-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.ui-entry { display: grid; gap: 8px; padding: 16px; }
+.ui-entry-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-tertiary); }
+.ui-tag { padding: 2px 8px; border-radius: 6px; background: var(--primary-tint); color: var(--primary); font-weight: 600; }
+.ui-locked { display: inline-flex; align-items: center; gap: 4px; }
+.ui-entry-title { font-size: 15px; font-weight: 600; color: var(--ink); }
+.ui-entry-body { margin: 0; font-size: 13px; line-height: 1.6; color: var(--ink-muted); white-space: pre-wrap; }
+@media (prefers-reduced-motion: reduce) { .ui-icon-btn, .ui-btn { transition: none; } }
+
+.ui-titlebar-compact { height: 40px; }
+.paper-chat-actions-divider { width: 1px; height: 20px; margin: 0 4px; background: var(--hairline); }

@@ -136,9 +136,9 @@ body[data-mode="paper"] .paper-rail-person[data-status="i"] .agent-character-ima
 .ui-sheet-list .paper-person-avatar { width: 40px; height: 40px; }
 .ui-sheet-name { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .ui-sheet-name small { font-size: 12px; color: var(--ink-tertiary); }
-.ui-sheet-add, .ui-sheet-primary { padding: 6px 14px; border-radius: 999px; background: var(--primary); color: var(--on-primary); font-size: 13px; font-weight: 600; }
+.ui-sheet-add, .ui-sheet-primary { min-height: 32px; padding: 6px 14px; border-radius: 8px; background: var(--primary); color: var(--on-primary); font-size: 13px; font-weight: 600; }
 .ui-sheet-add:disabled { opacity: .4; }
-.ui-sheet-primary { width: 100%; padding: 10px; }
+.ui-sheet-primary { width: 100%; min-height: 40px; padding: 10px; }
 .ui-sheet-done { font-size: 12px; color: var(--ink-tertiary); }
 .ui-agent-profile label { display: grid; gap: 5px; margin-top: 14px; font-size: 13px; font-weight: 600; }
 .ui-agent-profile input, .ui-agent-profile textarea { width: 100%; border: 1px solid var(--hairline); border-radius: 8px; padding: 8px; background: var(--surface-2); color: var(--ink); font-weight: 400; }
@@ -175,18 +175,12 @@ body[data-mode="paper"] .paper-rail-person[data-status="i"] .agent-character-ima
 
 /* Schedules */
 .ui-schedule-form { display: grid; gap: 8px; margin-bottom: 12px; }
-.ui-input { width: 100%; border: 1px solid var(--hairline); border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 13px; background: var(--surface-1); color: var(--ink); }
-.ui-input:focus { outline: 2px solid var(--primary-focus); outline-offset: 0; }
 .ui-mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
-.ui-segment { display: flex; flex-wrap: wrap; gap: 4px; }
-.ui-segment button { border: 1px solid var(--hairline); border-radius: 999px; padding: 4px 12px; font-size: 13px; background: transparent; color: var(--ink-subtle); }
-.ui-segment button[aria-checked="true"] { background: var(--ink); color: var(--surface-1); border-color: var(--ink); }
 .ui-schedule-when { display: flex; gap: 8px; }
 .ui-schedule-when .ui-input { width: auto; flex: 1; }
 .ui-schedule-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .ui-sheet-list li[data-disabled] { opacity: 0.55; }
 .ui-sheet-done[data-danger] { color: #c4343a; }
 
-/* Shared brain */
-.ui-brain-title { font-size: 14px; color: var(--ink); }
-.ui-brain-body { font-size: 13px; color: var(--ink-subtle); white-space: pre-wrap; }
+
+.ui-handoff { margin-top: 4px; font-size: 12px; color: var(--ink-subtle); }

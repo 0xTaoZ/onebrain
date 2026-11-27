@@ -233,7 +233,7 @@ export function SchedulesSheet({ sessionId, onClose }: { sessionId: string; onCl
                 <input className="ui-input ui-mono" value={draft.cron} onChange={event => set({ cron: event.target.value })} placeholder="0 9 * * 1-5" />
               )}
             </div>
-            <label className="ui-audit-filter">
+            <label className="ui-check">
               <input type="checkbox" checked={draft.skipMissed} onChange={event => set({ skipMissed: event.target.checked })} />
               {zh ? '电脑没开时错过的就跳过（默认补跑一次）' : 'Skip runs missed while the app was closed (default: run once)'}
             </label>
@@ -245,8 +245,8 @@ export function SchedulesSheet({ sessionId, onClose }: { sessionId: string; onCl
                   : (zh ? '这个时间不会再运行' : 'This never runs again')}
             </p>
             <div className="ui-schedule-actions">
-              <button type="button" className="ui-sheet-done" onClick={() => setDraft(null)}>{zh ? '取消' : 'Cancel'}</button>
-              <button type="button" className="ui-sheet-primary" disabled={busy || !draft.title.trim() || !draft.prompt.trim() || preview.error !== null} onClick={() => void save()}>
+              <button type="button" className="ui-btn" onClick={() => setDraft(null)}>{zh ? '取消' : 'Cancel'}</button>
+              <button type="button" className="ui-btn ui-btn-primary" disabled={busy || !draft.title.trim() || !draft.prompt.trim() || preview.error !== null} onClick={() => void save()}>
                 {busy ? '…' : (zh ? '保存' : 'Save')}
               </button>
             </div>

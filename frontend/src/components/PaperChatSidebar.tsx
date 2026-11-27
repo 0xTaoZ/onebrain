@@ -4,9 +4,7 @@ import { ArrowLeft, FolderKanban, MessageCircle, Plus, Search, Settings, Users, 
 import { useWorkspace } from '@/context/WorkspaceContext';
 import { AgentCharacterAvatar } from './AgentCharacterAvatar';
 import { MemberActivityHeatmap } from './MemberActivityHeatmap';
-import { ActivityLogSheet } from './ActivityLogSheet';
-import { SchedulesSheet } from './SchedulesSheet';
-import { BrainSheet } from './BrainSheet';
+import { openAppPanel } from './AppPanels';
 import { openGroupMemberPicker } from '@/lib/teamNavigation';
 import { copyPlainText } from '@/lib/clipboard';
 import { projectDisplayName } from '@/lib/projectDisplay';
@@ -28,15 +26,14 @@ export function PaperChatSidebar({ activePage, workspaceNavigation, onSessionSel
   const panelId = useId();
   const [tab, setTab] = useState<'chats' | 'contacts'>('chats');
   const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null);
-  const [activityOpen, setActivityOpen] = useState(false);
-  const [schedulesOpen, setSchedulesOpen] = useState(false);
-  const [brainOpen, setBrainOpen] = useState(false);
+
   const [showWorkspace, setShowWorkspace] = useState(false);
   const [editingMemberId, setEditingMemberId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const visibleMembers = membersAsync.loading || membersAsync.error ? [] : members;
   const selectedMember = visibleMembers.find(member => member.id === selectedMemberId);
-  const navigationVisible = showWorkspace || activePage !== 'workspace';
+  // Pages such as settings or the shared brain keep the chat list beside them.
+  const navigationVisible = showWorkspace;
   const status = (member: Member) => member.status === 'run' ? (zh ? '正在工作' : 'Working') : member.status === 'on' ? (zh ? '空闲' : 'Idle') : (zh ? '不可用' : 'Unavailable');
   const showChats = () => { setShowWorkspace(false); setSelectedMemberId(null); setTab('chats'); onNavigate('workspace'); };
   const showMember = (id: string) => { setSelectedMemberId(id); setShowWorkspace(false); setTab('contacts'); onNavigate('workspace'); };
@@ -122,16 +119,13 @@ export function PaperChatSidebar({ activePage, workspaceNavigation, onSessionSel
                 {selectedMember?.id === member.id && <div className="paper-contact-detail"><span className="paper-status" data-status={member.status}><i />{status(member)}</span><p>{member.roleDetail}</p><MemberActivityHeatmap sessionAgentId={member.id} label={total => (zh ? `近半年运行 ${total} 次` : `${total} runs in the last 6 months`)} /><button type="button" onClick={() => { void copyPlainText(`@${member.name.replace(/^@/, '')} `).then(ok => showToast(ok ? (zh ? '已复制成员称呼，粘贴到聊天输入框即可。' : 'Mention copied. Paste it into the composer.') : (zh ? '复制失败，请在输入框中输入 @ 选择成员。' : 'Could not copy. Type @ in the composer.'))); }}>{zh ? '复制 @称呼' : 'Copy @mention'}</button></div>}
               </div>)}
               {!membersAsync.loading && !membersAsync.error && !visibleMembers.length && <p className="paper-list-notice">{zh ? '群聊还没有成员，添加后即可分派任务。' : 'Add a member to this group to assign tasks.'}</p>}
-              {activeSessionId && <button type="button" className="paper-manage-members" onClick={() => setBrainOpen(true)}>{zh ? '共享大脑' : 'Shared brain'}</button>}
-              {activeSessionId && <button type="button" className="paper-manage-members" onClick={() => setSchedulesOpen(true)}>{zh ? '定时任务' : 'Schedules'}</button>}
-              {activeSessionId && <button type="button" className="paper-manage-members" onClick={() => setActivityOpen(true)}>{zh ? '活动记录' : 'Activity log'}</button>}
+              {activeSessionId && <button type="button" className="paper-manage-members" onClick={() => onNavigate('brain')}>{zh ? '共享大脑' : 'Shared brain'}</button>}
+              {activeSessionId && <button type="button" className="paper-manage-members" onClick={() => openAppPanel('schedules')}>{zh ? '定时任务' : 'Schedules'}</button>}
+              {activeSessionId && <button type="button" className="paper-manage-members" onClick={() => openAppPanel('activity')}>{zh ? '活动记录' : 'Activity log'}</button>}
             </>}
           </div>
         </>}
       </section>
-      {brainOpen && activeSessionId && <BrainSheet sessionId={activeSessionId} onClose={() => setBrainOpen(false)} />}
-      {schedulesOpen && activeSessionId && <SchedulesSheet sessionId={activeSessionId} onClose={() => setSchedulesOpen(false)} />}
-      {activityOpen && activeSessionId && <ActivityLogSheet sessionId={activeSessionId} onClose={() => setActivityOpen(false)} />}
     </div>
   );
 }
