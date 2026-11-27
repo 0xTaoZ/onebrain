@@ -175,6 +175,7 @@ impl Deployment for LocalDeployment {
         let chat_runner =
             ChatRunner::with_analytics(db.clone(), analytics.clone(), analytics_enabled.clone());
         chat_runner.start_runtime_outbox_publisher();
+        services::services::scheduler::Scheduler::start(db.pool.clone(), chat_runner.clone());
         let recovered_orphaned_agents = chat_runner
             .recover_orphaned_session_agents()
             .await

@@ -154,6 +154,9 @@ import type {
   ChatRunFilesResponse,
   UndoRunResult,
   ChatAuditEvent,
+  ChatSchedule,
+  ChatScheduleInput,
+  ChatSchedulePreview,
   ChatExecutorApprovalRequest,
   InboxItem,
   InboxItemResponse,
@@ -1530,6 +1533,41 @@ export const chatRunsApi = {
     );
     return handleApiResponse<UndoRunResult>(r);
   },
+};
+
+export const chatSchedulesApi = {
+  list: async (sessionId: string): Promise<ChatSchedule[]> =>
+    handleApiResponse<ChatSchedule[]>(
+      await makeRequest(`/api/chat/sessions/${encodeURIComponent(sessionId)}/schedules`),
+    ),
+  create: async (sessionId: string, input: ChatScheduleInput): Promise<ChatSchedule> =>
+    handleApiResponse<ChatSchedule>(
+      await makeRequest(`/api/chat/sessions/${encodeURIComponent(sessionId)}/schedules`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    ),
+  update: async (scheduleId: string, input: ChatScheduleInput): Promise<ChatSchedule> =>
+    handleApiResponse<ChatSchedule>(
+      await makeRequest(`/api/chat/schedules/${encodeURIComponent(scheduleId)}`, {
+        method: "PUT",
+        body: JSON.stringify(input),
+      }),
+    ),
+  remove: async (scheduleId: string): Promise<void> => {
+    await handleApiResponse<null>(
+      await makeRequest(`/api/chat/schedules/${encodeURIComponent(scheduleId)}`, { method: "DELETE" }),
+    );
+  },
+  runNow: async (scheduleId: string): Promise<void> => {
+    await handleApiResponse<null>(
+      await makeRequest(`/api/chat/schedules/${encodeURIComponent(scheduleId)}/run`, { method: "POST" }),
+    );
+  },
+  preview: async (input: ChatScheduleInput): Promise<ChatSchedulePreview> =>
+    handleApiResponse<ChatSchedulePreview>(
+      await makeRequest(`/api/chat/schedules/preview`, { method: "POST", body: JSON.stringify(input) }),
+    ),
 };
 
 export const chatAuditApi = {

@@ -109,7 +109,7 @@ fn segments(line: &str) -> Vec<Segment> {
     let mut piped_in = false;
     let mut quote: Option<char> = None;
     let mut chars = line.chars().peekable();
-    let mut push = |text: &mut String, piped: bool, out: &mut Vec<Segment>| {
+    let push = |text: &mut String, piped: bool, out: &mut Vec<Segment>| {
         let (words, redirects) = split_redirects(text);
         if !words.is_empty() || !redirects.is_empty() {
             out.push(Segment {

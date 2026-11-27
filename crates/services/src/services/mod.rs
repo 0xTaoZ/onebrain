@@ -46,6 +46,7 @@ pub mod queued_message;
 pub mod remote_client;
 pub mod repo;
 pub mod repo_integration;
+pub mod scheduler;
 pub mod session_worktree;
 pub mod skill_registry;
 pub mod workflow;

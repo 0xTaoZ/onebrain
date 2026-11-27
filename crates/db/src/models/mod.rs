@@ -13,6 +13,7 @@ pub mod chat_permission;
 pub mod chat_run;
 pub mod chat_run_checkpoint;
 pub mod chat_runtime_outbox;
+pub mod chat_schedule;
 pub mod chat_session;
 pub mod chat_session_agent;
 pub mod chat_session_path_index;

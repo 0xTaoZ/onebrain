@@ -841,6 +841,22 @@ export type ChatRunActivityResponse = { run_id: string, lines: Array<ChatRunActi
 
 export type UndoRunResult = { restored: Array<string>, conflicts: Array<string>, };
 
+export type ChatSchedulePreview = {
+/**
+ * Upcoming run times (RFC 3339, UTC).
+ */
+times: Array<string>, };
+
+export type ChatSchedule = { id: string, session_id: string, title: string, prompt: string, kind: ChatScheduleKind, cron_expr: string | null, every_seconds: number | null, run_at: string | null, misfire: ChatScheduleMisfire, enabled: boolean, next_run_at: string | null, last_run_at: string | null, last_status: ChatScheduleRunStatus | null, last_message_id: string | null, created_at: string, };
+
+export type ChatScheduleInput = { title: string, prompt: string, kind: ChatScheduleKind, cron_expr: string | null, every_seconds: number | null, run_at: string | null, misfire: ChatScheduleMisfire | null, enabled: boolean | null, };
+
+export enum ChatScheduleKind { cron = "cron", every = "every", once = "once" }
+
+export enum ChatScheduleMisfire { skip = "skip", run_once = "run_once" }
+
+export enum ChatScheduleRunStatus { sent = "sent", skipped_busy = "skipped_busy", skipped_missed = "skipped_missed", failed = "failed" }
+
 export type ChatAuditEvent = { id: string, session_id: string, session_agent_id: string | null, run_id: string | null, kind: ChatAuditKind, dangerous: boolean, summary: string, detail: JsonValue, created_at: string, };
 
 export enum ChatAuditKind { approval_requested = "approval_requested", approval_resolved = "approval_resolved", run_undone = "run_undone" }

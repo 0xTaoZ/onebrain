@@ -5,6 +5,7 @@ pub mod presets;
 pub mod queues;
 pub mod runs;
 pub mod runtime;
+pub mod schedules;
 pub mod search;
 pub mod sessions;
 pub mod skills;
@@ -40,6 +41,10 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
             axum::routing::post(executor_approvals::resolve),
         )
         .route("/audit", get(runs::get_session_audit_log))
+        .route(
+            "/schedules",
+            get(schedules::list_schedules).post(schedules::create_schedule),
+        )
         .route("/workspaces", get(sessions::get_session_workspaces))
         .route(
             "/workspaces/changes",
@@ -295,6 +300,19 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
                 .route("/runs/{run_id}/activity", get(runs::get_run_activity))
                 .route("/runs/{run_id}/diff", get(runs::get_run_diff))
                 .route("/runs/{run_id}/files", get(runs::get_run_files))
+                .route(
+                    "/schedules/preview",
+                    axum::routing::post(schedules::preview_schedule),
+                )
+                .route(
+                    "/schedules/{schedule_id}",
+                    axum::routing::put(schedules::update_schedule)
+                        .delete(schedules::delete_schedule),
+                )
+                .route(
+                    "/schedules/{schedule_id}/run",
+                    axum::routing::post(schedules::run_schedule_now),
+                )
                 .route(
                     "/runs/{run_id}/checkpoint/restore",
                     axum::routing::post(runs::restore_run_checkpoint),
