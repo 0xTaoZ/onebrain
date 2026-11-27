@@ -1,4 +1,5 @@
 pub mod executor_approvals;
+pub mod risk;
 
 use std::{
     collections::{HashMap, HashSet},

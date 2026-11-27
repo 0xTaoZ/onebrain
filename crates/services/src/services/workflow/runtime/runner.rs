@@ -732,6 +732,7 @@ async fn run_workflow_agent_prompt_inner(
             runner: effective_execution.runner_type.to_string(),
             workflow_execution_id: run_record.execution_id,
             workflow_step_id: run_record.step_id,
+            workspace_root: Some(workspace_path.clone()),
         },
     ));
 
