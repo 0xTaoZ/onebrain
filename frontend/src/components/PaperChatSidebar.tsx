@@ -5,6 +5,10 @@ import { useWorkspace } from '@/context/WorkspaceContext';
 import { AgentCharacterAvatar } from './AgentCharacterAvatar';
 import { MemberActivityHeatmap } from './MemberActivityHeatmap';
 import { openAppPanel } from './AppPanels';
+
+/** One line of plain text for a list preview: no Markdown markers or line breaks. */
+const plainPreview = (text: string) =>
+  text.replace(/```[\s\S]*?```/g, ' ').replace(/[*_`#>~]+/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\s+/g, ' ').trim();
 import { QuotaBars, useRuntimeQuota } from './QuotaBars';
 import { openGroupMemberPicker } from '@/lib/teamNavigation';
 import { copyPlainText } from '@/lib/clipboard';
@@ -104,7 +108,7 @@ export function PaperChatSidebar({ activePage, workspaceNavigation, onSessionSel
               {sessions.filter(session => session.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())).map(session => {
                 const active = session.id === activeSessionId;
                 const pending = session.hasPendingApproval || session.hasPendingWorkflowInput || session.hasPendingWorkflowReview;
-                const preview = active && latestMessage ? `${latestMessage.isUser ? (zh ? '你' : 'You') : latestMessage.sender.replace(/^@/, '')}: ${latestMessage.text}` : session.hasRunningAgent || session.hasRunningWorkflow ? (zh ? '成员正在工作' : 'Agents are working') : pending ? (zh ? '需要你处理' : 'Needs your attention') : (zh ? '打开会话，继续协作' : 'Open conversation');
+                const preview = active && latestMessage ? `${latestMessage.isUser ? (zh ? '你' : 'You') : latestMessage.sender.replace(/^@/, '')}: ${plainPreview(latestMessage.text)}` : session.hasRunningAgent || session.hasRunningWorkflow ? (zh ? '成员正在工作' : 'Agents are working') : pending ? (zh ? '需要你处理' : 'Needs your attention') : (zh ? '打开会话，继续协作' : 'Open conversation');
                 return <button type="button" key={session.id} className="paper-conversation-row" aria-current={active ? 'page' : undefined} onClick={() => onSessionSelect(session.id)}>
                   <span className={`paper-group-avatar ${active && visibleMembers.length ? 'paper-group-avatar-grid' : ''}`}>
                     {active && visibleMembers.length ? visibleMembers.slice(0, 3).map(member => <PaperMemberAvatar key={member.id} member={member} />) : <Users size={25} />}
