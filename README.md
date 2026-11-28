@@ -109,6 +109,30 @@ A reviewer joining at 100 turns starts with 1,775 input tokens versus 11,528 whe
 
 [Method](docs/benchmarks/context-tokens.md)
 
+## A closer look
+
+<p align="center">
+  <a href="docs/assets/demo/hd/onebrain-work-hd.mp4"><img src="docs/assets/demo/onebrain-work.gif" width="920" alt="Work mode: the lead drafts a plan, you approve it, steps run and another vendor reviews them"></a><br>
+  <b>Work mode</b> · <sub>Describe the whole job. The lead plans who does what, Codex reviews, and you give the final OK.</sub>
+</p>
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/assets/demo/hd/onebrain-members-hd.mp4"><img src="docs/assets/demo/onebrain-members.gif" alt="Members panel with each agent's model, Codex quota and a six-month activity heatmap"></a><br>
+      <b>Who is busy, on what model</b><br>
+      <sub>Each member shows its model, the Codex quota left, and how often it ran in the last six months.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/assets/demo/hd/onebrain-brain-hd.mp4"><img src="docs/assets/demo/onebrain-brain.gif" alt="Team brain page: decisions, who wrote them, older versions and full-text search"></a><br>
+      <b>The team brain</b><br>
+      <sub>Every change shows which agent made it. Old versions restore in one click.</sub>
+    </td>
+  </tr>
+</table>
+
+<sub>HD video: <a href="docs/assets/demo/hd/onebrain-work-hd.mp4">Work mode</a> · <a href="docs/assets/demo/hd/onebrain-members-hd.mp4">Who is busy, on what model</a> · <a href="docs/assets/demo/hd/onebrain-brain-hd.mp4">The team brain</a></sub>
+
 ## The team brain
 
 Vendor memories stay with their vendor: what Claude learns, Codex never sees. OneBrain keeps one memory for the whole team in `~/OneBrain/brain`, a folder that follows the `AGENTS.md` convention. It gets better the more you use it: every decision an agent writes down is there for the next agent, whichever vendor runs it.

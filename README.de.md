@@ -109,6 +109,30 @@ Ein Reviewer, der nach 100 Runden dazukommt, startet mit 1.775 Eingabe-Tokens. B
 
 [Methode](docs/benchmarks/context-tokens.md)
 
+## Genauer hingeschaut
+
+<p align="center">
+  <a href="docs/assets/demo/hd/onebrain-work-hd.mp4"><img src="docs/assets/demo/onebrain-work.gif" width="920" alt="Arbeitsmodus: Der Lead entwirft einen Plan, du gibst ihn frei, die Schritte laufen und ein anderer Anbieter prüft sie"></a><br>
+  <b>Arbeitsmodus</b> · <sub>Beschreib die ganze Aufgabe. Der Lead verteilt die Schritte, Codex prüft, und du nimmst das Ergebnis ab.</sub>
+</p>
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/assets/demo/hd/onebrain-members-hd.mp4"><img src="docs/assets/demo/onebrain-members.gif" alt="Mitgliederliste mit Modell, verbleibendem Codex-Kontingent und Aktivität der letzten sechs Monate"></a><br>
+      <b>Wer arbeitet, mit welchem Modell</b><br>
+      <sub>Jedes Mitglied zeigt sein Modell, das restliche Codex-Kontingent und wie oft es in sechs Monaten lief.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/assets/demo/hd/onebrain-brain-hd.mp4"><img src="docs/assets/demo/onebrain-brain.gif" alt="Team-Gehirn: Entscheidungen, wer sie geschrieben hat, alte Versionen und Volltextsuche"></a><br>
+      <b>Das Team-Gehirn</b><br>
+      <sub>Jede Änderung zeigt, welcher Agent sie gemacht hat. Alte Versionen lassen sich mit einem Klick zurückholen.</sub>
+    </td>
+  </tr>
+</table>
+
+<sub>Video in HD: <a href="docs/assets/demo/hd/onebrain-work-hd.mp4">Arbeitsmodus</a> · <a href="docs/assets/demo/hd/onebrain-members-hd.mp4">Wer arbeitet, mit welchem Modell</a> · <a href="docs/assets/demo/hd/onebrain-brain-hd.mp4">Das Team-Gehirn</a></sub>
+
 ## Das Team-Gehirn
 
 Was ein Anbieter sich merkt, bleibt bei diesem Anbieter: Was Claude lernt, sieht Codex nie. OneBrain führt ein Gedächtnis für das ganze Team in `~/OneBrain/brain`, einem Ordner nach der `AGENTS.md`-Konvention. Es wird mit jeder Nutzung besser: Was ein Agent festhält, steht dem nächsten zur Verfügung, egal von welchem Anbieter er kommt.

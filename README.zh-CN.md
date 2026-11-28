@@ -109,6 +109,30 @@ OneBrain 直接用你已经装好的 CLI 和你自己的订阅，不碰你的密
 
 [方法](docs/benchmarks/context-tokens.md)
 
+## 三个功能，各看十几秒
+
+<p align="center">
+  <a href="docs/assets/demo/hd/onebrain-work-zh-hd.mp4"><img src="docs/assets/demo/onebrain-work-zh.gif" width="920" alt="工作模式：负责人先出计划，你点头后按步骤执行，再由另一家的 Agent 审查"></a><br>
+  <b>工作模式</b> · <sub>把整件事交代清楚。负责人分好工，Codex 来审，最后由你验收。</sub>
+</p>
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/assets/demo/hd/onebrain-members-zh-hd.mp4"><img src="docs/assets/demo/onebrain-members-zh.gif" alt="成员面板：每个 Agent 的模型、Codex 剩余额度和近半年的运行热力图"></a><br>
+      <b>谁在忙、用的什么模型</b><br>
+      <sub>每个成员的模型、Codex 还剩多少额度、近半年跑了多少次，一眼看清。</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/assets/demo/hd/onebrain-brain-zh-hd.mp4"><img src="docs/assets/demo/onebrain-brain-zh.gif" alt="共享大脑页面：决定、谁写的、旧版本和全文搜索"></a><br>
+      <b>共享大脑</b><br>
+      <sub>每处改动都写明是哪个 Agent 改的，旧版本一键恢复。</sub>
+    </td>
+  </tr>
+</table>
+
+<sub>高清视频: <a href="docs/assets/demo/hd/onebrain-work-zh-hd.mp4">工作模式</a> · <a href="docs/assets/demo/hd/onebrain-members-zh-hd.mp4">谁在忙、用的什么模型</a> · <a href="docs/assets/demo/hd/onebrain-brain-zh-hd.mp4">共享大脑</a></sub>
+
 ## 共享大脑
 
 各家厂商的记忆都只留在自己那里：Claude 学到的，Codex 看不到。OneBrain 给整个团队一份记忆，放在 `~/OneBrain/brain`，按 `AGENTS.md` 的约定组织。它越用越好用：任何一个 Agent 记下的决定，下一个 Agent 都能用上，不管它是哪家厂商的。
